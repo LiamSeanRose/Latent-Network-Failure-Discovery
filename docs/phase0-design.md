@@ -143,24 +143,39 @@ reachable" as SYMBOLIC. Prefer the first or second.
 
 ## Event sequence
 
+`run.sh baseline` deploys and settles first; `run.sh trigger` then runs, with t=0
+at its invocation:
+
 ```
-t=0     deploy, wait for VRRP convergence
-t=60    baseline probe: client1 → upstream, confirm loss-free
-t=90    flap uplink A: down 10 s, up 20 s
-t=120   flap uplink A: down 10 s, up 20 s
-t=150   flap uplink A: down 10 s, up 20 s
-t=180   observe 120 s
-t=300   collect
+t=0      flap 1: uplink A down 10 s, up 20 s
+t=30     flap 2: down 10 s, up 20 s
+t=60     flap 3: down 10 s, up 20 s
+t=90     observation window opens
+t=210    observation window closes, collect
 ```
+
+**Timing arithmetic that the criteria depend on.** Group 24's preempt delay is
+90 s and restarts on each uplink recovery, so it is held on agg-b until t≈180 —
+90 s after the last recovery at t=90. Group 34 never moves at all. Group 14
+oscillates throughout.
+
+So the groups are split across both routers from roughly t=10 to t=180, and
+**re-converge before the window closes.** Any check of final placement therefore
+sees a healthy, co-located network. That is not a failed run; it is the failure
+being transient, which is the entire point. Assert against the sampled timeline,
+never against the end state.
 
 ## Observables and pass/fail
 
-Hard conditions, per §2.5 — not judgment.
+Hard conditions, per §2.5 — not judgment. All are evaluated over the sampled
+timeline in `runs/<stamp>/vrrp.log`, not over the final state.
 
-- **Primary:** VRRP group 14 master transitions ≥ 4 within the 120 s observation
-  window.
-- **Secondary:** the three groups are not co-located at t=300.
-- **Impact:** client1 loss window exceeds the single-failover baseline.
+- **Primary:** group 14 master transitions ≥ 4 within the window. Six are
+  expected: one each way per flap.
+- **Secondary:** the three groups are non-co-located for a sustained period —
+  ≥ 60 s of contiguous samples in which group 24's master differs from group 34's.
+- **Impact:** client1 loss exceeds the single-failover baseline established by
+  `run.sh baseline`.
 
 Confirmation requires the observable in ≥ 2 of 3 runs **and** absent in the
 no-trigger control. Controls to run, all three from §2.5:
@@ -174,6 +189,12 @@ Control 2 has a prerequisite that must be measured first: **container scheduling
 jitter**. If host jitter is comparable to the timer margins, the ±20% control is
 measuring the machine. Measure observed VRRP advertisement intervals against
 configured before trusting any of this.
+
+Note that control 2 interacts with the arithmetic above. Perturbing the flap
+interval by ±20% moves it between 24 s and 36 s, which stays well inside group
+24's 90 s preempt delay, so the divergence should survive the perturbation. A
+result that vanishes under ±20% would mean the mechanism is not what this document
+claims.
 
 ## Batfish control
 

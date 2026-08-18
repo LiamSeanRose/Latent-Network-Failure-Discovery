@@ -63,6 +63,13 @@ yours does.
 Confirmation requires the observable in **≥2 of 3 `trigger` runs and absent in
 `control`** (§2.5). One green run is not a result.
 
+**Read the timeline, not the end state.** Group 24 is held on agg-b by its 90 s
+preempt delay and returns roughly 90 s after the last flap, so the groups
+re-converge before the window closes and the final `show vrrp` looks healthy. That
+is the failure being transient, not the run failing. The evidence is in
+`runs/<stamp>/vrrp.log`: group 14 transitioning ≥4 times, and ≥60 s of contiguous
+samples where group 24 and group 34 have different masters.
+
 Then the other half:
 
 ```sh
