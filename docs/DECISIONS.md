@@ -23,8 +23,18 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
 
 Carried over, owner-only, not blocking any phase:
 
-- [ ] Delete the old default branch on GitHub (Settings → default to `main`, then delete
-      `claude/cassandra-project-init-b18ddl`). It still holds pre-scrub history.
+- [ ] Delete `claude/cassandra-project-init-b18ddl` on GitHub (Settings → General → default
+      branch to `main` first, since GitHub will not delete a default branch). It still holds
+      pre-scrub history.
+- [ ] Delete `tmp-delete-probe` — a throwaway ref created while diagnosing why deletion
+      fails. It points at `main`, so it is clutter rather than exposure.
+
+**Why these cannot be automated from a session:** the session's git credentials permit
+creating and updating refs but not deleting them. Verified by experiment rather than inferred:
+pushing a throwaway non-default branch succeeded and deleting that same branch returned
+HTTP 403, which rules out the default-branch explanation. The GitHub tool surface available
+here has `create_branch` and `list_branches` but no delete-branch or repository-settings
+operation, so there is no second route.
 
 ---
 
