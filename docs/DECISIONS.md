@@ -15,9 +15,11 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
 - [x] **Phase 1 — Fact Pack builders.** Done 2026-08-18. `cassandra facts <dir>` renders
       the corpus with zero unparsed lines; 17 tests cover interfaces, addressing, trunk VLANs,
       FHRP membership, tracked-object resolution, timer scoping, and digest sensitivity.
-- [ ] **Phase 2 — FACTS tier.** `cassandra check <dir>` — assertion rules over the fact
-      pack, ranked findings. **Current phase.**
+- [x] **Phase 2 — FACTS tier.** Done 2026-08-18. Nine rules, `cassandra check <dir>`,
+      ranked output, `--explain`, exit status as verdict. Silent on the clean corpus; catches
+      planted defects in a broken copy.
 - [ ] **Phase 3 — TIMING tier.** Rediscovers the site14 divergence from configs alone.
+      **Current phase.**
 - [ ] **Phase 4 — CI emulation validation.** Disagreement with the model fails the build.
 - [ ] **Phase 5 — The app.**
 

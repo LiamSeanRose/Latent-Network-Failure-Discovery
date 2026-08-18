@@ -12,6 +12,8 @@ from pathlib import Path
 
 from cassandra.factpack.builders.eos import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
+from cassandra.facts import rules
+from cassandra.report import render
 
 
 def render_facts(pack: StaticFactPack, unparsed: dict[str, tuple[str, ...]]) -> str:
@@ -82,18 +84,46 @@ def main(argv: list[str] | None = None) -> int:
     facts = sub.add_parser("facts", help="materialise a fact pack from configs")
     facts.add_argument("config_dir", type=Path)
 
+    check = sub.add_parser("check", help="report latent failure modes in configs")
+    check.add_argument("config_dir", type=Path)
+    check.add_argument(
+        "--explain",
+        action="store_true",
+        help="show evidence, suggested fixes and rule ids",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "facts":
-        if not args.config_dir.is_dir():
-            print(f"not a directory: {args.config_dir}", file=sys.stderr)
+        loaded = _load(args.config_dir)
+        if loaded is None:
             return 2
-        pack, unparsed = build_fact_pack(args.config_dir)
-        if not pack.devices:
-            print(f"no .cfg files in {args.config_dir}", file=sys.stderr)
-            return 2
+        pack, unparsed = loaded
         print(render_facts(pack, unparsed))
         return 0
+
+    if args.command == "check":
+        loaded = _load(args.config_dir)
+        if loaded is None:
+            return 2
+        pack, _ = loaded
+        findings = rules.evaluate(pack)
+        print(render(findings, explain=args.explain))
+        # Exit status is the verdict: non-zero when something needs attention, so
+        # this is usable in a pre-commit hook or CI without parsing the output.
+        return 1 if findings else 0
+
     return 2
+
+
+def _load(config_dir: Path) -> tuple[StaticFactPack, dict[str, tuple[str, ...]]] | None:
+    if not config_dir.is_dir():
+        print(f"not a directory: {config_dir}", file=sys.stderr)
+        return None
+    pack, unparsed = build_fact_pack(config_dir)
+    if not pack.devices:
+        print(f"no .cfg files in {config_dir}", file=sys.stderr)
+        return None
+    return pack, unparsed
 
 
 if __name__ == "__main__":
