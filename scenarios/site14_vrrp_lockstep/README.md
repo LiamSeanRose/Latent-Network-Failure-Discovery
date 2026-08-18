@@ -68,6 +68,18 @@ independent rather than each inheriting the previous run's VRRP state.
 Confirmation requires the observable in **≥2 of 3 `trigger` runs and absent in
 `control`** (§2.5). One green run is not a result.
 
+Score each run:
+
+```sh
+python score.py runs/<stamp>-<mode>
+```
+
+Exit status is the verdict — 0 if the run matches what its mode should produce,
+1 if not — so it works as a hard condition (§2.5 wants exit codes, not judgment).
+A `control` run's criterion is **inverted, not skipped**: a control that shows the
+observable means the trigger was not what caused it, and the run scores as a
+failure.
+
 **Read the timeline, not the end state.** Group 24 is held on agg-b by its 90 s
 preempt delay and returns roughly 90 s after the last flap, so the groups
 re-converge before the window closes and the final `show vrrp` looks healthy. That
