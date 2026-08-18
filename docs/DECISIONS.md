@@ -18,9 +18,10 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
 - [x] **Phase 2 — FACTS tier.** Done 2026-08-18. Nine rules, `cassandra check <dir>`,
       ranked output, `--explain`, exit status as verdict. Silent on the clean corpus; catches
       planted defects in a broken copy.
-- [ ] **Phase 3 — TIMING tier.** Rediscovers the site14 divergence from configs alone.
-      **Current phase.**
+- [x] **Phase 3 — TIMING tier.** Done 2026-08-18. Rediscovered the site14 divergence from
+      the configs alone, never having been told the scenario exists.
 - [ ] **Phase 4 — CI emulation validation.** Disagreement with the model fails the build.
+      **Current phase.**
 - [ ] **Phase 5 — The app.**
 
 Carried over, owner-only, not blocking any phase:
@@ -37,6 +38,22 @@ pushing a throwaway non-default branch succeeded and deleting that same branch r
 HTTP 403, which rules out the default-branch explanation. The GitHub tool surface available
 here has `create_branch` and `list_branches` but no delete-branch or repository-settings
 operation, so there is no second route.
+
+---
+
+## 2026-08-18 — Divergence is only a finding when it outlasts the event
+
+**Context:** with one group tracking an uplink and another not, the two split the moment the
+link drops. That is a real divergence, and reporting it would be wrong.
+
+**Chosen:** require a sustained split (30s) rather than any split. A brief divergence *during*
+an outage is expected behaviour — the network is mid-event, and the groups reconverge as soon
+as the link returns. The defect is a split that persists long after recovery, which is what a
+preempt-delay asymmetry produces. Reporting the transient kind would bury the persistent kind
+in noise.
+
+**Reversal:** one constant. The risk is a real short-lived split going unreported; the trade is
+deliberate and the threshold is the place to argue with it.
 
 ---
 

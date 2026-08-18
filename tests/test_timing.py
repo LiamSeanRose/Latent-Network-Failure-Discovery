@@ -1,0 +1,177 @@
+"""The TIMING tier.
+
+The headline test is `test_rediscovers_the_site14_divergence`: Phase 3's "done
+when" is that the model finds the failure from the configs alone, having never
+been told the scenario exists.
+
+Equally important is the other direction. A model that reports divergence for
+every network is worthless, so several tests here assert silence on
+configurations that are symmetric, untracked, or otherwise fine.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Final
+
+from cassandra.factpack.builders.eos import build_fact_pack
+from cassandra.factpack.schema import StaticFactPack
+from cassandra.findings import Severity, Tier
+from cassandra.timing.model import Event, EventKind, simulate
+from cassandra.timing.sequences import analyse
+
+CORPUS: Final = (
+    Path(__file__).resolve().parents[1]
+    / "scenarios"
+    / "site14_vrrp_lockstep"
+    / "configs"
+)
+
+TEMPLATE: Final = """hostname {name}
+vlan 14,24
+interface Ethernet1
+   no switchport
+   ip address 10.0.0.{p2p}/31
+interface Ethernet2
+   switchport mode trunk
+   switchport trunk allowed vlan 14,24
+interface Vlan14
+   ip address 10.14.0.{host}/24
+   vrrp 14 ipv4 10.14.0.1
+   vrrp 14 priority-level {priority}
+   vrrp 14 preempt
+{g14_extra}interface Vlan24
+   ip address 10.24.0.{host}/24
+   vrrp 24 ipv4 10.24.0.1
+   vrrp 24 priority-level {priority}
+   vrrp 24 preempt
+{g24_extra}track UPLINK interface Ethernet1 line-protocol
+"""
+
+TRACK14: Final = "   vrrp 14 tracked-object UPLINK decrement 40\n"
+TRACK24: Final = "   vrrp 24 tracked-object UPLINK decrement 40\n"
+DELAY24: Final = "   vrrp 24 preempt delay minimum 90\n"
+
+
+def build(tmp_path: Path, *, g14: str = "", g24: str = "") -> StaticFactPack:
+    (tmp_path / "agg-a.cfg").write_text(
+        TEMPLATE.format(
+            name="agg-a", p2p=1, host=2, priority=110, g14_extra=g14, g24_extra=g24
+        )
+    )
+    (tmp_path / "agg-b.cfg").write_text(
+        TEMPLATE.format(
+            name="agg-b", p2p=3, host=3, priority=100, g14_extra="", g24_extra=""
+        )
+    )
+    pack, _ = build_fact_pack(tmp_path)
+    return pack
+
+
+def test_rediscovers_the_site14_divergence() -> None:
+    """Phase 3 acceptance: found from the configs, not from the scenario docs."""
+    pack, _ = build_fact_pack(CORPUS)
+    findings = analyse(pack)
+    divergences = [f for f in findings if f.rule == "fhrp-divergence"]
+    assert divergences, "the timing tier found nothing in the corpus"
+
+    pairs = {f.title for f in divergences}
+    assert any("VRRP 14" in title and "VRRP 24" in title for title in pairs), pairs
+
+    worst = max(divergences, key=lambda f: f.severity == Severity.HIGH)
+    assert worst.tier is Tier.TIMING
+    assert worst.trigger and "flap" in worst.trigger
+    assert worst.evidence, "a timing finding must carry the sequence that produced it"
+
+
+def test_symmetric_groups_produce_no_divergence(tmp_path: Path) -> None:
+    """Both groups track the same interface with the same delay, so they move
+    together. A model that flags this is crying wolf."""
+    pack = build(tmp_path, g14=TRACK14, g24=TRACK24)
+    assert [f for f in analyse(pack) if f.rule == "fhrp-divergence"] == []
+
+
+def test_asymmetric_preempt_delay_is_what_causes_divergence(tmp_path: Path) -> None:
+    """Same tracking on both groups; only the preempt delay differs. Isolating the
+    single variable proves the model responds to it and not to something else."""
+    pack = build(tmp_path, g14=TRACK14, g24=TRACK24 + DELAY24)
+    divergences = [f for f in analyse(pack) if f.rule == "fhrp-divergence"]
+    assert divergences
+    assert "different devices" in divergences[0].title
+
+
+def test_tracking_asymmetry_alone_diverges_only_while_the_link_is_down(
+    tmp_path: Path,
+) -> None:
+    """Not a finding, and the distinction matters.
+
+    With group 14 tracking and group 24 not, the two split the moment the uplink
+    drops — but group 14 has no preempt delay, so it reclaims the instant the link
+    returns and the split ends with the outage. A brief divergence *during* an
+    event is expected behaviour; a divergence that persists long after recovery is
+    the defect. The threshold is what separates them, and reporting the first kind
+    would bury the second in noise.
+    """
+    pack = build(tmp_path, g14=TRACK14, g24="")
+    assert [f for f in analyse(pack) if f.rule == "fhrp-divergence"] == []
+
+    # The split is real, just short — confirm the model sees it at all.
+    events = [
+        Event(at_ms=0, kind=EventKind.LINK_DOWN, device="agg-a", interface="Ethernet1")
+    ]
+    timeline = simulate(pack, events, until_ms=10_000)
+    assert timeline[-1].masters["vrrp-14"] == "agg-b"
+    assert timeline[-1].masters["vrrp-24"] == "agg-a"
+
+
+def test_no_tracking_anywhere_means_nothing_to_simulate(tmp_path: Path) -> None:
+    """With nothing tracked, no link event can change an election, so the tier has
+    no candidate sequences and must stay silent rather than invent one."""
+    assert analyse(build(tmp_path)) == []
+
+
+def test_election_prefers_higher_priority() -> None:
+    pack, _ = build_fact_pack(CORPUS)
+    timeline = simulate(pack, [], until_ms=10_000)
+    assert timeline[0].masters["vrrp-14"] == "agg-a"
+    assert timeline[-1].masters["vrrp-34"] == "agg-a"
+
+
+def test_tracked_interface_down_moves_the_group() -> None:
+    pack, _ = build_fact_pack(CORPUS)
+    events = [
+        Event(at_ms=0, kind=EventKind.LINK_DOWN, device="agg-a", interface="Ethernet1")
+    ]
+    timeline = simulate(pack, events, until_ms=20_000)
+    assert timeline[-1].masters["vrrp-14"] == "agg-b"
+    # Group 34 does not track the uplink, so it must not move.
+    assert timeline[-1].masters["vrrp-34"] == "agg-a"
+
+
+def test_preempt_delay_holds_the_group_on_the_backup() -> None:
+    """The mechanism the whole scenario turns on, tested directly."""
+    pack, _ = build_fact_pack(CORPUS)
+    events = [
+        Event(at_ms=0, kind=EventKind.LINK_DOWN, device="agg-a", interface="Ethernet1"),
+        Event(
+            at_ms=10_000, kind=EventKind.LINK_UP, device="agg-a", interface="Ethernet1"
+        ),
+    ]
+    timeline = simulate(pack, events, until_ms=150_000)
+    at = {sample.at_ms: sample.masters for sample in timeline}
+
+    # Group 14 has no preempt delay and reclaims as soon as the link returns.
+    assert at[20_000]["vrrp-14"] == "agg-a"
+    # Group 24 waits 90s, so it is still on the backup while 14 is home.
+    assert at[20_000]["vrrp-24"] == "agg-b"
+    assert at[140_000]["vrrp-24"] == "agg-a"
+
+
+def test_every_timing_finding_says_how_it_was_derived() -> None:
+    """This tier can be wrong, so a finding that cannot be argued with is unsafe."""
+    pack, _ = build_fact_pack(CORPUS)
+    for finding in analyse(pack):
+        assert finding.tier is Tier.TIMING
+        assert finding.trigger
+        assert finding.evidence
+        assert finding.remedy
