@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Fact Pack / run artifacts — regenerated, never source
+*.db
+*.db-journal
+store/*.db
+artifacts/
+runs/
+
+# Containerlab
+clab-*/
+.clab.yml.bak
+*.clab.yml.bak
+
+# Local environment
+.env
+.envrc
