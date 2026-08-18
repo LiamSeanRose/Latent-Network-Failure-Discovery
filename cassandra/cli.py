@@ -10,6 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from cassandra.app import serve
 from cassandra.factpack.builders.eos import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
@@ -93,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
         help="show evidence, suggested fixes and rule ids",
     )
 
+    app = sub.add_parser("serve", help="open the local web view")
+    app.add_argument("--port", type=int, default=8765)
+    app.add_argument("--host", default="127.0.0.1")
+
     args = parser.parse_args(argv)
     if args.command == "facts":
         loaded = _load(args.config_dir)
@@ -112,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
         # Exit status is the verdict: non-zero when something needs attention, so
         # this is usable in a pre-commit hook or CI without parsing the output.
         return 1 if findings else 0
+
+    if args.command == "serve":
+        serve(host=args.host, port=args.port)
+        return 0
 
     return 2
 

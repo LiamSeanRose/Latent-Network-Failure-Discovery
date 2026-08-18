@@ -26,7 +26,13 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
       and compares — but only when someone supplies a cEOS image, which cannot be
       redistributed. **The timing model is currently unvalidated, and the workflow says so
       rather than passing quietly.**
-- [ ] **Phase 5 — The app.** **Current phase.**
+- [x] **Phase 5 — The app.** Done 2026-08-18. `cassandra serve` — local web view over the
+      same engine, standard library only, loopback only, light and dark. Also a
+      `/findings.json` endpoint for scripting.
+
+**All phases complete except Phase 4's validation, which needs a cEOS image (see above).**
+The next substantive work is either supplying that image, or widening the timing model
+beyond FHRP (PROJECT.md §5.1) — which should not happen until validation exists.
 
 Carried over, owner-only, not blocking any phase:
 
@@ -42,6 +48,21 @@ pushing a throwaway non-default branch succeeded and deleting that same branch r
 HTTP 403, which rules out the default-branch explanation. The GitHub tool surface available
 here has `create_branch` and `list_branches` but no delete-branch or repository-settings
 operation, so there is no second route.
+
+---
+
+## 2026-08-18 — The app is standard library only
+
+**Context:** Phase 5 wanted a UI. The obvious choices bring a web framework, a bundler, or a
+front-end toolchain.
+
+**Chosen:** `http.server` plus a self-contained HTML page. The premise of v3 is that installing
+the tool is the entire setup; a UI that needs `npm install` walks that back. It binds to
+loopback, escapes everything it echoes, and exposes `/findings.json` so anything fancier can be
+built on top without the core carrying it.
+
+**Reversal:** cheap. `analyse_directory()` is the whole interface between the engine and the
+view, so a different front end reuses it unchanged.
 
 ---
 
