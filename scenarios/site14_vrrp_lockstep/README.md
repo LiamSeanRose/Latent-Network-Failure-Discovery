@@ -32,7 +32,7 @@ One flap of agg-a's uplink:
 
 Three flaps at 30 s intervals leave the gateways split across both routers, with
 group 14 changing master ≥4 times in 120 s — verbatim the `predicted_observable`
-in PROJECT.md §2.3.
+in PROJECT.md §6.
 
 **The transit VLAN is load-bearing.** VLAN 99 carries an OSPF adjacency between
 agg-a and agg-b over the acc1 trunks. Without it, group 34 — which does not track

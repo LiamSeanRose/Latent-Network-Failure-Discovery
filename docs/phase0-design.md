@@ -24,7 +24,8 @@ groups-and-master-as-expected, then healthy. In that order.
 
 ## Topology
 
-Six nodes. Small on purpose — Phase 0 is one site, not the §4.4 fabric, and every
+Six nodes. Small on purpose — the smallest topology that can exhibit the behaviour
+is the right one (§3.1), and every
 node added here is a node the Phase 3 slicer will later have to justify.
 
 ```
@@ -85,7 +86,7 @@ broken only by timing.** That is the whole discipline of designing this proof, a
 it is easy to violate by accident.
 
 Three groups rather than one is the entire point: lockstep-versus-independent is
-not observable with a single group, and §2.3's `fhrp_lockstep` class is about
+not observable with a single group, and the `fhrp_lockstep` class (§6) is about
 groups on the same pair diverging.
 
 ## The mechanism (provisional — confirm or replace)
@@ -115,7 +116,7 @@ Sequence on a single flap of uplink A:
 
 Three flaps at 30 s intervals therefore leave the three gateways distributed
 across both routers, with group 14 having changed master four or more times —
-which is verbatim the `predicted_observable` in §2.3's worked example.
+which is verbatim the `predicted_observable` in the §6 worked example.
 
 **Why this is invisible to Batfish, and why that is not a Batfish deficiency.**
 Batfish converges to a single steady state deterministically, by design (§1.3).

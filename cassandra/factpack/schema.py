@@ -19,7 +19,7 @@ Design rules this module holds to:
   `FhrpGroup` carries preempt on/off but not preempt delay, `Interface`
   carries MTU but not carrier-delay. Every timer record instead carries a
   `TimerScope` naming what it applies to. Timer races are a first-class
-  conjecture class (§1.4), so timers must be enumerable as one flat set
+  question a scenario can ask (§1.4), so timers must be enumerable as one flat set
   rather than scattered across the topology.
 * Configured value and provenance are kept together. `TimerSource`
   distinguishes an explicitly configured timer from a platform default;
@@ -161,7 +161,8 @@ class TimerSource(StrEnum):
     """Where a timer value came from.
 
     A platform default that happens to race with a configured timer reads very
-    differently from two values an operator chose. Scout needs the difference.
+    differently from two values an operator chose, and only one of them is worth
+    writing a scenario about.
     """
 
     CONFIGURED = "configured"
@@ -354,7 +355,7 @@ class FhrpGroup:
     Whether groups on the same pair of devices move in lockstep or
     independently is not answerable from this object alone — it depends on
     priorities, tracked objects, preempt, and the timers in `TimerInventory`.
-    That is precisely the `fhrp_lockstep` conjecture class (§2.3).
+    That is precisely what a scenario in the sense of §2.1 exists to answer.
     """
 
     id: GroupId
@@ -452,7 +453,7 @@ class BgpTimers:
 class DampeningProfile:
     """Route or interface dampening.
 
-    Directly backs the `dampening_sla` conjecture class: max-suppress bounds
+    Directly backs a dampening-versus-SLA scenario: max-suppress bounds
     how long a prefix can stay withdrawn after the network is otherwise
     healthy, which is comparable against an SLA and invisible to steady-state
     analysis.
@@ -532,8 +533,8 @@ class FhrpTimers:
 class TimerInventory:
     """Every timer in the network, in one enumerable place.
 
-    The Warden routes any conjecture carrying a time quantity to emulation
-    (§1.4), and the Prosecutor's ±20% timing perturbation (§2.5) needs the
+    Any question carrying a time quantity has to be answered by emulation rather
+    than symbolically (§1.4), and the ±20% perturbation control (§2.5) needs the
     configured values to perturb around. Both read from here.
     """
 

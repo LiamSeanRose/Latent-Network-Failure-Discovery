@@ -1,104 +1,83 @@
-# Latent Network Failure Discovery — Project Dossier
+# Latent Network Failure Discovery
 
 > Working name: **Cassandra**
-> Status: pre-implementation. This document is the source of truth for implementation.
-> Last research pass: 2026-08-18
+> Status: Phase 0 in progress. This document is the source of truth for implementation.
+> Revised 2026-08-18 — reframed from an autonomous discovery engine to a personal QA
+> application. The conjecture-generation pipeline is deferred, not deleted: see §6.
+> Section numbers referenced elsewhere in the repo were deliberately preserved; §7 records
+> the two that moved.
 
 ---
 
-## 0. One-paragraph statement
+## 0. What this is
 
-Existing network verification is **reactive** (triggered by a proposed change) and **static**
-(reasons about steady-state configuration). This project is **proactive** and **dynamic**: a
-continuously-running agent loop that generates conjectures about latent failure modes already
-present in a network, filters them cheaply, and escalates only the survivors into real protocol
-emulation where timing-dependent failures become observable. Output is a ranked, deduplicated
-list of dormant failure modes, each with a runnable reproduction.
+A QA tool for network labs you own.
+
+You describe a scenario — a topology, an event sequence, and hard conditions for what must
+and must not happen. The tool runs it in emulation with real protocol timing, scores it
+against those conditions, and separately asks a static analyser the same question about the
+same configs.
+
+**The interesting output is the disagreement.** A failure that is real under timing and
+invisible to steady-state analysis is a class of bug that config verification structurally
+cannot reach, and reproducing one on demand is the point of the whole exercise.
+
+It is a thing you run, not a service that runs. No continuous loop, no autonomous
+generation, no fleet. Those were the previous shape of this document and are deferred to §6.
 
 ---
 
-## 1. Prior art (verified, not assumed)
+## 1. Why this is worth building
 
-### 1.1 Aether — the closest existing system
+### 1.1 The gap
 
-**Paper:** *Aether: Network Validation Using Agentic AI and Digital Twin*, arXiv:2604.18233,
-20 Apr 2026. Cisco (Paris/London) + Swisscom (Zurich).
+Config verification answers steady-state questions: is A reachable from B, does this ACL
+line ever match, is there a forwarding loop. It answers them well, quickly, and offline.
 
-What it is: five specialized NetOps agents (Assistant, NDM Query, Impact Assessment, Test
-Planner, Test Executor) over a Network Digital Twin. ReAct loops, GPT-4o, tools exposed via
-MCP, A2A protocol over SLIM, ArangoDB knowledge graph on an OpenConfig-derived schema,
-git-like snapshot/fork/rebase semantics for network state.
+It cannot answer questions containing a time quantity, a repetition count, or an ordering
+claim, because those have no steady state to evaluate. What happens if a link flaps three
+times in ninety seconds is not a property of a configuration. It is a property of a
+configuration *plus* a sequence of events *plus* the timers that govern how the control
+plane reacts.
 
-**Measured results:**
+That second class is where a large share of real outages live, and it is unserved by the
+tools that are otherwise excellent.
 
-| Metric | Synthetic (8 scenarios) | Production ISP (2 incidents) |
-|---|---|---|
-| Error detection | 0.94 | 1.00 |
-| Precision (all) | 0.64 | 0.57 – 0.90 |
-| Precision (main error) | 0.89 | 1.00 |
-| Test plan coverage | — | 91.7% – 95.6% |
-| Test efficiency (useful/generated) | — | 95.7% – 98.3% |
-| Redundancy | — | 1.7% – 24.6% |
-| Time to answer | ~223 s | ~400 s |
+### 1.2 What existing tools do
 
-Test network: 25 routers (CORE / Aggregation / Metro), 277 IPv4/IPv6 addresses, 263 VRFs
-across 613 instances, 76 ACLs / 274 rules, >30,000 lines of production-equivalent IOS-XR.
+Commercial network digital twins (Forward Networks, NetBrain, Cisco Crosswork) and research
+systems (Aether, arXiv:2604.18233) are **reactive** — a change is proposed, and the system
+validates it — and predominantly **steady-state**. Aether's own results are instructive:
+0.94 error detection at 0.64 precision, with its natural-language-to-graph-query agent
+consuming 68% of the reasoning budget and producing most of the precision loss. Its stated
+conclusion was that tool-based verification substantially outperformed query-based
+verification.
 
-**Compute breakdown (critical finding):**
-
-- 55% of runtime = tool execution (irreducible)
-- 45% = agentic reasoning, of which:
-  - NDM Query agent: **68%**
-  - Impact Assessment: 18%
-  - Test Executor: 12%
-  - Test Planner: 2%
-
-The natural-language-to-graph-query agent consumed two thirds of the reasoning budget **and**
-was the dominant source of precision loss (malformed AQL, misinterpreted results). Their stated
-failure pattern: the OpenConfig schema offers multiple expression paths for the same concept,
-and the agent picks the path lacking data without exploring alternatives.
-
-Their own conclusion: *tool-based verifications significantly outperformed query-based
-approaches.*
-
-**→ DESIGN CONSTRAINT #1: no agent in this system authors a database query. Ever.**
-All network facts are materialized by deterministic code into a Fact Pack. Agents consume
-facts; they never fetch them.
-
-### 1.2 Gaps Aether left open
-
-1. **Emulation tier unimplemented.** Their NDT supports model-based (Batfish) and
-   simulation-based (RouteNet, NS-3) verification. Emulation is listed as *planned*.
-2. **Entirely reactive.** Every workflow begins with a change request and an ITSM ticket ID.
-   Dormant-failure discovery gets exactly one of eight scenarios (S1, router maintenance /
-   backup path).
-3. **Precision is the unsolved problem.** 0.94 detection with 0.64 precision means operators
-   drown in false positives. Their future work explicitly lists "operational tooling for false
-   positive management."
-4. Scenarios are all statically expressible. None involve timers, flap intervals, convergence
-   races, or preemption ordering.
-
-Their stated future work — protocol knowledge injection via skills, multi-agent collaboration,
-feedback loops from production failures, false-positive tooling — is a roadmap this project
-should treat as a competitive map, not a to-do list.
+The durable lesson, and it survives the reframing: **facts should be materialised by
+deterministic code, not fetched by something that has to compose a query.** If a future
+version of this ever grows an agent layer (§6), that constraint holds.
 
 ### 1.3 Batfish — capability boundary
 
 Batfish computes real RIB/FIB by running BGP best-path selection, OSPF SPF, IS-IS, and
 redistribution to convergence, offline from config text. It supports differential questions
-(`snapshot` vs `reference_snapshot`), `differentialReachability`, ACL analysis, loop detection,
-traceroute simulation, and L1-topology-aware failure analysis (`layer1_topology.json` — downing
-an interface also downs its L1-paired peer).
+(`snapshot` vs `reference_snapshot`), `differentialReachability`, ACL analysis, loop
+detection, traceroute simulation, and L1-topology-aware failure analysis
+(`layer1_topology.json` — downing an interface also downs its L1-paired peer).
 
-**The decisive detail:** Batfish converges *deterministically by design*. From the SIGCOMM 2023
-evolution paper, it uses protocol-specific graph coloring (only same-colored nodes exchange
-routes in a round) plus logical clocks on RIBs, specifically to *eliminate race conditions
-caused by neighbors exchanging routes from partially-converged state*, so results stay stable
-across runs.
+**The decisive detail:** Batfish converges *deterministically by design*. Per the SIGCOMM
+2023 evolution paper, it uses protocol-specific graph colouring plus logical clocks on RIBs
+specifically to eliminate race conditions caused by neighbours exchanging routes from
+partially-converged state, so results stay stable across runs.
 
-Batfish deliberately suppresses the exact failure class this project hunts. This is not a bug
-in Batfish — determinism is what makes it useful — but it means **timing-dependent failures are
+Batfish deliberately suppresses the exact failure class this project hunts. That is not a
+defect — determinism is what makes it useful — but it means **timing-dependent failures are
 structurally invisible to it.** That is the escalation boundary, and it is a principled one.
+
+Practical constraints discovered while building Phase 0 are recorded in
+`docs/emulation-fidelity.md`: Batfish does not parse Nokia SR Linux, it *does* model
+HSRP/VRRP election, and FRR cannot express VRRP preempt delay or object tracking. Together
+those pin the emulation target to Arista cEOS.
 
 ### 1.4 Escalation boundary — canonical table
 
@@ -118,395 +97,260 @@ structurally invisible to it.** That is the escalation boundary, and it is a pri
 | Does dampening suppress a route longer than the SLA? | **EMULATE** | Timer interaction |
 | Does BFD detect before or after the IGP hold timer? | **EMULATE** | Timer race |
 
-Rule of thumb for the WARDEN: **if the conjecture contains a time quantity, a repetition count,
-or an ordering claim, it cannot be answered symbolically.**
+Rule of thumb: **if the question contains a time quantity, a repetition count, or an
+ordering claim, it cannot be answered symbolically.**
 
-### 1.5 Market context
-
-- Gartner: agentic NetOps adoption <1% of organizations; 80% of network automation vendors
-  expected to ship agentic AI capability by end of 2027, up from <20% in early 2026.
-- Incumbents: Forward Networks (network digital twin, strong federal/FedRAMP positioning,
-  sells static reachability + compliance verification), NetBrain (Agentic NetOps, Deep
-  Diagnosis, 150+ vendor context model, Blackstone majority investment Jan 2026), Cisco
-  Crosswork AI, Versa, Netskope AgentSkope, Selector.
-- All of the above are reactive and/or steady-state. None ship continuous adversarial
-  hypothesis generation at emulation fidelity.
-
-### 1.6 Known agent-loop failure modes to design against
-
-Documented across 2026 production post-mortems:
-
-- **Token runaway** — a goal loop with no `max_iterations` can burn hundreds of dollars per hour.
-- **Context rot** — long-lived loops appending to one window degrade in quality; fix with fresh
-  context per unit of work or hierarchical compaction every 10–20 steps.
-- **Overconfident termination** — agent declares success having checked half the space. Requires
-  hard conditions (test exit codes), not soft judgment.
-- **Circular dependency deadlock** — A waits on B waits on A.
-- **Semantic invisibility** — an agent loops 18 steps, calls the same tool six times, finds
-  nothing, and reports success. Every span returns 200, latency normal, dashboard green. This is
-  the failure mode structural tracing cannot see, and the one this system must instrument for
-  explicitly.
-- **Lost in the middle** — models attend most strongly to the start and end of context. Mitigate
-  with goal recitation at the end of context every turn.
+A scenario that fails on the SYMBOLIC side of this line is a scenario in the wrong place.
+It should be a static check, not an emulated run — and if a scenario's failure *is* visible
+to Batfish, that is a signal the scenario is mis-designed, not a success.
 
 ---
 
-## 2. Architecture
+## 2. The application
 
-### 2.1 Economic shape
+### 2.1 What a scenario is
 
-An inverted pyramid. Cost per unit of work must *rise* as volume *falls*.
+The unit of work. A directory containing:
 
-```
-   SCOUT      ~2,000 conjectures/cycle   cheapest model, batched, cached, ~$0.00X each
-     ↓        deterministic filters kill ~85% before any further spend
-   WARDEN     ~300 survive to symbolic   mostly non-LLM code
-     ↓        symbolic checks kill ~90% of those
- PROSECUTOR   ~10-30 reach emulation     expensive model, minutes each
-     ↓
-  FINDINGS    ~1-5 confirmed/cycle
-```
+- **topology** — a Containerlab file, synthetic, resource-bounded (§3.1)
+- **configs** — device configs, the same text handed to both emulation and the symbolic tier
+- **events** — what is done to the running lab and when
+- **conditions** — what must be observed, and what must not
+- **README** — the mechanism, why it is invisible to static analysis, and its caveats
 
-If cost per stage does not fall by roughly an order of magnitude per level, the design is wrong.
+A scenario is self-contained and runnable on its own. `scenarios/site14_vrrp_lockstep/` is
+the reference implementation and Phase 0 deliverable.
 
-### 2.2 The Fact Pack (no agent queries anything)
+### 2.2 The Fact Pack
 
-Built by deterministic Python before any agent runs. Two parts:
+Structured facts materialised from configs by deterministic code: device inventory, L1/L2/L3
+adjacency, FHRP groups, and a complete timer inventory. Implemented as frozen dataclasses in
+`cassandra/factpack/schema.py`.
 
-**Static Fact Pack** — changes only when configs change. Cached as a prompt prefix.
-- Device inventory, platform, OS version
-- L1 topology (adjacency list) + L2/L3 adjacency
-- Per-protocol adjacency graphs (OSPF areas, IS-IS levels, BGP sessions incl. RR topology)
-- FHRP groups: group ID, members, priorities, preempt on/off, tracked objects
-- Timer inventory: hello/hold/dead, BFD intervals, dampening params, SPF throttle,
-  BGP advertisement-interval, carrier-delay, STP timers
-- VRF/RT import-export matrix
-- Redistribution points (source proto, dest proto, route-map, metric-type, tags)
-- Route summarization points and their backing prefixes
-- ECMP fan-out per prefix
-- Historical incident index (structured post-mortems)
+Two uses in this shape of the project:
 
-**Dynamic Slice** — the rotating focus for this cycle. Small.
-- One k-hop neighborhood, or one protocol domain, or one recently-changed region
-- Recent telemetry deltas for that slice
-- Conjectures already refuted in this region (negative cache)
+1. **Authoring** — reading a fact pack for a lab is how you find the asymmetries worth
+   writing a scenario about. A timer inventory that lists every hello, hold, preempt delay,
+   dampening profile and carrier delay in one place is a list of candidate failure modes.
+2. **Cheap assertions** — consistency questions (MTU mismatch, a tracked object nothing
+   defines, a trunk missing a VLAN its SVI needs) are answerable directly from facts with no
+   tool call and no lab.
 
-Serialization: newline-delimited structured text, not JSON blobs. Denser per token and models
-parse it reliably. Target ≤ 25k tokens static, ≤ 3k tokens dynamic.
+The builders that populate it are Phase 2.
 
-### 2.3 Agent 1 — SCOUT (conjecture generation)
+### 2.3 The runner
 
-- **Model tier:** cheapest capable (small-model tier). Never the frontier model.
-- **Volume:** highest in the system.
-- **Context:** Static Fact Pack (cached) + Dynamic Slice + refuted-list for this region.
-- **Output:** strict JSON array of conjectures. No prose. No explanation. No preamble.
-- **Batching:** emit **N=20 conjectures per API call**, not one. This amortizes the cached-read
-  cost across 20 units of work and is the single largest lever on Scout cost.
-- **Context discipline:** fresh context every call. Scout never accumulates history. Cross-call
-  memory lives in the refuted-list, which is data, not conversation.
-- **Delivery:** Batch API where cycle latency is tolerable. Batch (50% off) and prompt caching
-  (~90% off cached input reads) stack.
-- **Prompting:** give it the failure taxonomy explicitly. Do not expect zero-shot derivation of
-  protocol interaction knowledge — Aether's own conclusion was that specialized knowledge
-  injection is mandatory and is itself the high-value artifact.
+Deploys a scenario, injects its events with real timing, samples state throughout, and
+tears down. Sampling records both human-readable and machine-parseable output, because
+scoring should never depend on a text format that is not a stable interface.
 
-**Conjecture schema:**
+Modes: `baseline`, `trigger`, `control`, `perturb`, and `suite` — which runs the full
+control set (§2.5) with a fresh deployment between runs, so repeated runs are independent
+rather than each inheriting the previous run's state.
 
-```json
-{
-  "id": "cnj_<ulid>",
-  "region": "site-14-agg",
-  "class": "fhrp_lockstep | microloop | dampening_sla | timer_race |
-            redistribution_loop | summarization_blackhole | ecmp_asymmetry |
-            convergence_stall | preemption_oscillation",
-  "claim": "Single falsifiable sentence.",
-  "entities": ["rtr-14-a", "rtr-14-b", "Gi0/0/1"],
-  "trigger": {
-    "event": "link_flap",
-    "target": "rtr-14-a:Gi0/0/1",
-    "count": 3,
-    "interval_s": 30
-  },
-  "predicted_observable": "hsrp group 14 active role changes >2 times within 120s",
-  "temporal": true,
-  "severity_hint": "high",
-  "confidence": 0.4
-}
-```
+### 2.4 Scoring and verdicts
 
-`temporal: true` is the routing signal. It must be derivable mechanically from `trigger`
-(presence of count / interval / ordering), not trusted from the model.
+**Hard conditions, evaluated by code, reported as an exit status.** Not a judgment, not a
+summary for a human to interpret.
 
-### 2.4 Agent 2 — WARDEN (triage and scheduling)
+Conditions are evaluated over the *sampled timeline*, never the end state. A transient
+failure has re-converged by the time a run finishes, so a correct run ends looking healthy —
+checking the final state scores a working scenario as a failure.
 
-**This is the product.** It should be as close to zero LLM as possible.
+Two properties the scorer must hold to:
 
-Deterministic pipeline, in order, cheapest gate first:
+- **An empty parse is never a pass.** A collector that matched nothing must report that,
+  not silently read as "no failure observed." This is the single most likely way for the
+  tool to lie to you.
+- **Ambiguity is surfaced, not resolved.** Two masters for one group is split brain; it gets
+  reported as such rather than folded into a placement.
 
-1. **Schema validation** — malformed → DROP. No LLM.
-2. **Entity existence** — do all referenced devices/interfaces exist in the Fact Pack? Non-existent →
-   DROP as hallucination. Log to hallucination-rate metric. No LLM.
-3. **Structural dedup** — normalized hash of `(class, sorted(entities), trigger)`. Exact dup → DROP,
-   increment support count on the original. No LLM.
-4. **Semantic dedup** — embedding of `claim`, cosine against region index, threshold ~0.92.
-   No LLM (embedding model only).
-5. **Refuted cache** — has this conjecture shape been falsified in this region since last config
-   change? → DROP. No LLM.
-6. **Routing** — `temporal == true` OR class ∈ {microloop, timer_race, preemption_oscillation,
-   convergence_stall} → EMULATE queue. Else → SYMBOLIC queue. Pure rules.
-7. **Scoring** — priority = `blast_radius × prior_class_yield × recency_weight / expected_cost`.
-   - `blast_radius`: computed from Fact Pack (how many prefixes/sites traverse affected nodes)
-   - `prior_class_yield`: learned. Confirmed findings ÷ emulations run, per conjecture class.
-     This is the escalation policy and it is a table, not a model.
-8. **LLM tiebreak** — *only* for conjectures that pass all gates and land in a scoring band where
-   rules cannot separate them. Small model, batched, one call per cycle for the whole band.
+### 2.5 Falsification controls
 
-**Budget enforcement lives here:**
-- per-cycle token ceiling (hard)
-- per-cycle emulation-minute ceiling (hard)
-- per-conjecture wall-clock timeout
-- global circuit breaker: if confirmed-findings-per-dollar over trailing 5 cycles drops below
-  threshold, halt and alert rather than continue
+A scenario that only ever runs its happy path proves nothing. Every result must survive:
 
-### 2.5 Agent 3 — PROSECUTOR (falsification)
+1. **No-trigger control** — same lab, same window, no events. The observable must be absent.
+   A control that exhibits the observable means the trigger did not cause it, and the run
+   **fails**. The control's criterion is inverted, not skipped.
+2. **Timing perturbation** — event intervals randomised ±20%. A result that only appears at
+   exact timings is a knife-edge artifact, not a finding.
+3. **Repetition** — 3 runs. Confirmation requires the observable in ≥2 of 3, to separate
+   deterministic behaviour from flaky.
 
-- **Model tier:** frontier. Justified only because volume is ~10–30 per cycle.
-- **Framing:** adversarial. Its stated job is to **kill** the conjecture. A survivor is meaningful
-  precisely because something tried to destroy it. This is the direct countermeasure to Aether's
-  0.64 precision.
-- **Loop:** bounded ReAct. Hard cap 12 steps. Goal recitation appended at end of context each
-  turn (counters lost-in-the-middle).
+Perturbation has a prerequisite: **measure container scheduling jitter first.** If host
+jitter is comparable to the timer margins a scenario depends on, the ±20% control is
+measuring the machine rather than the network, and every timing result inherits the problem.
 
-Procedure per conjecture:
+### 2.6 The symbolic comparison
 
-1. **Slice minimization** — compute the minimal topology that can exhibit the claim. k-hop
-   neighborhood of `entities`, k typically 2, plus any node in the FHRP group / IGP area / BGP
-   RR cluster that could participate. Never boot the full fabric. This is the largest single
-   lever on emulation cost.
-2. **Slice validation** — assert the slice reproduces baseline steady-state behavior matching
-   Batfish's model for the same region. If it does not, the slice is wrong; widen k and retry
-   once, then DROP with reason `slice_invalid`. Prevents confirming artifacts of over-trimming.
-3. **Event injection** — execute `trigger` against the running slice with real timing.
-4. **Observation** — collect against `predicted_observable`. Structured collectors, not CLI
-   scraping by the model.
-5. **Falsification attempts** — at minimum:
-   - re-run with the trigger removed (does the observable appear anyway? → not causal)
-   - re-run with randomized event timing within ±20% (is it a knife-edge artifact?)
-   - re-run 3× (is it deterministic or flaky?)
-6. **Verdict** — `CONFIRMED` / `REFUTED` / `INCONCLUSIVE`. Confirmation requires the observable
-   to appear in ≥2 of 3 runs AND be absent in the no-trigger control. Hard conditions, not
-   judgment.
-7. **Finding artifact** — on CONFIRMED, emit the reproduction.
+The other half of every scenario: hand the identical configs to Batfish and record what it
+says.
 
-**Finding schema:**
+Order matters, and it is the difference between a real result and a fake one:
 
-```json
-{
-  "id": "fnd_<ulid>",
-  "conjecture_id": "cnj_<ulid>",
-  "verdict": "CONFIRMED",
-  "severity": "high",
-  "blast_radius": {"prefixes": 412, "sites": 3},
-  "repro": {
-    "topology": "slices/site-14-agg-k2.clab.yml",
-    "configs": "slices/site-14-agg-k2/configs/",
-    "events": "slices/site-14-agg-k2/events.yml",
-    "expected": "hsrp group 14 active role changes 4x within 118s"
-  },
-  "control_runs": {"with_trigger": [true, true, true], "without_trigger": [false, false, false]},
-  "batfish_says": "healthy",
-  "cost": {"usd": 0.83, "emulation_seconds": 240}
-}
-```
+1. The snapshot parses with no init issues. Silent parse failure is what would fake this.
+2. Batfish modelled the relevant construct — it reports the VRRP groups, elects the expected
+   master, computed the routes. A healthy verdict from an analyser that skipped the feature
+   proves a coverage gap, not the escalation boundary.
+3. *Then* the verdict is worth recording.
 
-`batfish_says: healthy` is the money field. It is the proof that the finding was unreachable by
-static analysis, which is the entire thesis of the project.
-
-### 2.6 What the three agents are NOT
-
-- No agent writes database queries (Aether lesson §1.1).
-- No agent talks to another agent conversationally. Handoffs are typed artifacts on a queue.
-  Agent-to-agent chat is where circular-dependency deadlock comes from and it buys nothing here.
-- No orchestrator/assistant agent. The loop driver is `asyncio` code with a state machine.
-  An LLM orchestrator is pure overhead for a pipeline with fixed topology.
+A scenario where Batfish reports the failure is not a failed scenario — it is a scenario
+that belongs on the SYMBOLIC side of §1.4, and should be moved there.
 
 ---
 
-## 3. Cost engineering
+## 3. Running labs
 
-Prices move; verify against current provider pricing before relying on the arithmetic. Ratios
-below are what matter and are stable.
+### 3.1 Resource bounding and slice size
 
-### 3.1 Levers, in order of impact
+Containerlab imposes no default memory or CPU limits, and an unbounded node will destabilise
+the host. **Set `memory:` and `cpu:` explicitly on every node**, in every scenario, without
+exception.
 
-1. **Prompt caching on the Static Fact Pack.**
-   Cache writes cost ~25% premium over base input; cache reads ~10% of base input. Break-even at
-   2+ hits. Minimum 1,024 tokens per checkpoint, up to 4 checkpoints per request. TTL 5 min
-   default, 1 hour available at extra cost.
-   Structure: static content first (system instructions → tool schemas → Fact Pack), dynamic
-   content last. **Changing one character in the cached prefix invalidates it** — regenerate the
-   Fact Pack on a fixed schedule, never mid-cycle.
-   Use the 1-hour TTL for the Fact Pack; a cycle should complete inside one TTL window.
+Keep scenarios minimal. Every node in a scenario is a node that boots on every run, and the
+smallest topology that can exhibit the behaviour is the right one — not the most realistic.
+The Phase 0 scenario deliberately omits an aggregation peer link, because including it would
+add STP convergence to a VRRP timing measurement.
 
-2. **Batching conjectures 20-per-call.** Divides the per-call cached-read cost by 20.
-
-3. **Batch API for Scout.** Flat 50% off input and output, results typically within 1–2 hours,
-   guaranteed 24. Stacks with caching. Scout has no latency requirement.
-
-4. **Model routing by tier.** Scout on cheapest, Warden tiebreak on cheapest, Prosecutor on
-   frontier. Reported 60–80% bill reduction from routing alone in comparable pipelines.
-
-5. **Emulation slice minimization.** Booting a 4-node slice instead of a 25-node fabric is a
-   >6× reduction in the dominant non-token cost.
-
-6. **Warm slice pool.** Keep base topologies pre-booted; snapshot/restore instead of cold boot
-   per conjecture. Containerlab has no node cap and imposes no default memory/CPU limits — set
-   `memory:` and `cpu:` per node explicitly or a runaway slice destabilizes the host.
-
-Independent evaluation across providers found prompt caching delivers 41–80% cost reduction on
-long-horizon agentic tasks, statistically significant across all models tested.
-
-### 3.2 Instrumentation — the metrics that matter
-
-Standard tracing will show all-green while the system produces nothing. Track:
-
-| Metric | Definition | Why |
-|---|---|---|
-| **Yield** | confirmed findings ÷ total USD | the only number that matters |
-| Hallucination rate | conjectures dropped at entity-existence ÷ total | Scout quality |
-| Dedup rate | dropped at structural+semantic dedup ÷ total | Scout diversity |
-| Survival ratio | reached emulation ÷ generated | Warden calibration |
-| Confirmation rate | confirmed ÷ emulated | Prosecutor discrimination |
-| Class yield | confirmed ÷ emulated, per conjecture class | feeds escalation policy |
-| Cost per confirmed finding | USD ÷ confirmed | trend must fall over time |
-| Repeated-tool-call count | per Prosecutor run | catches the silent-loop failure |
-| Steps-to-verdict | per Prosecutor run | catches drift |
-
-**Falsification economics — the go/no-go.** The project is viable iff:
-
-```
-cost(generate + filter one conjecture)  <<  cost(emulate one conjecture)
-                                        AND
-confirmation_rate × value(finding)  >  cost per emulation
-```
-
-If Scout must generate 10,000 conjectures to yield one confirmed finding and each emulation
-costs four minutes, the arithmetic does not close. **Measure this before building the UI.**
-
-Baseline reference: Aether achieved 95.7–98.3% test efficiency, but for *intent-directed*
-generation — it was told what changed. Open-ended conjecture will be far worse. Treat Aether's
-number as an unreachable ceiling, not a target.
+Where booting is slow enough to discourage running scenarios at all, snapshot/restore of a
+warm base topology is the fix. Not needed yet.
 
 ---
 
-## 4. Implementation plan
+## 4. Implementation
 
 ### 4.1 Repository layout
 
 ```
 cassandra/
   factpack/
-    builders/          # config → structured facts. deterministic. no LLM.
-    schema.py
-    serialize.py       # → cacheable prompt prefix
-  agents/
-    scout.py
-    warden/
-      gates.py         # ordered deterministic filters
-      routing.py       # symbolic vs emulate
-      scoring.py       # blast radius, class yield
-      policy.py        # learned escalation table
-    prosecutor.py
-  tiers/
-    symbolic.py        # pybatfish wrapper
-    emulation/
-      slicer.py        # k-hop minimal topology extraction
-      pool.py          # warm slice pool, snapshot/restore
-      inject.py        # event injection with real timing
-      collect.py       # structured observation
-  loop/
-    driver.py          # asyncio state machine. NOT an agent.
-    budget.py          # ceilings + circuit breaker
-    metrics.py
-  store/
-    conjectures.db
-    findings.db
-    refuted.db         # negative cache
-  scenarios/
-    site14_hsrp_lockstep/   # ground truth #1 — the real outage
-  ui/
+    schema.py          # frozen dataclasses: inventory, adjacency, FHRP, timers
+    builders/          # config text -> facts. deterministic. Phase 2.
+  symbolic/            # pybatfish wrapper. Phase 2.
+  harness/             # scenario discovery, run orchestration, history. Phase 1.
+scenarios/
+  site14_vrrp_lockstep/
+    topology.clab.yml
+    configs/
+    run.sh
+    score.py
+    batfish_check.py
+    README.md
+docs/
+  CONVENTIONS.md       # standing rules
+  emulation-fidelity.md
+  phase0-design.md
+tests/
 ```
+
+`run.sh` and `score.py` currently live inside the scenario. Phase 1 lifts the general parts
+into `cassandra/harness/` and leaves the scenario-specific parts behind.
 
 ### 4.2 Phases
 
-**Phase 0 — Ground truth (do this first, alone).**
-Reproduce the real seven-hour site outage in Containerlab as a scored scenario. Then run Batfish
-against the identical configs and demonstrate it reports healthy. Deliverable: one directory, one
-README, one asciinema. This is the existence proof for the entire thesis and it either works or
-the project is dead. Nothing else gets built until this exists.
+**Phase 0 — one scenario, end to end.** Reproduce a timing-dependent failure in Containerlab
+as a scored scenario, and demonstrate that Batfish reports the identical configs healthy.
+One directory, one README, one asciinema. This is the existence proof; nothing else gets
+built until it runs.
 
-**Phase 1 — Fact Pack + symbolic tier.**
-Config ingest → Fact Pack → pybatfish wrapper. No agents. Verify the Fact Pack is complete enough
-that a human can form conjectures from it alone. If a human can't, Scout can't.
+**Phase 1 — generalise the harness.** Lift the runner and scorer out of the scenario:
+scenario discovery, a declarative conditions format, run history on disk, and a summary
+across scenarios. The test is a *second* scenario that reuses the harness without copying it.
 
-**Phase 2 — Scout + Warden, symbolic only.**
-No emulation yet. Measure hallucination rate, dedup rate, and how many conjectures survive
-deterministic gating. **Target: ≥85% of conjectures die before reaching a tool.** If Scout's
-hallucination rate exceeds ~15%, the Fact Pack is underspecified — fix the facts, not the prompt.
+**Phase 2 — Fact Pack + symbolic tier.** Config ingest → fact pack → pybatfish wrapper.
+Cheap fact-only assertions run without a lab. The test is whether a human can read a fact
+pack for a lab and form a scenario from it alone.
 
-**Phase 3 — Prosecutor + emulation.**
-Slicer first, then injection, then falsification controls. Run against the Phase 0 scenario as a
-regression: the system must independently rediscover the known outage. That is the acceptance test.
+**Phase 3 — regression detection.** Run history becomes useful: what changed since last run,
+which scenario started failing, which timing margin moved. This is where a personal QA tool
+earns its keep, because it answers "did I break something" rather than "is this broken."
 
-**Phase 4 — Escalation policy learning.**
-Class yield table starts uniform, updates from Prosecutor verdicts. Measure whether cost per
-confirmed finding falls over successive cycles. If it doesn't, the policy isn't learning and the
-"adaptive fidelity" claim is unsupported.
+**Phase 4 — UI.** Scenario list, run history, timeline view of a failing run, the
+Batfish-versus-emulation disagreement made visible.
 
-**Phase 5 — UI.**
-Only now. Conjecture funnel, live emulation view, ranked findings, cost-per-finding trend.
+**Phase 5 — the discovery layer, if ever.** See §6.
 
 ### 4.3 Kill criteria
 
 Stop and reconsider if:
-- Phase 0 shows Batfish *does* catch the outage → the escalation boundary is wrong
-- Phase 2 hallucination rate stays >25% after Fact Pack improvement → Scout tier too weak
-- Phase 3 confirmation rate <2% → falsification cost exceeds generation value
-- Phase 4 cost per finding flat across 10 cycles → no learning, it's a token furnace
 
-### 4.4 Scale target
-
-Match Aether's for comparability: 25 nodes, ~30k lines of config, multi-VRF, mixed IGP.
-Do not exceed this until Phase 4 is measurably working.
+- **Phase 0** shows Batfish catching the failure → the escalation boundary (§1.4) is wrong,
+  or the scenario is mis-designed. Diagnose which before continuing.
+- **Phase 0** shows container scheduling jitter comparable to the scenario's timer margins →
+  emulated timing results are not trustworthy on this host, and the fidelity question has to
+  be solved before anything else is built on top.
+- **Phase 1** cannot produce a second scenario without copy-pasting the first → the harness
+  is not a harness.
+- **Phase 3** shows scenarios that pass and fail at random → the falsification controls in
+  §2.5 are not doing their job, and every result to date is suspect.
 
 ---
 
 ## 5. Open questions
 
-1. **Cold start.** The escalation policy needs ground truth to learn from, and ground truth means
-   real outages. Bootstrap options: seed from public post-mortems, seed from the Phase 0 scenario
-   family, or accept uniform priors for the first N cycles. Unresolved.
-2. **Conjecture diversity collapse.** A cheap model given the same Fact Pack will converge on the
-   same conjecture shapes. Mitigations to test: rotating focus slice, temperature scheduling,
-   explicit anti-repetition via the refuted cache, class quotas per cycle.
-3. **Slice fidelity.** cEOS/SR Linux/FRR do not perfectly reproduce IOS-XE/NX-OS timer behavior.
-   A confirmed finding on a container may not hold on hardware. Requires an explicit fidelity
-   caveat per finding and, eventually, vrnetlab-based validation of high-severity findings.
-4. **Cisco releases their benchmark.** They committed to publishing scenarios, datasets, and
-   expert ground truth. When it lands, run against it — but the differentiating suite is the
-   emulation-tier one they cannot express.
+1. **Scenario sourcing.** Where do scenarios come from once the obvious ones are written?
+   Public post-mortems, protocol documentation read adversarially, and timer-inventory
+   asymmetries visible in the fact pack are the candidates. This is the question §6 was
+   originally an answer to.
+2. **Conditions format.** Phase 0 hard-codes its conditions in `score.py`. A declarative
+   format is obviously right and easy to get wrong; defer until three scenarios exist and
+   the common shape is visible rather than guessed.
+3. **Slice fidelity.** cEOS does not perfectly reproduce IOS-XE/NX-OS timer behaviour, and a
+   result on a container may not hold on hardware. Every finding carries an explicit fidelity
+   caveat. Where a scenario translates a protocol (HSRP → VRRP), it carries a second one.
+   See `docs/emulation-fidelity.md`.
+4. **How much of this is worth automating** versus writing by hand. A personal tool used
+   occasionally has very different automation economics from a service. Resist building
+   machinery before the manual version is annoying.
 
 ---
 
-## 6. Source index
+## 6. Deferred: the discovery layer
 
-- arXiv:2604.18233 — Aether (Cisco/Swisscom), Apr 2026
+The previous version of this document specified an autonomous pipeline: a cheap model
+(SCOUT) generating ~2,000 conjectures per cycle, a deterministic filter and scheduler
+(WARDEN) killing ~85% before any tool call, and a frontier model (PROSECUTOR) attempting to
+falsify the survivors in emulation. With a conjecture schema, a learned per-class escalation
+policy, prompt-cached fact packs, batched generation, and a circuit breaker on
+findings-per-dollar.
+
+**Why it is deferred.** All of that machinery exists to make *volume* affordable. At the
+scale of one person and their own labs, the volume is not there, so the machinery is cost
+without benefit — and it sits on top of a scenario harness that does not exist yet. The
+harness is the substrate either way; the generator is optional.
+
+**What it would take to bring it back.** Phases 1–3 complete, a library of hand-written
+scenarios large enough to see what a generated one should look like, and a real answer to
+§5.1. At that point the discovery layer becomes "propose new scenarios," which is a much
+better-defined job than "find bugs," and it inherits the runner, scorer, and controls that
+already work.
+
+**What survives from it regardless**, and is already reflected above:
+
+- Facts are materialised by deterministic code; nothing composes a query (§1.2).
+- Verdicts are hard conditions with exit codes, never model judgment (§2.4).
+- A survivor is only meaningful if something genuinely tried to kill it (§2.5).
+- A result that static analysis could have found is not a result (§2.6).
+
+The full prior specification is in git history.
+
+---
+
+## 7. Notes on this revision
+
+Section numbers referenced from code and docs were preserved: §1.3, §1.4, §2.2, §2.5, §3.1,
+§4.1, §4.2, §4.3, §5.3. Two moved:
+
+- **§2.3** was the conjecture schema; it is now the runner. The conjecture schema is in §6.
+- **§4.4** was the scale target (25 nodes, Aether-comparable). It is gone: comparability
+  with a research benchmark is not a goal of a personal tool. Scenario size is governed by
+  §3.1 instead.
+
+## 8. Source index
+
 - SIGCOMM 2023 — Lessons from the evolution of the Batfish configuration analysis tool
+- arXiv:2604.18233 — Aether, network validation using agentic AI and digital twin
 - SIGCOMM 2024 — Relational Network Verification
-- POPL 2026 — Network Change Validation with Relational NetKAT
 - PLDI 2024 — Diffy: data-driven bug finding for configurations
-- arXiv:2601.06007 — Don't Break the Cache: prompt caching for long-horizon agentic tasks
-- Gartner via NTT Data — agentic NetOps <1% adoption
-- Gartner via NetBrain — 80% of vendors shipping agentic capability by end 2027
-- containerlab.dev — nodes, multi-node, config management
-- batfish.readthedocs.io — differential questions, question framework
+- containerlab.dev — kinds, resource limits, multi-node
+- batfish.readthedocs.io — supported devices, differential questions, question framework

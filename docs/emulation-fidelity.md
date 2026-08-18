@@ -11,7 +11,7 @@ expect.
 ## The problem
 
 §4.1 names the Phase 0 ground-truth scenario `site14_hsrp_lockstep`, and the
-conjecture schema in §2.3 uses `hsrp group 14 active role changes >2 times within
+conjecture schema now recorded in §6 uses `hsrp group 14 active role changes >2 times within
 120s` as its worked example.
 
 **HSRP is Cisco-proprietary.** No non-Cisco NOS implements it. So Phase 0 as
