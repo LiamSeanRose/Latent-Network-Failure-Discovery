@@ -26,9 +26,9 @@ express a row cannot host the scenario, regardless of how good its routing is.
 |---|---|---|---|---|
 | HSRP | yes | no | no | no |
 | VRRP | yes | yes (v2/v3) | yes | yes (v2/v3) |
-| Preempt delay | yes (`minimum`, `reload`) | yes (`minimum`, `reload`) | unverified | **no — toggle only** |
-| Object tracking w/ decrement | yes | yes (`decrement`, `shutdown`) | unverified | **no** |
-| Sub-second advert interval | yes (msec) | yes | unverified | yes (10 ms steps, centisecond wire) |
+| Preempt delay | yes (`minimum`, `reload`) | yes (`minimum`, `reload`) | yes (`preempt-delay`) | **no — toggle only** |
+| Object tracking w/ decrement | yes | yes (`decrement`, `shutdown`) | yes (`priority-decrement`) | **no** |
+| Sub-second advert interval | yes (msec) | yes | yes (`advertise-interval`) | yes (10 ms steps, centisecond wire) |
 | Image acquisition | licensed | free account, manual download | freely downloadable | fully open |
 | Packaging | IOL native / vrnetlab VM | native container | native container | `linux` kind, not a first-class kind |
 
@@ -69,15 +69,29 @@ Three options, in descending fidelity:
    weight, one manual download. The finding then carries a translation caveat as
    well as the §5.3 container-vs-hardware caveat: two layers of "may not hold on
    the real box" rather than one.
-3. **SR Linux — fully open image, capabilities unverified.** Worth ten minutes of
-   checking before choosing 1 or 2, since it is the only option with no manual
-   acquisition step at all.
+3. **SR Linux — fully open image, capabilities now verified.** See below. This is
+   the recommended target.
+
+### SR Linux expresses the scenario, and adds a timer worth having
+
+Checked against the SR Linux data model rather than assumed. Under
+`vrrp/vrrp-group` the model carries `priority`, `preempt`, `preempt-delay`,
+`advertise-interval`, `version`, `accept-mode`, `init-delay`,
+`master-inherit-interval`, and an `interface-tracking` container with
+`track-interface` and `priority-decrement`.
+
+That covers both knobs the lockstep failure needs, with no manual image
+acquisition — the image is on a public registry.
+
+`init-delay` is a bonus and worth designing the scenario around: it is a startup
+timer, so it only bites on reload, which is the §4.2 Phase 0 event and exactly the
+kind of dormant, rarely-exercised value the whole project is meant to hunt. It has
+no HSRP equivalent, so it is a genuine addition rather than a translation artifact.
 
 ## Not yet verified
 
 Stated explicitly so none of it is mistaken for a checked fact:
 
-- SR Linux VRRP preempt-delay and tracking support — the whole row.
 - Whether cEOS honours sub-second VRRP timers *accurately under container
   scheduling*, which is the question that actually decides whether a timer-race
   finding means anything. Container CPU contention can dominate a 100 ms timer.
@@ -94,10 +108,14 @@ should be measured on the first booted lab, before any scenario is trusted.
 
 ## Recommendation
 
-Check SR Linux first (free, no acquisition step). If it cannot express preempt
-delay and tracked-object decrement, use cEOS and accept the HSRP→VRRP translation
-caveat, keeping the Cisco path in reserve for validating a high-severity finding
-later — which is what §5.3 proposes vrnetlab for anyway.
+**Build Phase 0 on SR Linux.** It expresses both required knobs, needs no account
+and no manual download, and is a native container rather than a VM, which keeps
+the §3.1 slice-minimisation economics intact when Phase 3 arrives.
+
+Accept the HSRP→VRRP translation caveat and record it on every finding. Keep cEOS
+as a second opinion if a finding looks implementation-specific, and the Cisco path
+in reserve for validating a high-severity finding on the real protocol — which is
+what §5.3 proposes vrnetlab for anyway.
 
 Do not choose Cisco for Phase 0 on fidelity grounds alone. Phase 0 has to prove
 that a timing-dependent failure is real and that static analysis misses it. That
