@@ -67,9 +67,22 @@ Synthetic throughout.
 | 14 | 10.14.0.0/24 | 14 | client subnet — the one that breaks |
 | 24 | 10.24.0.0/24 | 24 | second group, same pair |
 | 34 | 10.34.0.0/24 | 34 | third group, same pair |
+| 99 | 10.99.0.0/30 | — | transit between the aggs, OSPF, no VRRP |
 
 All three intended master on `agg-a`. Virtual address `.1`, `agg-a` `.2`,
 `agg-b` `.3`.
+
+**VLAN 99 is not decoration.** It carries an OSPF adjacency between the two
+aggregation routers across the acc1 trunks, so a router holding a group while its
+own uplink is down forwards via its peer instead of blackholing. Without it,
+group 34 — which does not track the uplink — turns every uplink failure into a
+reachability failure, and reachability under single-link failure is a SYMBOLIC
+question (§1.4). Batfish would catch it, and §4.3 reads Batfish catching the
+Phase 0 outage as the escalation boundary being wrong.
+
+The scenario must be **resilient to every single link failure in steady state and
+broken only by timing.** That is the whole discipline of designing this proof, and
+it is easy to violate by accident.
 
 Three groups rather than one is the entire point: lockstep-versus-independent is
 not observable with a single group, and §2.3's `fhrp_lockstep` class is about

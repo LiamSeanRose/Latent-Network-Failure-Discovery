@@ -34,6 +34,14 @@ Three flaps at 30 s intervals leave the gateways split across both routers, with
 group 14 changing master ≥4 times in 120 s — verbatim the `predicted_observable`
 in PROJECT.md §2.3.
 
+**The transit VLAN is load-bearing.** VLAN 99 carries an OSPF adjacency between
+agg-a and agg-b over the acc1 trunks. Without it, group 34 — which does not track
+the uplink — would sit on agg-a while agg-a's uplink is down, with no path
+upstream, and blackhole. That would be a *reachability* failure, and "after link X
+fails, is A still reachable" is a SYMBOLIC question (§1.4): Batfish would catch it,
+and §4.3 reads that as the escalation boundary being wrong. The scenario has to
+survive every single link failure in steady state and fail only on timing.
+
 **Why Batfish cannot see it.** Batfish converges to one steady state, by design
 (§1.3). It computes: uplink up, tracked objects up, priorities at base, all three
 groups on agg-a. Healthy — and correct. The failure exists only between events,

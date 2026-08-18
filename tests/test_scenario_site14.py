@@ -28,6 +28,7 @@ TOPOLOGY: Final = SCENARIO / "topology.clab.yml"
 CEOS_NODES: Final = ("core1", "agg-a", "agg-b", "acc1")
 AGGS: Final = ("agg-a", "agg-b")
 GROUPS: Final = (14, 24, 34)
+TRANSIT_VLAN: Final = 99
 
 
 def topology() -> dict:
@@ -271,3 +272,50 @@ def test_access_switch_does_not_route() -> None:
     text = config("acc1")
     assert "no ip routing" in text
     assert "interface Vlan" not in text
+
+
+def test_aggregation_pair_has_a_transit_path_to_each_other() -> None:
+    """Without this, an aggregation router holding a group while its own uplink
+    is down has no way upstream, and the scenario blackholes.
+
+    That matters beyond availability: "after link X fails, is A still reachable"
+    is a SYMBOLIC question (PROJECT.md §1.4), so a blackhole here would be caught
+    by Batfish failure analysis — and §4.3 reads Batfish catching the Phase 0
+    outage as evidence that the escalation boundary is wrong. The scenario has to
+    survive any single link failure in steady state, and fail only on timing.
+    """
+    a = addresses("agg-a")[f"Vlan{TRANSIT_VLAN}"]
+    b = addresses("agg-b")[f"Vlan{TRANSIT_VLAN}"]
+    assert a.network == b.network
+    assert a.ip != b.ip
+
+    for node in AGGS:
+        text = config(node)
+        assert f"network {a.network} area" in text, f"{node}: transit not in OSPF"
+        assert f"passive-interface Vlan{TRANSIT_VLAN}" not in text, (
+            f"{node}: transit is passive, so no adjacency forms and the backup "
+            f"path does not exist"
+        )
+
+
+def test_transit_vlan_carried_on_every_trunk() -> None:
+    for node in ("agg-a", "agg-b", "acc1"):
+        for iface, lines in interface_blocks(config(node)).items():
+            if "switchport mode trunk" not in lines:
+                continue
+            allowed = next(
+                line.removeprefix("switchport trunk allowed vlan ")
+                for line in lines
+                if line.startswith("switchport trunk allowed vlan ")
+            )
+            carried = {int(v) for v in allowed.split(",") if v.strip().isdigit()}
+            assert TRANSIT_VLAN in carried, (
+                f"{node}:{iface} does not carry the transit VLAN"
+            )
+
+
+def test_transit_vlan_runs_no_vrrp() -> None:
+    """It is infrastructure between two routers, not a gateway for anything."""
+    for node in AGGS:
+        block = interface_blocks(config(node))[f"Vlan{TRANSIT_VLAN}"]
+        assert not any(line.startswith("vrrp ") for line in block)
