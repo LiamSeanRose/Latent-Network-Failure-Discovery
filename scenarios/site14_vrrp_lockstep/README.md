@@ -4,7 +4,12 @@ The existence proof for the whole project (PROJECT.md §4.2): a failure that is
 real in emulation and invisible to static analysis. If Batfish catches this, §4.3
 says the escalation boundary is wrong and the project stops.
 
-**Nothing here has been run.** It was written in an environment with no Docker
+**The Batfish half has been run and passes.** Batfish parses these configs,
+models all six VRRP groups, and reports the network healthy — with a recorded
+caveat that it does not parse the tracking and preemption lines the scenario turns
+on (`docs/emulation-fidelity.md`). The emulation half has never been booted.
+
+**Nothing on the emulation side has been run.** It was written in an environment with no Docker
 daemon, so every file is untested. Expect to fix things on first boot; the
 "Untested, in order of likelihood" section below is where to look first.
 

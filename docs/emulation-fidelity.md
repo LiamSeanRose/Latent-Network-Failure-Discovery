@@ -120,6 +120,53 @@ design, got the steady state right, and still missed the failure — precisely t
 have been trivially true and would have demonstrated a vendor coverage gap rather
 than the boundary the thesis claims.
 
+### Measured, not assumed: what Batfish actually did with these configs
+
+Run against `scenarios/site14_vrrp_lockstep/` with `batfish/allinone`. Results are
+empirical, not predicted.
+
+**Parsed and modelled correctly:** all four devices, every interface, the
+addressing, OSPF, and the VRRP groups — 14, 24 and 34 present on both aggregation
+routers with their virtual addresses and priorities. Traceroute from both aggs to
+the probe target returns `ACCEPTED`. **Batfish reports this network healthy.**
+
+**Not parsed.** Batfish's Arista grammar rejected exactly these lines:
+
+```
+vrrp 14 preempt
+vrrp 24 preempt
+vrrp 34 preempt
+vrrp 14 tracked-object UPLINK decrement 40
+vrrp 24 tracked-object UPLINK decrement 40
+track UPLINK interface Ethernet1 line-protocol
+```
+
+Note what is *not* on that list: `vrrp N preempt delay minimum 90` parses, while
+bare `vrrp N preempt` does not. So does `vrrp N ipv4`, `priority-level`, and
+`advertisement interval`.
+
+These are Batfish parser gaps, not EOS syntax errors — the lines follow current
+Arista syntax. Batfish treats EOS with a Cisco-derived grammar, which expects
+`track <number>` rather than Arista's `track <name>`.
+
+**What this does to the Phase 0 claim.** It is the partial case, and it is worth
+being precise about. Batfish did not ignore FHRP — it modelled the groups and would
+compute the election. But it did not read the tracking or preemption behaviour the
+scenario turns on. So its healthy verdict is *partly* attributable to not having
+read the mechanism.
+
+The claim survives, because the failure requires a sequence and a timing ratio that
+no steady state contains — Batfish would report healthy with the mechanism fully
+modelled too, since both the uplink-up and uplink-down steady states are reachable.
+But it is weaker evidence than a verdict from an analyser that understood every
+line, and every finding from this scenario must say so.
+
+**A structural gap worth knowing about.** `client1` is a plain linux container with
+no config file, so it does not exist in the Batfish snapshot at all. The emulated
+topology and the symbolic snapshot are *not the same network*. The check traces
+from the aggregation routers instead. Any scenario comparing the two tiers has to
+account for the endpoints that exist in only one of them.
+
 **Turn it into an acceptance step rather than an assumption.** Batfish's tracking
 support is described as initial, and documented support is not the same as correct
 behaviour on these specific configs. Phase 0 should assert, in order:
@@ -139,6 +186,9 @@ field at all, and this is the cheapest possible place to build that check in.
 
 Stated explicitly so none of it is mistaken for a checked fact:
 
+- Everything about cEOS itself. Batfish's verdict above required no cEOS at all;
+  the configs have still never been parsed by an actual Arista image, so the EOS
+  syntax question is *narrowed* by the Batfish run, not answered by it.
 - Whether cEOS honours sub-second VRRP timers *accurately under container
   scheduling*. This is the question that actually decides whether any timer-race
   finding means anything: if host scheduling jitter is wider than the margins the
