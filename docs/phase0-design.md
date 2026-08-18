@@ -1,0 +1,198 @@
+# Phase 0 scenario design
+
+**Status: provisional.** The failure mechanism below is a reconstruction, not the
+confirmed outage. Everything except §"The mechanism" survives a correction; that
+section is the one to overwrite.
+
+Target platform is Arista cEOS, for the reasons in `emulation-fidelity.md`.
+Topology and addressing here are synthetic and invented for this document, per
+rule 4.
+
+## What Phase 0 has to prove
+
+From PROJECT.md §4.2 and the §4.3 kill criteria, in order:
+
+1. A timing-dependent failure reproduces in Containerlab, deterministically enough
+   to be scored.
+2. Batfish, given the **identical configs**, reports the network healthy.
+3. If Batfish catches it, the escalation boundary in §1.4 is wrong and the project
+   stops.
+
+Point 2 carries a trap worth restating: a healthy verdict is only meaningful if
+Batfish actually modelled the redundancy. Assert parse-clean, then
+groups-and-master-as-expected, then healthy. In that order.
+
+## Topology
+
+Six nodes. Small on purpose — Phase 0 is one site, not the §4.4 fabric, and every
+node added here is a node the Phase 3 slicer will later have to justify.
+
+```
+                    ┌─────────┐
+                    │  core1  │           10.0.0.0/31 pairs
+                    └────┬─┬──┘
+             Et1 ────────┘ └──────── Et2
+              │                       │
+        ┌─────┴─────┐           ┌─────┴─────┐
+        │   agg-a   │───Et2─────│   agg-b   │   peer link, trunk
+        │ (intended │   trunk   │ (intended │
+        │  master)  │           │  backup)  │
+        └─────┬─────┘           └─────┬─────┘
+           Et3│                       │Et3
+              └──────┐         ┌──────┘
+                  ┌──┴─────────┴──┐
+                  │     acc1      │  L2 only
+                  └───────┬───────┘
+                          │ Et3, access vlan 14
+                     ┌────┴────┐
+                     │ client1 │  linux, probe source
+                     └─────────┘
+```
+
+`core1`, `agg-a`, `agg-b`, `acc1` are cEOS. `client1` is a plain linux container.
+
+**Uplink A** (`agg-a:Et1 ↔ core1:Et1`) is the tracked object and the flap target.
+
+## Addressing and groups
+
+Synthetic throughout.
+
+| VLAN | Subnet | VRRP group | Purpose |
+|---|---|---|---|
+| 14 | 10.14.0.0/24 | 14 | client subnet — the one that breaks |
+| 24 | 10.24.0.0/24 | 24 | second group, same pair |
+| 34 | 10.34.0.0/24 | 34 | third group, same pair |
+
+All three intended master on `agg-a`. Virtual address `.1`, `agg-a` `.2`,
+`agg-b` `.3`.
+
+Three groups rather than one is the entire point: lockstep-versus-independent is
+not observable with a single group, and §2.3's `fhrp_lockstep` class is about
+groups on the same pair diverging.
+
+## The mechanism (provisional — confirm or replace)
+
+A race between **tracked-object recovery** and **preempt delay**, exposed only by
+repeated flapping.
+
+Per-group configuration asymmetry, of the kind that accumulates over years of
+piecemeal changes:
+
+| Group | Priority on agg-a | Tracks uplink A | Decrement | Preempt delay minimum |
+|---|---|---|---|---|
+| 14 | 110 | yes | 40 | 0 s |
+| 24 | 110 | yes | 40 | 90 s |
+| 34 | 110 | no | — | 90 s |
+
+`agg-b` holds priority 100 on all three, preempt enabled.
+
+Sequence on a single flap of uplink A:
+
+1. Uplink A drops. Groups 14 and 24 decrement to 70, below agg-b's 100. Both fail
+   over. Group 34 does not track, so it stays on agg-a — **first divergence**.
+2. Uplink A returns. Group 14 has no preempt delay and reclaims master
+   immediately. Group 24 must wait 90 s — **second divergence**.
+3. If the next flap arrives inside that 90 s window, group 24 never returns, and
+   group 14 has moved twice more.
+
+Three flaps at 30 s intervals therefore leave the three gateways distributed
+across both routers, with group 14 having changed master four or more times —
+which is verbatim the `predicted_observable` in §2.3's worked example.
+
+**Why this is invisible to Batfish, and why that is not a Batfish deficiency.**
+Batfish converges to a single steady state deterministically, by design (§1.3).
+Ask it about this network and it computes: uplink A up, all tracked objects up,
+all priorities at base, all three groups master on agg-a. Healthy — and correct.
+The failure exists only in the interval between events, and its existence depends
+on the *ratio* of flap interval to preempt delay. There is no steady state in
+which it is visible, so no steady-state analysis can find it. That is the §1.4
+escalation boundary stated as a concrete example rather than a table row.
+
+**What makes it an outage rather than an inefficiency** is the part most dependent
+on your actual incident, and the part I am least confident reconstructing. The
+candidates, in order of how well they fit a seven-hour duration:
+
+- Split gateway placement plus an asymmetric-path drop (stateful device, uRPF, or
+  an ACL applied on one agg and not the other).
+- Oscillation never settling, so the client sees repeated multi-second outages
+  rather than one clean failover.
+- A group landing on the router whose uplink is down, blackholing until something
+  else moves.
+
+The third would likely be caught by Batfish's failure analysis, which makes it the
+*wrong* choice for Phase 0 — §1.4 classifies "after link X fails, is A still
+reachable" as SYMBOLIC. Prefer the first or second.
+
+## Event sequence
+
+```
+t=0     deploy, wait for VRRP convergence
+t=60    baseline probe: client1 → upstream, confirm loss-free
+t=90    flap uplink A: down 10 s, up 20 s
+t=120   flap uplink A: down 10 s, up 20 s
+t=150   flap uplink A: down 10 s, up 20 s
+t=180   observe 120 s
+t=300   collect
+```
+
+## Observables and pass/fail
+
+Hard conditions, per §2.5 — not judgment.
+
+- **Primary:** VRRP group 14 master transitions ≥ 4 within the 120 s observation
+  window.
+- **Secondary:** the three groups are not co-located at t=300.
+- **Impact:** client1 loss window exceeds the single-failover baseline.
+
+Confirmation requires the observable in ≥ 2 of 3 runs **and** absent in the
+no-trigger control. Controls to run, all three from §2.5:
+
+1. No-trigger control — same lab, no flap. Observable must not appear.
+2. Timing perturbation — flap intervals randomized ±20%. If the result only
+   appears at exactly 30 s, it is a knife-edge artifact, not a finding.
+3. Repetition — 3 identical runs, to separate deterministic from flaky.
+
+Control 2 has a prerequisite that must be measured first: **container scheduling
+jitter**. If host jitter is comparable to the timer margins, the ±20% control is
+measuring the machine. Measure observed VRRP advertisement intervals against
+configured before trusting any of this.
+
+## Batfish control
+
+Same config files, no modification:
+
+1. Parse — zero unrecognised-line warnings on the VRRP stanzas.
+2. Model check — `VRRP_Groups` present on the expected SVIs, master computed as
+   agg-a for all three.
+3. Verdict — reachability client1 → upstream healthy.
+
+Only 1 and 2 passing makes 3 meaningful.
+
+## Deliverable
+
+Per §4.2: one directory, one README, one asciinema.
+
+```
+scenarios/site14_vrrp_lockstep/
+  topology.clab.yml
+  configs/{core1,agg-a,agg-b,acc1}.cfg
+  events.yml
+  batfish/            # snapshot dir Batfish consumes
+  README.md
+  run.sh
+```
+
+Named `vrrp` rather than `hsrp`, since it is VRRP on cEOS. Note the translation
+caveat in the README.
+
+## Open before this can be built
+
+1. **The real mechanism.** The table above is my reconstruction. If the outage was
+   dampening, a microloop, or convergence stall, the topology mostly survives but
+   the mechanism section is rewritten.
+2. **cEOS version.** Arista has two VRRP syntaxes: legacy (`vrrp 14 ip …`,
+   `vrrp 14 priority …`) and current (`vrrp 14 ipv4 …`,
+   `vrrp 14 priority-level …`). Writing configs against the wrong one wastes an
+   evening. `show version` on the imported image settles it.
+3. Whether Batfish parses cEOS-generated running-config as cleanly as it parses
+   hand-written EOS config — a five-minute check once the lab is up.
