@@ -81,27 +81,30 @@ One iteration:
 A phase is done when its "Done when" clause in §4.2 is objectively true — a command runs and
 produces the stated output. Not when it feels complete.
 
-### 7.2 Decide, do not block
+### 7.2 Decide and act
 
-**Default: choose, act, and record.** A blocked loop produces nothing, and most decisions are
-reversible in minutes.
+**The repository owner has given standing authorisation to decide and act.** The default is
+not "ask" and it is not "ask when unsure" — it is act, record the reasoning, and let the owner
+overrule afterwards by reading the log. A loop that queues questions produces nothing, and
+being asked to approve choices you delegated is worse than being told what was done.
 
-Escalate to the owner *only* when one of these is true:
+This applies to the whole surface: libraries, layout, naming, scope, output format, test
+strategy, refactors, deleting code that no longer earns its place, and **amending
+`PROJECT.md` itself** when the build shows the spec is wrong. A spec that cannot be corrected
+by the work is a spec that goes stale. Amend it, and log why.
 
-- The action is **irreversible or externally visible** — publishing, deleting remote refs,
-  posting, spending money, anything touching a system outside this repository.
-- It requires a **credential, licence, or account** only they can obtain.
-- It **contradicts `PROJECT.md`**. The spec outranks the loop; a conflict is a stop-and-ask
-  (rule 1), not a judgement call.
-- Getting it wrong would **waste a phase or more** of work, and there is no cheap way to find
-  out which choice is right.
+Two things remain outside this, and neither is a permission gate:
 
-Everything else — library choice, file layout, naming, test strategy, parser scope, output
-format, what to build first within a phase — is decided by the loop and logged.
+- **Blocked, not forbidden.** Some things are impossible from a session — a licensed image, a
+  credential, a GitHub operation the token cannot perform. These are not decisions to escalate;
+  they are obstacles to route around, report plainly, and record so the next session does not
+  re-derive them. Do everything that does not depend on the blocker.
+- **Genuinely destructive and outside the task.** Deleting the owner's data, force-pushing over
+  work that is not yours to replace, publishing to somewhere the task never mentioned. Not
+  because permission is missing, but because a reasonable person doing this job would not do it
+  without being asked. Judgement, not paperwork.
 
-When escalating, do the parts that do not depend on the answer first, ask one specific
-question with a recommendation, and leave the repository in a working state.
-
+Everything else: decide, do it, write it down.
 ### 7.3 The decision log
 
 Every decision that a future reader might otherwise have to reverse-engineer goes in

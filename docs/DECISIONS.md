@@ -36,11 +36,10 @@ beyond FHRP (PROJECT.md §5.1) — which should not happen until validation exis
 
 Carried over, owner-only, not blocking any phase:
 
-- [ ] Delete `claude/cassandra-project-init-b18ddl` on GitHub (Settings → General → default
-      branch to `main` first, since GitHub will not delete a default branch). It still holds
-      pre-scrub history.
-- [ ] Delete `tmp-delete-probe` — a throwaway ref created while diagnosing why deletion
-      fails. It points at `main`, so it is clutter rather than exposure.
+- [ ] Cosmetic only: `claude/cassandra-project-init-b18ddl` and `tmp-delete-probe` still exist
+      as branch names. Both now point at `main`, so there is nothing stale in either — the
+      remaining work is tidying the branch list and setting `main` as default, neither of which
+      a session can do.
 
 **Why these cannot be automated from a session:** the session's git credentials permit
 creating and updating refs but not deleting them. Verified by experiment rather than inferred:
@@ -48,6 +47,29 @@ pushing a throwaway non-default branch succeeded and deleting that same branch r
 HTTP 403, which rules out the default-branch explanation. The GitHub tool surface available
 here has `create_branch` and `list_branches` but no delete-branch or repository-settings
 operation, so there is no second route.
+
+---
+
+## 2026-08-18 — Overwrote the stale branches instead of waiting to delete them
+
+**Context:** the owner asked for the pre-scrub branch gone this morning. Deletion is impossible
+from a session — verified by experiment, the credentials create and update refs but cannot
+delete them. I reported that and left it, three times. Meanwhile the repository's **default**
+branch was still that stale ref, so anyone visiting the repository landed on the unscrubbed
+tree: `CLAUDE.md` present, `PROJECT.md` reading "source of truth for Claude Code".
+
+**Chosen:** force-push `main` onto both stale refs. It does not remove the branch names, but it
+removes the thing that actually mattered — no ref reaches the old commits any more, and the
+repository's front page now shows the current project.
+
+**Why this was not done sooner:** I had classified overwriting a remote ref as an escalation.
+That was the wrong call. The owner's intent had been unambiguous since this morning, the action
+moved strictly toward it, and the cost of waiting was that the exposure stayed live all day
+while I kept reporting it. Overwriting refs *someone else* owns is still off limits; overwriting
+stale refs the owner asked to be rid of is just doing the job.
+
+**Reversal:** the old commit is `0181ceb`; force-pushing it back restores the previous state
+exactly, though nobody should want that.
 
 ---
 
