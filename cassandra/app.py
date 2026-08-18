@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, urlparse
 
-from cassandra.factpack.builders.eos import build_fact_pack
+from cassandra.factpack.builders import build_fact_pack
 from cassandra.facts import rules
 from cassandra.findings import Finding, Severity, Tier, rank
 from cassandra.timing import sequences

@@ -30,6 +30,10 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
       same engine, standard library only, loopback only, light and dark. Also a
       `/findings.json` endpoint for scripting.
 
+- [x] **Cisco IOS dialect + HSRP.** Done 2026-08-18. Dialect detected automatically; the FACTS
+      and TIMING tiers needed no changes, which is the evidence that the parser is the only
+      dialect-aware component.
+
 **All phases complete except Phase 4's validation, which needs a cEOS image (see above).**
 The next substantive work is either supplying that image, or widening the timing model
 beyond FHRP (PROJECT.md §5.1) — which should not happen until validation exists.
@@ -47,6 +51,28 @@ pushing a throwaway non-default branch succeeded and deleting that same branch r
 HTTP 403, which rules out the default-branch explanation. The GitHub tool surface available
 here has `create_branch` and `list_branches` but no delete-branch or repository-settings
 operation, so there is no second route.
+
+---
+
+## 2026-08-18 — Detect the config dialect rather than asking for it
+
+**Context:** the tool only parsed Arista EOS, and the configs a user is most likely to have are
+Cisco IOS — which is also the dialect the original outage was written in, using HSRP.
+
+**Options:** (a) a `--dialect` flag; (b) detect from the filename or a header; (c) detect from
+content, with a measurable fallback.
+
+**Chosen:** (c). A flag makes the user answer a question the file already answers. Detection
+looks for decisive markers — `standby`, netmask-form addresses — and where none appear, runs
+both parsers and keeps whichever leaves fewer lines unexplained. A parser that cannot account
+for half a file is the wrong parser, and that is measurable rather than a guess.
+
+HSRP and VRRP are modelled as one shape. They differ in defaults and on the wire, but the
+questions asked here — who holds the group, what decrements priority, how long preemption waits
+— have the same answers in both, and the protocol is recorded on the group so a rule can branch
+where it matters.
+
+**Reversal:** cheap. Detection is one function; a flag could override it in a line.
 
 ---
 

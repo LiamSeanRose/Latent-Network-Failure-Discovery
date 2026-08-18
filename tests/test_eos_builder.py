@@ -13,7 +13,8 @@ from typing import Final
 
 import pytest
 
-from cassandra.factpack.builders.eos import build_fact_pack, parse_device
+from cassandra.factpack.builders import build_fact_pack
+from cassandra.factpack.builders.eos import parse_device
 from cassandra.factpack.schema import FhrpProtocol, InterfaceKind, SwitchportMode
 
 CORPUS: Final = (

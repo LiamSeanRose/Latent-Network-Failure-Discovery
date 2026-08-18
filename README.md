@@ -3,6 +3,8 @@
 **Point it at a directory of network configs. Get back a ranked list of latent failure modes,
 each with the evidence that produced it.**
 
+Arista EOS and Cisco IOS, detected automatically. VRRP and HSRP.
+
 ```
 $ cassandra check ./configs
 HIGH   agg-a  VRRP 14 and 24 can diverge under repeated uplink flap

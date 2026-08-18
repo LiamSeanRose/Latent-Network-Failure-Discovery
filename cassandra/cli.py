@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from cassandra.app import serve
-from cassandra.factpack.builders.eos import build_fact_pack
+from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
 from cassandra.report import render

@@ -258,8 +258,15 @@ validation demonstrates the model already agrees with reality.
 
 ### 5.2 Config dialects
 
-Phase 1 targets Arista EOS. Cisco IOS shares enough structure that a second dialect should be
-cheap; NX-OS and IOS-XR less so. Do not generalise until a second dialect actually exists.
+Arista EOS and Cisco IOS are both supported, chosen automatically — by marker where one is
+decisive, otherwise by whichever parser accounts for more of the file. That second dialect
+confirmed the intended shape: the parser is the only dialect-aware component, and the FACTS and
+TIMING tiers needed no changes to work on HSRP.
+
+NX-OS and IOS-XR are the obvious next ones and are less similar. The open question is no longer
+whether to generalise but where the shared machinery stops paying: `common.py` currently holds
+stanza parsing, VLAN ranges and netmask conversion, and a third dialect is the test of whether
+that is the right seam.
 
 ### 5.3 Slice fidelity
 

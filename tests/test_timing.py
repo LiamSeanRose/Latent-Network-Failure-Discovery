@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from cassandra.factpack.builders.eos import build_fact_pack
+from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.findings import Severity, Tier
 from cassandra.timing.model import Event, EventKind, simulate
