@@ -29,6 +29,7 @@ express a row cannot host the scenario, regardless of how good its routing is.
 | Preempt delay | yes (`minimum`, `reload`) | yes (`minimum`, `reload`) | yes (`preempt-delay`) | **no — toggle only** |
 | Object tracking w/ decrement | yes | yes (`decrement`, `shutdown`) | yes (`priority-decrement`) | **no** |
 | Sub-second advert interval | yes (msec) | yes | yes (`advertise-interval`) | yes (10 ms steps, centisecond wire) |
+| **Batfish parses its configs** | **yes** | **yes** | **no** | **yes** |
 | Image acquisition | licensed | free account, manual download | freely downloadable | fully open |
 | Packaging | IOL native / vrnetlab VM | native container | native container | `linux` kind, not a first-class kind |
 
@@ -72,6 +73,25 @@ Three options, in descending fidelity:
 3. **SR Linux — fully open image, capabilities now verified.** See below. This is
    the recommended target.
 
+### The constraint that decides it: Batfish has to read the same configs
+
+Phase 0 is not "build a lab that breaks." It is "build a lab that breaks **and**
+show Batfish calls the same configs healthy." The second half means the emulation
+target must also be a platform Batfish can parse, which is a constraint on the NOS
+choice that has nothing to do with emulation quality.
+
+Batfish's supported list covers Arista, Cisco (IOS, IOS-XE, IOS-XR, NX-OS, ASA),
+Cumulus, FRR, SONiC, Juniper, and others. **Nokia SR Linux is not on it.**
+
+That intersects the two requirements down to almost nothing:
+
+| Candidate | Expresses the failure | Batfish reads it | Viable |
+|---|---|---|---|
+| FRR / Cumulus / SONiC | no (no preempt delay, no tracking) | yes | **no** |
+| Nokia SR Linux | yes | no | **no** |
+| Arista cEOS | yes | yes | **yes** |
+| Cisco IOL / IOS-XE | yes (native HSRP) | yes | yes, with licensing |
+
 ### SR Linux expresses the scenario, and adds a timer worth having
 
 Checked against the SR Linux data model rather than assumed. Under
@@ -81,7 +101,9 @@ Checked against the SR Linux data model rather than assumed. Under
 `track-interface` and `priority-decrement`.
 
 That covers both knobs the lockstep failure needs, with no manual image
-acquisition — the image is on a public registry.
+acquisition — the image is on a public registry. It is nonetheless ruled out for
+Phase 0 by the Batfish constraint above. It stays a good candidate for later
+phases that do not need a symbolic comparison on the same configs.
 
 `init-delay` is a bonus and worth designing the scenario around: it is a startup
 timer, so it only bites on reload, which is the §4.2 Phase 0 event and exactly the
@@ -108,14 +130,34 @@ should be measured on the first booted lab, before any scenario is trusted.
 
 ## Recommendation
 
-**Build Phase 0 on SR Linux.** It expresses both required knobs, needs no account
-and no manual download, and is a native container rather than a VM, which keeps
-the §3.1 slice-minimisation economics intact when Phase 3 arrives.
+**Build Phase 0 on Arista cEOS.** It is the only candidate that both expresses the
+failure and can be handed to Batfish, and it is a native container rather than a
+VM, which keeps the §3.1 slice-minimisation economics intact when Phase 3 arrives.
 
-Accept the HSRP→VRRP translation caveat and record it on every finding. Keep cEOS
-as a second opinion if a finding looks implementation-specific, and the Cisco path
-in reserve for validating a high-severity finding on the real protocol — which is
-what §5.3 proposes vrnetlab for anyway.
+The cost is a one-time manual step that cannot be automated from a headless
+session: register a free Arista account, download the cEOS image, and
+`docker import` it.
+
+Accept the HSRP→VRRP translation caveat and record it on every finding. Keep the
+Cisco path in reserve for validating a high-severity finding on the real protocol,
+which is what §5.3 proposes vrnetlab for anyway.
+
+## Open risk to the Phase 0 proof itself
+
+Batfish's supported-devices page says nothing about whether it models HSRP or VRRP
+election at all. This needs checking before the scenario is built, because it
+decides what a healthy Batfish verdict is worth:
+
+- If Batfish **models** FHRP election and still reports healthy, that is the
+  §4.3 result the project wants: static analysis sees the steady state correctly
+  and misses the timing-dependent one.
+- If Batfish **ignores** FHRP entirely, then "batfish_says: healthy" is trivially
+  true for any FHRP scenario. It would prove a gap in Batfish's vendor coverage,
+  not the escalation boundary the thesis claims, and Phase 0 would need a
+  different failure class to be worth anything.
+
+The second case does not kill the project, but it does invalidate this particular
+scenario as the existence proof. Check it before writing configs, not after.
 
 Do not choose Cisco for Phase 0 on fidelity grounds alone. Phase 0 has to prove
 that a timing-dependent failure is real and that static analysis misses it. That
