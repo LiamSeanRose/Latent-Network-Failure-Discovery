@@ -142,22 +142,36 @@ Accept the HSRP→VRRP translation caveat and record it on every finding. Keep t
 Cisco path in reserve for validating a high-severity finding on the real protocol,
 which is what §5.3 proposes vrnetlab for anyway.
 
-## Open risk to the Phase 0 proof itself
+## Does Batfish model FHRP at all? Yes — which is what makes the proof work
 
-Batfish's supported-devices page says nothing about whether it models HSRP or VRRP
-election at all. This needs checking before the scenario is built, because it
-decides what a healthy Batfish verdict is worth:
+This decides what a healthy Batfish verdict is worth, so it was checked rather
+than assumed.
 
-- If Batfish **models** FHRP election and still reports healthy, that is the
-  §4.3 result the project wants: static analysis sees the steady state correctly
-  and misses the timing-dependent one.
-- If Batfish **ignores** FHRP entirely, then "batfish_says: healthy" is trivially
-  true for any FHRP scenario. It would prove a gap in Batfish's vendor coverage,
-  not the escalation boundary the thesis claims, and Phase 0 would need a
-  different failure class to be worth anything.
+Batfish's vendor-independent model exposes `HSRP_Groups`, `HSRP_Version` and
+`VRRP_Groups` as interface property specifiers, and it has support for interface,
+route and reachability tracking as applied to HSRP/VRRP priority.
 
-The second case does not kill the project, but it does invalidate this particular
-scenario as the existence proof. Check it before writing configs, not after.
+This is the favourable outcome. Batfish computes FHRP election in steady state, so
+a healthy verdict on the scenario means static analysis looked at the redundancy
+design, got the steady state right, and still missed the failure — which is
+precisely the §1.3 escalation boundary. Had Batfish been blind to FHRP, a healthy
+verdict would have been trivially true and would have demonstrated a vendor
+coverage gap rather than the boundary the thesis claims.
+
+**Turn it into an acceptance step rather than an assumption.** Batfish's tracking
+support is described as initial, and documented support is not the same as correct
+behaviour on these specific configs. Phase 0 should assert, in order:
+
+1. Batfish parsed the configs with no unrecognised-line warnings on the FHRP
+   stanzas — silent parse failure is the failure mode that would fake this result.
+2. Batfish reports the VRRP groups on the expected interfaces and elects the
+   expected master, i.e. it genuinely modelled the redundancy rather than skipping
+   it.
+3. *Then* the reachability verdict is healthy.
+
+Only with 1 and 2 passing does 3 mean anything. A `batfish_says: healthy` field in
+a finding (§2.5) that came from a config Batfish failed to parse is worse than no
+field at all, and this is the cheapest possible place to build that check in.
 
 Do not choose Cisco for Phase 0 on fidelity grounds alone. Phase 0 has to prove
 that a timing-dependent failure is real and that static analysis misses it. That
