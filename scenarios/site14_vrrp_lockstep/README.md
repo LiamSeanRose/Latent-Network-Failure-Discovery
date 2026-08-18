@@ -42,6 +42,9 @@ steady state contains it, so no steady-state analysis can reach it.
 
 ## Running it
 
+Containerlab needs root on most installs; export `CLAB="sudo containerlab"` if
+yours does.
+
 ```sh
 ./run.sh baseline    # deploy, settle 90s, confirm healthy
 ./run.sh trigger     # flap sequence + 120s observation
@@ -64,6 +67,19 @@ actually modelled the VRRP groups → reachability healthy. Only the first two
 passing makes the third mean anything. A `batfish_says: healthy` field derived
 from a snapshot Batfish silently failed to parse is worse than no field at all.
 
+## What has been checked without booting
+
+`tests/test_scenario_site14.py` lints these files for the errors that are findable
+without a lab: link endpoints naming declared nodes, every wired interface having
+a config stanza, addressing that pairs up across each L3 link with no duplicates,
+VRRP virtual addresses inside their own subnet and agreed between the pair, the
+intended master outranking the backup, tracked objects being defined where they
+are referenced, trunks carrying every group VLAN, and the asymmetry the scenario
+depends on actually being present.
+
+That catches typos and mangled addressing. It cannot tell you whether cEOS accepts
+the syntax.
+
 ## Untested, in order of likelihood
 
 1. **VRRP syntax version.** Written for current EOS (`vrrp 14 ipv4 …`,
@@ -73,6 +89,10 @@ from a snapshot Batfish silently failed to parse is worse than no field at all.
 2. **`show vrrp` output parsing** in `run.sh` is stored raw, not parsed. Once the
    real output format is known, add a transition counter — the summary currently
    requires reading the log.
+   Probe resolution is also coarse: alpine ships busybox ping, which does not
+   portably accept fractional `-i`, so loss is sampled at 1 s against a failover
+   of roughly 3 s. `apk add iputils` in the client node and drop to `-i 0.2` when
+   the window needs measuring properly.
 3. **Admin shutdown is not a carrier loss.** `run.sh` flaps by shutting
    `agg-a Ethernet1` in config. That drives `line-protocol` tracking correctly but
    does not exercise carrier-delay or debounce behaviour, which a real flap would.

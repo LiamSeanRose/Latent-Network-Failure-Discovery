@@ -11,6 +11,7 @@
 set -euo pipefail
 
 LAB=site14-vrrp-lockstep
+CLAB="${CLAB:-containerlab}"  # set CLAB="sudo containerlab" if your install needs root
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="${HERE}/runs/$(date +%Y%m%dT%H%M%S)"
 
@@ -24,8 +25,9 @@ cli() { docker exec "clab-${LAB}-$1" Cli -p 15 -c "$2"; }
 
 conf() {
   local node=$1 iface=$2 state=$3
+  # One -c with embedded newlines: cEOS Cli does not reliably stack -c flags.
   docker exec "clab-${LAB}-${node}" Cli -p 15 \
-    -c "configure" -c "interface ${iface}" -c "${state}"
+    -c "$(printf 'configure\ninterface %s\n%s\n' "${iface}" "${state}")"
 }
 
 sample_vrrp() {
@@ -40,7 +42,7 @@ sample_vrrp() {
 
 case "${1:-}" in
   baseline)
-    containerlab deploy -t "${HERE}/topology.clab.yml"
+    ${CLAB} deploy -t "${HERE}/topology.clab.yml"
     echo "settling ${SETTLE_S}s for OSPF and VRRP..."
     sleep "${SETTLE_S}"
     cli agg-a "show vrrp"
@@ -54,9 +56,14 @@ case "${1:-}" in
     SAMPLER=$!
     trap 'kill ${SAMPLER} 2>/dev/null || true' EXIT
 
+    # -i 1 rather than sub-second: alpine's ping is busybox and fractional
+    # intervals are not portable. This caps loss-window resolution at 1s, which
+    # is coarse against a ~3s VRRP failover. For finer resolution, `apk add
+    # iputils` in the client node and drop to -i 0.2.
     docker exec "clab-${LAB}-client1" \
-      ping -i 0.2 -w $((OBSERVE_S + FLAPS * (FLAP_DOWN_S + FLAP_UP_S))) 10.255.0.1 \
+      ping -i 1 -w $((OBSERVE_S + FLAPS * (FLAP_DOWN_S + FLAP_UP_S))) 10.255.0.1 \
       >"${OUT}/probe.log" 2>&1 &
+    PROBE=$!
 
     if [[ "$1" == "trigger" ]]; then
       for i in $(seq 1 "${FLAPS}"); do
@@ -74,7 +81,7 @@ case "${1:-}" in
 
     echo "observing ${OBSERVE_S}s..."
     sleep "${OBSERVE_S}"
-    wait %2 2>/dev/null || true
+    wait "${PROBE}" 2>/dev/null || true
     kill "${SAMPLER}" 2>/dev/null || true
 
     echo "--- final placement ---" | tee -a "${OUT}/summary.txt"
@@ -84,7 +91,7 @@ case "${1:-}" in
     ;;
 
   destroy)
-    containerlab destroy -t "${HERE}/topology.clab.yml" --cleanup
+    ${CLAB} destroy -t "${HERE}/topology.clab.yml" --cleanup
     ;;
 
   *)
