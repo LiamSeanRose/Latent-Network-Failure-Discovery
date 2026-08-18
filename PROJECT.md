@@ -288,22 +288,33 @@ Stop and reconsider if:
 
 ## 5. Open questions
 
-1. **Scenario sourcing.** Where do scenarios come from once the obvious ones are written?
-   Public post-mortems, protocol documentation read adversarially, and timer-inventory
-   asymmetries visible in the fact pack are the candidates. This is the question §6 was
-   originally an answer to.
-2. **Conditions format.** Phase 0 hard-codes its conditions in `score.py`. A declarative
-   format is obviously right and easy to get wrong; defer until three scenarios exist and
-   the common shape is visible rather than guessed.
-3. **Slice fidelity.** cEOS does not perfectly reproduce IOS-XE/NX-OS timer behaviour, and a
-   result on a container may not hold on hardware. Every finding carries an explicit fidelity
-   caveat. Where a scenario translates a protocol (HSRP → VRRP), it carries a second one.
-   See `docs/emulation-fidelity.md`.
-4. **How much of this is worth automating** versus writing by hand. A personal tool used
-   occasionally has very different automation economics from a service. Resist building
-   machinery before the manual version is annoying.
+### 5.1 Scenario sourcing
 
----
+Where do scenarios come from once the obvious ones are written? Public post-mortems,
+protocol documentation read adversarially, and timer-inventory asymmetries visible in the
+fact pack are the candidates. This is the question §6 was originally an answer to.
+
+### 5.2 Conditions format
+
+Phase 0 hard-codes its conditions in `score.py`. A declarative format is obviously right and
+easy to get wrong; defer until three scenarios exist and the common shape is visible rather
+than guessed.
+
+### 5.3 Slice fidelity
+
+cEOS does not perfectly reproduce IOS-XE/NX-OS timer behaviour, and a result on a container
+may not hold on hardware. Every finding carries an explicit fidelity caveat. Where a
+scenario translates a protocol (HSRP → VRRP, because no free container NOS implements HSRP),
+it carries a second one.
+
+For a result that matters enough to justify the effort, the escalation is vrnetlab-packaged
+vendor images running the real protocol — heavier per node, and worth it only to confirm a
+finding, never to discover one. See `docs/emulation-fidelity.md`.
+
+### 5.4 How much of this is worth automating
+
+A personal tool used occasionally has very different automation economics from a service.
+Resist building machinery before the manual version is annoying.
 
 ## 6. Deferred: the discovery layer
 
@@ -342,9 +353,11 @@ Section numbers referenced from code and docs were preserved: §1.3, §1.4, §2.
 §4.1, §4.2, §4.3, §5.3. Two moved:
 
 - **§2.3** was the conjecture schema; it is now the runner. The conjecture schema is in §6.
-- **§4.4** was the scale target (25 nodes, Aether-comparable). It is gone: comparability
-  with a research benchmark is not a goal of a personal tool. Scenario size is governed by
-  §3.1 instead.
+- **Section 4.4** was the scale target (25 nodes, Aether-comparable). It is gone entirely:
+  comparability with a research benchmark is not a goal of a personal tool. Scenario size is
+  governed by §3.1 instead. Written without the § sigil deliberately — it names a section
+  that no longer exists, and `tests/test_spec_references.py` rejects citations that do not
+  resolve.
 
 ## 8. Source index
 

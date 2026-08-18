@@ -48,3 +48,11 @@ before proceeding.
 `PROJECT.md` §4.2 defines the phases and their order. Build only what the current phase calls
 for. Do not scaffold, stub, or speculatively implement anything belonging to a later phase, even
 when it looks trivial or convenient. If the current phase is unclear, ask which one is active.
+
+## 6. Cite the spec by section, and keep the citations true
+
+Code and docs refer to `PROJECT.md` by section number. Those citations are load-bearing and
+they rot silently when the spec is revised. `tests/test_spec_references.py` fails on any
+`§n.n` in the repository that does not resolve to a heading in the spec — when a revision
+moves a section, update the references in the same change rather than leaving citations that
+still look authoritative while pointing somewhere else.
