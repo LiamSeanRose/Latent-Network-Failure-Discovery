@@ -20,9 +20,13 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
       planted defects in a broken copy.
 - [x] **Phase 3 — TIMING tier.** Done 2026-08-18. Rediscovered the site14 divergence from
       the configs alone, never having been told the scenario exists.
-- [ ] **Phase 4 — CI emulation validation.** Disagreement with the model fails the build.
-      **Current phase.**
-- [ ] **Phase 5 — The app.**
+- [~] **Phase 4 — CI emulation validation.** Workflows written; validation itself is
+      blocked. `checks.yml` runs lint, format, tests and dogfoods the CLI on every push.
+      `validate-timing-model.yml` records the model's prediction, then boots the scenario
+      and compares — but only when someone supplies a cEOS image, which cannot be
+      redistributed. **The timing model is currently unvalidated, and the workflow says so
+      rather than passing quietly.**
+- [ ] **Phase 5 — The app.** **Current phase.**
 
 Carried over, owner-only, not blocking any phase:
 
@@ -38,6 +42,30 @@ pushing a throwaway non-default branch succeeded and deleting that same branch r
 HTTP 403, which rules out the default-branch explanation. The GitHub tool surface available
 here has `create_branch` and `list_branches` but no delete-branch or repository-settings
 operation, so there is no second route.
+
+---
+
+## 2026-08-18 — Phase 4 cannot fully complete without a licensed image, and says so
+
+**Context:** Phase 4 validates the timing model against real firmware. The model covers FHRP
+election and interface tracking. The only container NOS that is freely redistributable and can
+express preempt delay and object tracking is none: FRR has neither, and cEOS has both but
+cannot be put in a public workflow.
+
+**Options:** (a) validate against FRR anyway, on a failure class it can express, and accept
+that this does not validate the FHRP model; (b) claim Phase 4 complete on the strength of the
+workflow existing; (c) write the workflow, gate it on a supplied image, and state plainly that
+the model is unvalidated until someone runs it.
+
+**Chosen:** (c). (b) is the dangerous one — a green CI badge over an unvalidated model is
+exactly the "guess with good formatting" the tier was designed to avoid. (a) is worth doing
+later for BFD and dampening timers, but it would not touch the FHRP model, so presenting it as
+validation would be misleading.
+
+**Consequence:** every TIMING finding currently rests on a model no real implementation has
+checked. That is stated in `cassandra/timing/model.py`, in the workflow output, and here.
+
+**Reversal:** none needed — supply an image and dispatch the workflow.
 
 ---
 

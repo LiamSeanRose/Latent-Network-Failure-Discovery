@@ -1,0 +1,40 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: lint
+        run: uv run ruff check .
+      - name: format
+        run: uv run ruff format --check .
+      - name: tests
+        run: uv run pytest
+
+  dogfood:
+    # The tool has to survive its own corpus. A crash or a regression in output
+    # here is a product bug, not a test bug.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - name: facts render
+        run: uv run cassandra facts scenarios/site14_vrrp_lockstep/configs
+      - name: check finds the known divergence
+        run: |
+          set -o pipefail
+          uv run cassandra check scenarios/site14_vrrp_lockstep/configs --explain \
+            | tee /tmp/out.txt || true
+          grep -q "fhrp-divergence" /tmp/out.txt

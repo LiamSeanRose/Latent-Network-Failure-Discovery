@@ -1,0 +1,79 @@
+# Phase 4: check the TIMING model against real protocol implementations.
+#
+# The model in cassandra/timing/ predicts what a control plane does. This boots
+# the real thing and compares. A model nobody validates is a guess with good
+# formatting, so a disagreement here is meant to fail the build.
+#
+# Not on push: it needs an Arista cEOS image, which cannot be redistributed and
+# so cannot live in a public workflow. Provide one and dispatch manually.
+name: validate-timing-model
+
+on:
+  workflow_dispatch:
+    inputs:
+      ceos_image_url:
+        description: >
+          URL to a cEOS image tarball you are licensed to use. Left empty, the job
+          reports what it would have run and exits without claiming validation.
+        required: false
+        type: string
+
+jobs:
+  emulate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: record the prediction
+        run: |
+          uv run cassandra check scenarios/site14_vrrp_lockstep/configs --explain \
+            > prediction.txt
+          cat prediction.txt
+
+      - name: no image supplied
+        if: ${{ inputs.ceos_image_url == '' }}
+        run: |
+          echo "::notice::No cEOS image supplied. The timing model's prediction is"
+          echo "::notice::recorded above but has NOT been validated against real"
+          echo "::notice::firmware. Phase 4 is not satisfied by this run."
+          exit 0
+
+      - name: install containerlab
+        if: ${{ inputs.ceos_image_url != '' }}
+        run: bash -c "$(curl -sL https://get.containerlab.dev)"
+
+      - name: import cEOS
+        if: ${{ inputs.ceos_image_url != '' }}
+        run: |
+          curl -sSL "${{ inputs.ceos_image_url }}" -o ceos.tar
+          docker import ceos.tar ceos:validation
+          echo "CEOS_IMAGE=ceos:validation" >> "$GITHUB_ENV"
+
+      - name: run the scenario and its controls
+        if: ${{ inputs.ceos_image_url != '' }}
+        working-directory: scenarios/site14_vrrp_lockstep
+        env:
+          CLAB: sudo -E containerlab
+        run: |
+          ./preflight.sh
+          ./run.sh baseline
+          ./run.sh trigger
+          ./run.sh control
+
+      - name: score, and compare against the prediction
+        if: ${{ inputs.ceos_image_url != '' }}
+        working-directory: scenarios/site14_vrrp_lockstep
+        run: |
+          for run in runs/*-trigger runs/*-control; do
+            uv run python score.py "$run"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: timing-validation
+          path: |
+            prediction.txt
+            scenarios/site14_vrrp_lockstep/runs/
