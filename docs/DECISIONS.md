@@ -12,10 +12,11 @@ than being asked in advance.
 
 Per `PROJECT.md` §4.2. The loop updates this every iteration.
 
-- [ ] **Phase 1 — Fact Pack builders.** Parse Arista EOS config text into the schema.
-      *Done when* `cassandra facts <dir>` prints a complete fact pack and round-trips every
-      construct in `scenarios/site14_vrrp_lockstep/configs/`.
-- [ ] **Phase 2 — FACTS tier and CLI.** `cassandra check <dir>`.
+- [x] **Phase 1 — Fact Pack builders.** Done 2026-08-18. `cassandra facts <dir>` renders
+      the corpus with zero unparsed lines; 17 tests cover interfaces, addressing, trunk VLANs,
+      FHRP membership, tracked-object resolution, timer scoping, and digest sensitivity.
+- [ ] **Phase 2 — FACTS tier.** `cassandra check <dir>` — assertion rules over the fact
+      pack, ranked findings. **Current phase.**
 - [ ] **Phase 3 — TIMING tier.** Rediscovers the site14 divergence from configs alone.
 - [ ] **Phase 4 — CI emulation validation.** Disagreement with the model fails the build.
 - [ ] **Phase 5 — The app.**
@@ -24,6 +25,25 @@ Carried over, owner-only, not blocking any phase:
 
 - [ ] Delete the old default branch on GitHub (Settings → default to `main`, then delete
       `claude/cassandra-project-init-b18ddl`). It still holds pre-scrub history.
+
+---
+
+## 2026-08-18 — The parser accounts for every line, or says so
+
+**Context:** a permissive config parser's failure mode is invisibility. A construct it does
+not recognise is simply absent from the fact pack, and every tier downstream then reasons
+about a network that is missing pieces, with no signal that anything went wrong.
+
+**Options:** (a) fail on unrecognised input; (b) skip silently; (c) skip, but return what was
+skipped and surface it.
+
+**Chosen:** (c). Failing hard makes the tool unusable on real configs, which always contain
+constructs outside a narrow parser's scope. Silence is the dangerous option. So
+`build_fact_pack` returns unparsed lines per device, `cassandra facts` prints them under a
+heading, and a test asserts the corpus produces none — that last part is what makes the Phase 1
+"done when" objective rather than a judgement.
+
+**Reversal:** trivial; it is one return value and one output block.
 
 ---
 

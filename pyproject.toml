@@ -5,6 +5,9 @@ description = "Proactive discovery of latent, timing-dependent network failure m
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
+[project.scripts]
+cassandra = "cassandra.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
