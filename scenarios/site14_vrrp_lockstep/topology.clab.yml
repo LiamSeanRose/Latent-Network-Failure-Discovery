@@ -1,0 +1,48 @@
+# Phase 0 ground-truth scenario. Synthetic topology; no real network is modelled.
+#
+# No direct agg-a <-> agg-b peer link: the two aggregation routers share their
+# VLANs through acc1. A peer link would close an L2 loop and put STP convergence
+# in the middle of a VRRP timing measurement, which is one variable too many for
+# the scenario that has to prove the thesis.
+#
+# Memory and CPU are set explicitly per PROJECT.md §3.1 — containerlab imposes no
+# defaults, and an unbounded cEOS node will happily destabilise the host.
+
+name: site14-vrrp-lockstep
+
+topology:
+  defaults:
+    kind: arista_ceos
+
+  kinds:
+    arista_ceos:
+      # Retag to whatever `docker images` shows for your imported cEOS.
+      image: ceos:4.32.0F
+      memory: 2Gb
+      cpu: 1
+    linux:
+      image: alpine:3.20
+      memory: 128Mb
+      cpu: 0.5
+
+  nodes:
+    core1:
+      startup-config: configs/core1.cfg
+    agg-a:
+      startup-config: configs/agg-a.cfg
+    agg-b:
+      startup-config: configs/agg-b.cfg
+    acc1:
+      startup-config: configs/acc1.cfg
+    client1:
+      kind: linux
+      exec:
+        - ip address add 10.14.0.100/24 dev eth1
+        - ip route add default via 10.14.0.1
+
+  links:
+    - endpoints: ["core1:eth1", "agg-a:eth1"]   # uplink A — the flap target
+    - endpoints: ["core1:eth2", "agg-b:eth1"]   # uplink B
+    - endpoints: ["agg-a:eth2", "acc1:eth1"]
+    - endpoints: ["agg-b:eth2", "acc1:eth2"]
+    - endpoints: ["acc1:eth3", "client1:eth1"]

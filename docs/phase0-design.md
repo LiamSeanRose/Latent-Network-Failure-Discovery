@@ -29,25 +29,30 @@ node added here is a node the Phase 3 slicer will later have to justify.
 
 ```
                     ┌─────────┐
-                    │  core1  │           10.0.0.0/31 pairs
-                    └────┬─┬──┘
-             Et1 ────────┘ └──────── Et2
-              │                       │
-        ┌─────┴─────┐           ┌─────┴─────┐
-        │   agg-a   │───Et2─────│   agg-b   │   peer link, trunk
-        │ (intended │   trunk   │ (intended │
-        │  master)  │           │  backup)  │
-        └─────┬─────┘           └─────┬─────┘
-           Et3│                       │Et3
-              └──────┐         ┌──────┘
-                  ┌──┴─────────┴──┐
-                  │     acc1      │  L2 only
-                  └───────┬───────┘
-                          │ Et3, access vlan 14
-                     ┌────┴────┐
-                     │ client1 │  linux, probe source
-                     └─────────┘
+                    │  core1  │   10.0.0.0/31, 10.0.0.2/31
+                    └──┬───┬──┘   Lo0 10.255.0.1  (probe target)
+                 Et1 ──┘   └── Et2
+                  │             │
+            ┌─────┴─────┐ ┌─────┴─────┐
+            │   agg-a   │ │   agg-b   │
+            │ intended  │ │ intended  │
+            │  master   │ │  backup   │
+            └─────┬─────┘ └─────┬─────┘
+               Et2│             │Et2
+                  └──┐       ┌──┘
+                  ┌──┴───────┴──┐
+                  │    acc1     │  L2 only, no SVIs
+                  └──────┬──────┘
+                         │ Et3, access vlan 14
+                    ┌────┴────┐
+                    │ client1 │  linux probe source
+                    └─────────┘
 ```
+
+**No direct agg-a ↔ agg-b peer link.** The pair shares its VLANs through acc1.
+A peer link would close an L2 loop and put STP convergence in the middle of a
+VRRP timing measurement — one variable too many for the scenario that has to
+prove the thesis. Real designs have one; this slice does not need it.
 
 `core1`, `agg-a`, `agg-b`, `acc1` are cEOS. `client1` is a plain linux container.
 
