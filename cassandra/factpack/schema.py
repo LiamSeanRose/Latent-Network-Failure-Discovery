@@ -1,7 +1,7 @@
 """Static Fact Pack schema.
 
-Implements the subset of PROJECT.md §2.2 covering device inventory, L1/L2/L3
-adjacency, FHRP groups, and the timer inventory. The remaining §2.2 bullets
+Implements the subset of PROJECT.md §3 covering device inventory, L1/L2/L3
+adjacency, FHRP groups, and the timer inventory. The remaining §3 bullets
 (per-protocol adjacency graphs, VRF/RT matrix, redistribution points,
 summarization points, ECMP fan-out, historical incident index) are deliberately
 absent and land with their own builders.
@@ -534,7 +534,7 @@ class TimerInventory:
     """Every timer in the network, in one enumerable place.
 
     Any question carrying a time quantity has to be answered by emulation rather
-    than symbolically (§1.4), and the ±20% perturbation control (§2.5) needs the
+    than symbolically (§1.4), and the ±20% perturbation control (§2.4) needs the
     configured values to perturb around. Both read from here.
     """
 
@@ -558,7 +558,7 @@ class FactPackMeta:
     """Identity of one built Fact Pack.
 
     `config_digest` is what decides whether a cached prompt prefix is still
-    valid and whether the refuted cache still applies (§2.4 gate 5, §3.1).
+    valid, and identifies which configs a finding was derived from (§3).
     """
 
     fact_pack_id: str
@@ -571,9 +571,9 @@ class FactPackMeta:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StaticFactPack:
-    """The cacheable half of the Fact Pack (§2.2).
+    """The cacheable half of the Fact Pack (§3).
 
-    Fields for the §2.2 bullets not yet implemented — per-protocol adjacency
+    Fields for the §3 bullets not yet implemented — per-protocol adjacency
     graphs, VRF/RT import-export matrix, redistribution points, summarization
     points, ECMP fan-out, historical incident index — are absent rather than
     stubbed, and arrive with their builders.

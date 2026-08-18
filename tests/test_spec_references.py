@@ -19,6 +19,7 @@ import pytest
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 SPEC: Final = ROOT / "PROJECT.md"
+CONVENTIONS: Final = ROOT / "docs" / "CONVENTIONS.md"
 SEARCHED_SUFFIXES: Final = frozenset({".py", ".md", ".sh", ".yml", ".yaml", ".toml"})
 SKIP_DIRS: Final = frozenset({".git", ".venv", ".ruff_cache", ".pytest_cache", "runs"})
 
@@ -27,7 +28,14 @@ HEADING: Final = re.compile(r"^#{2,3} (\d+(?:\.\d+)?)[.\s]", re.M)
 
 
 def spec_sections() -> set[str]:
-    return set(HEADING.findall(SPEC.read_text()))
+    """Sections defined by the two normative documents.
+
+    PROJECT.md is the spec; CONVENTIONS.md carries the standing rules and is cited
+    the same way. A reference to either resolves.
+    """
+    return set(HEADING.findall(SPEC.read_text())) | set(
+        HEADING.findall(CONVENTIONS.read_text())
+    )
 
 
 def searched_files() -> list[Path]:
@@ -50,12 +58,11 @@ def test_spec_defines_sections() -> None:
     "path", searched_files(), ids=lambda p: str(p.relative_to(ROOT))
 )
 def test_every_spec_reference_resolves(path: Path) -> None:
-    sections = spec_sections()
-    referenced = set(
-        REFERENCE.findall(path.read_text(encoding="utf-8", errors="ignore"))
-    )
-    missing = referenced - sections
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    # A document citing its own sections is not citing the spec.
+    sections = spec_sections() | set(HEADING.findall(text))
+    missing = set(REFERENCE.findall(text)) - sections
     assert not missing, (
         f"{path.relative_to(ROOT)} cites {sorted('§' + m for m in missing)}, "
-        f"which PROJECT.md does not define"
+        f"which neither PROJECT.md nor CONVENTIONS.md defines"
     )

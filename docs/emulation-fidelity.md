@@ -179,7 +179,7 @@ behaviour on these specific configs. Phase 0 should assert, in order:
 3. *Then* the reachability verdict is healthy.
 
 Only with 1 and 2 passing does 3 mean anything. A `batfish_says: healthy` field in
-a finding (§2.5) that came from a config Batfish failed to parse is worse than no
+a finding (§2.4) that came from a config Batfish failed to parse is worse than no
 field at all, and this is the cheapest possible place to build that check in.
 
 ## Not yet verified
@@ -192,7 +192,7 @@ Stated explicitly so none of it is mistaken for a checked fact:
 - Whether cEOS honours sub-second VRRP timers *accurately under container
   scheduling*. This is the question that actually decides whether any timer-race
   finding means anything: if host scheduling jitter is wider than the margins the
-  scenario depends on, §2.5's ±20% perturbation control is measuring the host, not
+  scenario depends on, §2.4's ±20% perturbation control is measuring the host, not
   the network. Measure it on the first booted lab, before trusting any scenario.
 - BFD client registration behaviour, needed for the §1.4 "BFD before or after IGP
   hold timer" class.

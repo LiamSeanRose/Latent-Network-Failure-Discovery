@@ -1,29 +1,34 @@
 # Latent Network Failure Discovery
 
 > Working name: **Cassandra**
-> Status: Phase 0 in progress. This document is the source of truth for implementation.
-> Revised 2026-08-18 — reframed from an autonomous discovery engine to a personal QA
-> application. The conjecture-generation pipeline is deferred, not deleted: see §6.
-> Section numbers referenced elsewhere in the repo were deliberately preserved; §7 records
-> the two that moved.
+> Status: Phase 1. This document is the source of truth for implementation.
+> Revised 2026-08-18 (v3) — the user no longer needs a lab. Input is config text; emulation
+> moved from a user requirement to a CI-only validator of this tool's own timing model.
+> §8 records what changed and why.
 
 ---
 
 ## 0. What this is
 
-A QA tool for network labs you own.
+**Point it at a directory of network configs. Get back a ranked list of latent failure modes,
+each with the evidence that produced it.**
 
-You describe a scenario — a topology, an event sequence, and hard conditions for what must
-and must not happen. The tool runs it in emulation with real protocol timing, scores it
-against those conditions, and separately asks a static analyser the same question about the
-same configs.
+```
+$ cassandra check ./configs
+HIGH   agg-a  VRRP 14 and 24 can diverge under repeated uplink flap
+              group 14 preempts back immediately; group 24 waits 90s
+              trigger: flap Ethernet1 twice within 90s
+              evidence: timer model, sequence enumerated (see --explain)
 
-**The interesting output is the disagreement.** A failure that is real under timing and
-invisible to steady-state analysis is a class of bug that config verification structurally
-cannot reach, and reproducing one on demand is the point of the whole exercise.
+MED    agg-a  BFD detection (150ms) is slower than nothing — no client registered
+LOW    acc1   trunk Ethernet2 omits VLAN 99, which agg-b has an SVI in
+```
 
-It is a thing you run, not a service that runs. No continuous loop, no autonomous
-generation, no fleet. Those were the previous shape of this document and are deferred to §6.
+No lab. No containers. No account. `pip install`, run it on a folder, read the output.
+
+The tool answers what it can from the configs alone, and is explicit about how it knows.
+Emulation still exists — but it runs in *this project's* CI to prove the timing model tells
+the truth, not on the user's machine as a prerequisite.
 
 ---
 
@@ -31,189 +36,148 @@ generation, no fleet. Those were the previous shape of this document and are def
 
 ### 1.1 The gap
 
-Config verification answers steady-state questions: is A reachable from B, does this ACL
-line ever match, is there a forwarding loop. It answers them well, quickly, and offline.
+Config verification answers steady-state questions: is A reachable from B, does this ACL line
+ever match, is there a forwarding loop. It answers them well, quickly, and offline.
 
 It cannot answer questions containing a time quantity, a repetition count, or an ordering
 claim, because those have no steady state to evaluate. What happens if a link flaps three
 times in ninety seconds is not a property of a configuration. It is a property of a
-configuration *plus* a sequence of events *plus* the timers that govern how the control
-plane reacts.
+configuration *plus* a sequence of events *plus* the timers that govern how the control plane
+reacts.
 
-That second class is where a large share of real outages live, and it is unserved by the
-tools that are otherwise excellent.
+That second class is where a large share of real outages live, and it is unserved.
 
 ### 1.2 What existing tools do
 
-Commercial network digital twins (Forward Networks, NetBrain, Cisco Crosswork) and research
-systems (Aether, arXiv:2604.18233) are **reactive** — a change is proposed, and the system
-validates it — and predominantly **steady-state**. Aether's own results are instructive:
-0.94 error detection at 0.64 precision, with its natural-language-to-graph-query agent
-consuming 68% of the reasoning budget and producing most of the precision loss. Its stated
-conclusion was that tool-based verification substantially outperformed query-based
-verification.
-
-The durable lesson, and it survives the reframing: **facts should be materialised by
-deterministic code, not fetched by something that has to compose a query.** If a future
-version of this ever grows an agent layer (§6), that constraint holds.
+Commercial digital twins and research systems are **reactive** — a change is proposed, and the
+system validates it — and predominantly **steady-state**. They also assume an operator with
+infrastructure. The durable lesson from Aether (arXiv:2604.18233), whose query-writing agent
+consumed 68% of its reasoning budget and produced most of its precision loss: **facts should
+be materialised by deterministic code, not fetched by something that has to compose a query.**
 
 ### 1.3 Batfish — capability boundary
 
-Batfish computes real RIB/FIB by running BGP best-path selection, OSPF SPF, IS-IS, and
-redistribution to convergence, offline from config text. It supports differential questions
-(`snapshot` vs `reference_snapshot`), `differentialReachability`, ACL analysis, loop
-detection, traceroute simulation, and L1-topology-aware failure analysis
-(`layer1_topology.json` — downing an interface also downs its L1-paired peer).
+Batfish computes real RIB/FIB by running BGP best-path selection, OSPF SPF, IS-IS and
+redistribution to convergence, offline from config text. It supports differential questions,
+`differentialReachability`, ACL analysis, loop detection, traceroute, and L1-topology-aware
+failure analysis.
 
-**The decisive detail:** Batfish converges *deterministically by design*. Per the SIGCOMM
-2023 evolution paper, it uses protocol-specific graph colouring plus logical clocks on RIBs
-specifically to eliminate race conditions caused by neighbours exchanging routes from
-partially-converged state, so results stay stable across runs.
+**The decisive detail:** Batfish converges *deterministically by design*. Per the SIGCOMM 2023
+evolution paper it uses protocol-specific graph colouring plus logical clocks on RIBs
+specifically to eliminate race conditions from partially-converged state, so results are
+stable across runs. It deliberately suppresses the exact failure class this project hunts.
 
-Batfish deliberately suppresses the exact failure class this project hunts. That is not a
-defect — determinism is what makes it useful — but it means **timing-dependent failures are
-structurally invisible to it.** That is the escalation boundary, and it is a principled one.
-
-Practical constraints discovered while building Phase 0 are recorded in
-`docs/emulation-fidelity.md`: Batfish does not parse Nokia SR Linux, it *does* model
-HSRP/VRRP election, and FRR cannot express VRRP preempt delay or object tracking. Together
-those pin the emulation target to Arista cEOS.
+Measured against this project's own configs (`docs/emulation-fidelity.md`): Batfish parses
+them, models all six VRRP groups, reports the network healthy — and does **not** parse
+`tracked-object`, bare `preempt`, or Arista-style `track` definitions. It is a useful
+cross-check where available, and it is not a dependency.
 
 ### 1.4 Escalation boundary — canonical table
 
 | Question shape | Tier | Rationale |
 |---|---|---|
-| Is A reachable from B? | SYMBOLIC | Batfish core competency |
-| Does this ACL line ever match? | SYMBOLIC | Static analysis |
-| After link X fails, is A still reachable? | SYMBOLIC | Batfish L1 failure analysis, steady state |
-| Do these two snapshots differ in reachability? | SYMBOLIC | `differentialReachability` |
-| Is there a forwarding loop in steady state? | SYMBOLIC | Batfish loop detection |
-| MTU / config consistency | SYMBOLIC | Direct fact-pack assertion, no tool call |
-| Does the network converge *at all* after event E? | **EMULATE** | Requires running control plane |
-| What happens if X flaps 3× in 90s? | **EMULATE** | Requires timers |
-| Do FHRP groups move in lockstep or independently? | **EMULATE** | Requires real state machines |
-| Is there a microloop during reconvergence? | **EMULATE** | Transient, not steady state |
-| Does preemption ordering cause oscillation? | **EMULATE** | Race condition |
-| Does dampening suppress a route longer than the SLA? | **EMULATE** | Timer interaction |
-| Does BFD detect before or after the IGP hold timer? | **EMULATE** | Timer race |
+| Is A reachable from B? | SYMBOLIC | steady state |
+| Does this ACL line ever match? | SYMBOLIC | static analysis |
+| After link X fails, is A still reachable? | SYMBOLIC | steady state, one failure |
+| Is there a forwarding loop in steady state? | SYMBOLIC | steady state |
+| MTU / VLAN / tracked-object consistency | FACTS | direct assertion, no tool at all |
+| Does the network converge *at all* after event E? | **TIMING** | needs event ordering |
+| What happens if X flaps 3× in 90s? | **TIMING** | needs timers and repetition |
+| Do FHRP groups move in lockstep or independently? | **TIMING** | needs per-group timer state |
+| Is there a microloop during reconvergence? | **TIMING** | transient |
+| Does preemption ordering cause oscillation? | **TIMING** | race |
+| Does dampening suppress longer than the SLA? | **TIMING** | timer arithmetic |
+| Does BFD detect before or after the IGP hold timer? | **TIMING** | timer race |
+| Is a TIMING answer actually true on real firmware? | **EMULATION** | model validation only |
 
-Rule of thumb: **if the question contains a time quantity, a repetition count, or an
-ordering claim, it cannot be answered symbolically.**
-
-A scenario that fails on the SYMBOLIC side of this line is a scenario in the wrong place.
-It should be a static check, not an emulated run — and if a scenario's failure *is* visible
-to Batfish, that is a signal the scenario is mis-designed, not a success.
+Rule of thumb: **a time quantity, a repetition count, or an ordering claim means it is not a
+steady-state question.** The change in v3 is that such questions are answered by an explicit
+timing model rather than requiring a lab — and the model is validated by emulation in CI.
 
 ---
 
-## 2. The application
+## 2. The three tiers
 
-### 2.1 What a scenario is
+Cost and confidence both rise down the list. The user only ever sees the first two.
 
-The unit of work. A directory containing:
+### 2.1 FACTS — free, instant, certain
 
-- **topology** — a Containerlab file, synthetic, resource-bounded (§3.1)
-- **configs** — device configs, the same text handed to both emulation and the symbolic tier
-- **events** — what is done to the running lab and when
-- **conditions** — what must be observed, and what must not
-- **README** — the mechanism, why it is invisible to static analysis, and its caveats
+Deterministic assertions over the Fact Pack. No lab, no service, no model.
 
-A scenario is self-contained and runnable on its own. `scenarios/site14_vrrp_lockstep/` is
-the reference implementation and Phase 0 deliverable.
+Catches consistency defects: an SVI whose VLAN is missing from a trunk it depends on, a
+`tracked-object` naming a track that is not defined, a VRRP virtual address outside its own
+subnet, MTU mismatch across a link, both `decrement` and `shutdown` on one group.
 
-### 2.2 The Fact Pack
+These are boring and they are real. `tests/test_scenario_site14.py` is this tier, written by
+hand for one scenario; Phase 2 generalises it.
 
-Structured facts materialised from configs by deterministic code: device inventory, L1/L2/L3
-adjacency, FHRP groups, and a complete timer inventory. Implemented as frozen dataclasses in
-`cassandra/factpack/schema.py`.
+### 2.2 TIMING — free, seconds, model-derived
 
-Two uses in this shape of the project:
+A discrete-event model over the timer inventory. Given the timers and a family of event
+sequences (flap counts, intervals, orderings), it enumerates what the control plane does and
+reports sequences that produce divergence, oscillation, a suppression window longer than an
+SLA, or a detection race.
 
-1. **Authoring** — reading a fact pack for a lab is how you find the asymmetries worth
-   writing a scenario about. A timer inventory that lists every hello, hold, preempt delay,
-   dampening profile and carrier delay in one place is a list of candidate failure modes.
-2. **Cheap assertions** — consistency questions (MTU mismatch, a tracked object nothing
-   defines, a trunk missing a VLAN its SVI needs) are answerable directly from facts with no
-   tool call and no lab.
+**This is the tier that makes the product interesting, and it is the one that can lie.** It
+models timer interaction, not protocol implementations. Every finding it produces says so, and
+carries the sequence that triggers it so a human can judge.
 
-The builders that populate it are Phase 2.
+Its output is a *candidate*: "under this sequence, these two groups diverge for ~90s."
 
-### 2.3 The runner
+### 2.3 EMULATION — expensive, minutes, ground truth
 
-Deploys a scenario, injects its events with real timing, samples state throughout, and
-tears down. Sampling records both human-readable and machine-parseable output, because
-scoring should never depend on a text format that is not a stable interface.
+Real protocol implementations in containers, with real timing.
 
-Modes: `baseline`, `trigger`, `control`, `perturb`, and `suite` — which runs the full
-control set (§2.5) with a fresh deployment between runs, so repeated runs are independent
-rather than each inheriting the previous run's state.
+**Not a user-facing tier.** It runs in this project's CI against public images (FRR, and cEOS
+where a developer has one) for exactly one purpose: **proving the TIMING model agrees with
+reality.** A timing model nobody has checked against real firmware is a guess with good
+formatting.
 
-### 2.4 Scoring and verdicts
+If a TIMING prediction and an EMULATION run disagree, the model is wrong and gets fixed. That
+is the only reason this tier exists in v3.
 
-**Hard conditions, evaluated by code, reported as an exit status.** Not a judgment, not a
-summary for a human to interpret.
+### 2.4 Falsification controls
 
-Conditions are evaluated over the *sampled timeline*, never the end state. A transient
-failure has re-converged by the time a run finishes, so a correct run ends looking healthy —
-checking the final state scores a working scenario as a failure.
+Applies to the EMULATION tier, and to any TIMING finding that claims to be confirmed.
 
-Two properties the scorer must hold to:
-
-- **An empty parse is never a pass.** A collector that matched nothing must report that,
-  not silently read as "no failure observed." This is the single most likely way for the
-  tool to lie to you.
-- **Ambiguity is surfaced, not resolved.** Two masters for one group is split brain; it gets
-  reported as such rather than folded into a placement.
-
-### 2.5 Falsification controls
-
-A scenario that only ever runs its happy path proves nothing. Every result must survive:
+A run that only ever executes its happy path proves nothing. Every confirmed result must
+survive:
 
 1. **No-trigger control** — same lab, same window, no events. The observable must be absent.
-   A control that exhibits the observable means the trigger did not cause it, and the run
-   **fails**. The control's criterion is inverted, not skipped.
-2. **Timing perturbation** — event intervals randomised ±20%. A result that only appears at
-   exact timings is a knife-edge artifact, not a finding.
-3. **Repetition** — 3 runs. Confirmation requires the observable in ≥2 of 3, to separate
-   deterministic behaviour from flaky.
+   A control that exhibits it means the trigger did not cause it, and the run **fails**. The
+   control's criterion is inverted, not skipped.
+2. **Timing perturbation** — event intervals randomised ±20%. A result that appears only at
+   exact timings is a knife-edge artifact.
+3. **Repetition** — 3 runs; the observable in ≥2 of 3, to separate deterministic from flaky.
 
-Perturbation has a prerequisite: **measure container scheduling jitter first.** If host
-jitter is comparable to the timer margins a scenario depends on, the ±20% control is
-measuring the machine rather than the network, and every timing result inherits the problem.
+Perturbation has a prerequisite: **measure host scheduling jitter first.** If it is comparable
+to the timer margins under test, the ±20% control is measuring the machine.
 
-### 2.6 The symbolic comparison
-
-The other half of every scenario: hand the identical configs to Batfish and record what it
-says.
-
-Order matters, and it is the difference between a real result and a fake one:
-
-1. The snapshot parses with no init issues. Silent parse failure is what would fake this.
-2. Batfish modelled the relevant construct — it reports the VRRP groups, elects the expected
-   master, computed the routes. A healthy verdict from an analyser that skipped the feature
-   proves a coverage gap, not the escalation boundary.
-3. *Then* the verdict is worth recording.
-
-A scenario where Batfish reports the failure is not a failed scenario — it is a scenario
-that belongs on the SYMBOLIC side of §1.4, and should be moved there.
+Conditions are evaluated over the *sampled timeline*, never the end state — a transient
+failure has re-converged by the time a run finishes, so a correct run ends looking healthy.
+Two properties the scorer holds to: an empty parse is never a pass, and ambiguity (two masters
+for one group) is surfaced rather than resolved.
 
 ---
 
-## 3. Running labs
+## 3. The Fact Pack
 
-### 3.1 Resource bounding and slice size
+Structured facts materialised from config text by deterministic code: device inventory, L1/L2/L3
+adjacency, FHRP groups, and a complete timer inventory. Frozen dataclasses in
+`cassandra/factpack/schema.py`.
 
-Containerlab imposes no default memory or CPU limits, and an unbounded node will destabilise
-the host. **Set `memory:` and `cpu:` explicitly on every node**, in every scenario, without
-exception.
+**Parsing is ours, not Batfish's.** Batfish needs Docker, which is the dependency being
+removed. The tool needs a narrow slice — interfaces, addressing, VLANs, FHRP, tracking, timers
+— not full RIB computation, and a line-oriented parser for IOS-style config (Arista and Cisco
+share structure) is a tractable job. Where Docker *is* present, Batfish becomes an optional
+cross-check on the facts, never a requirement.
 
-Keep scenarios minimal. Every node in a scenario is a node that boots on every run, and the
-smallest topology that can exhibit the behaviour is the right one — not the most realistic.
-The Phase 0 scenario deliberately omits an aggregation peer link, because including it would
-add STP convergence to a VRRP timing measurement.
+### 3.1 Resource discipline
 
-Where booting is slow enough to discourage running scenarios at all, snapshot/restore of a
-warm base topology is the fix. Not needed yet.
+Applies to the CI emulation tier only. Containerlab imposes no default memory or CPU limits,
+and an unbounded node destabilises the host: set `memory:` and `cpu:` explicitly on every
+node, always. Keep topologies minimal — the smallest that can exhibit the behaviour, not the
+most realistic.
 
 ---
 
@@ -224,146 +188,142 @@ warm base topology is the fix. Not needed yet.
 ```
 cassandra/
   factpack/
-    schema.py          # frozen dataclasses: inventory, adjacency, FHRP, timers
-    builders/          # config text -> facts. deterministic. Phase 2.
-  symbolic/            # pybatfish wrapper. Phase 2.
-  harness/             # scenario discovery, run orchestration, history. Phase 1.
+    schema.py          # frozen dataclasses (done)
+    builders/          # config text -> facts. Phase 1.
+  facts/
+    rules.py           # FACTS tier assertions. Phase 2.
+  timing/
+    model.py           # discrete-event timer model. Phase 3.
+    sequences.py       # event sequence enumeration. Phase 3.
+  report.py            # findings -> ranked output. Phase 2.
+  cli.py               # `cassandra check|facts|analyze|explain`. Phase 2.
 scenarios/
-  site14_vrrp_lockstep/
-    topology.clab.yml
-    configs/
-    run.sh
-    score.py
-    batfish_check.py
-    README.md
+  site14_vrrp_lockstep/   # emulation validator + its configs, CI only
 docs/
-  CONVENTIONS.md       # standing rules
+  CONVENTIONS.md       # standing rules, including how the build loop runs
+  DECISIONS.md         # decision log — every non-trivial choice, with reasoning
   emulation-fidelity.md
   phase0-design.md
 tests/
 ```
 
-`run.sh` and `score.py` currently live inside the scenario. Phase 1 lifts the general parts
-into `cassandra/harness/` and leaves the scenario-specific parts behind.
-
 ### 4.2 Phases
 
-**Phase 0 — one scenario, end to end.** Reproduce a timing-dependent failure in Containerlab
-as a scored scenario, and demonstrate that Batfish reports the identical configs healthy.
-One directory, one README, one asciinema. This is the existence proof; nothing else gets
-built until it runs.
+Each phase ends with a working command a user could run. No phase depends on the user
+installing anything beyond the package itself.
 
-**Phase 1 — generalise the harness.** Lift the runner and scorer out of the scenario:
-scenario discovery, a declarative conditions format, run history on disk, and a summary
-across scenarios. The test is a *second* scenario that reuses the harness without copying it.
+**Phase 1 — Fact Pack builders.** Parse Arista EOS config text into the existing schema:
+interfaces, addressing, VLANs, trunks, FHRP groups, tracked objects, and the timer inventory.
+Corpus is `scenarios/site14_vrrp_lockstep/configs/`. Done when `cassandra facts <dir>` prints
+a complete fact pack and round-trips every construct those configs contain.
 
-**Phase 2 — Fact Pack + symbolic tier.** Config ingest → fact pack → pybatfish wrapper.
-Cheap fact-only assertions run without a lab. The test is whether a human can read a fact
-pack for a lab and form a scenario from it alone.
+**Phase 2 — FACTS tier and CLI.** Assertion rules over the fact pack, a finding type, ranked
+output, and the `cassandra check <dir>` entry point. Done when it finds the consistency
+defects in a deliberately broken copy of the corpus and stays silent on the good one.
 
-**Phase 3 — regression detection.** Run history becomes useful: what changed since last run,
-which scenario started failing, which timing margin moved. This is where a personal QA tool
-earns its keep, because it answers "did I break something" rather than "is this broken."
+**Phase 3 — TIMING tier.** The timer model, sequence enumeration, and `--explain`. Done when
+it independently rediscovers the site14 divergence from the configs alone, having never been
+told about it.
 
-**Phase 4 — UI.** Scenario list, run history, timeline view of a failing run, the
-Batfish-versus-emulation disagreement made visible.
+**Phase 4 — CI emulation validation.** GitHub Actions: boot the scenario on public images,
+run the falsification controls, compare against the Phase 3 prediction. Done when a
+disagreement fails the build.
 
-**Phase 5 — the discovery layer, if ever.** See §6.
+**Phase 5 — The app.** Local UI over the same engine: point at a folder, see findings by
+severity, evidence, and the triggering sequence. Packaging so `pipx install` or a single
+binary is the whole install.
+
+**Phase 6 — Deferred discovery layer.** See §7.
 
 ### 4.3 Kill criteria
 
-Stop and reconsider if:
-
-- **Phase 0** shows Batfish catching the failure → the escalation boundary (§1.4) is wrong,
-  or the scenario is mis-designed. Diagnose which before continuing.
-- **Phase 0** shows container scheduling jitter comparable to the scenario's timer margins →
-  emulated timing results are not trustworthy on this host, and the fidelity question has to
-  be solved before anything else is built on top.
-- **Phase 1** cannot produce a second scenario without copy-pasting the first → the harness
-  is not a harness.
-- **Phase 3** shows scenarios that pass and fail at random → the falsification controls in
-  §2.5 are not doing their job, and every result to date is suspect.
+- **Phase 1** cannot parse the corpus without vendor-specific special cases piling up → the
+  parsing scope is too wide; narrow to the timer inventory only.
+- **Phase 3** produces findings that Phase 4 emulation contradicts more often than it confirms
+  → the timing model is not trustworthy and must not ship to users.
+- **Phase 3** finds nothing the FACTS tier did not already find → the expensive tier is not
+  earning its place.
+- Any phase requiring the user to install Docker, obtain an image, or configure a lab → the
+  v3 premise has been violated; stop and redesign.
 
 ---
 
 ## 5. Open questions
 
-### 5.1 Scenario sourcing
+### 5.1 Model fidelity versus scope
 
-Where do scenarios come from once the obvious ones are written? Public post-mortems,
-protocol documentation read adversarially, and timer-inventory asymmetries visible in the
-fact pack are the candidates. This is the question §6 was originally an answer to.
+The TIMING model must be simple enough to reason about and faithful enough to be worth
+trusting. Start with FHRP election and interface tracking only. Widen only where Phase 4
+validation demonstrates the model already agrees with reality.
 
-### 5.2 Conditions format
+### 5.2 Config dialects
 
-Phase 0 hard-codes its conditions in `score.py`. A declarative format is obviously right and
-easy to get wrong; defer until three scenarios exist and the common shape is visible rather
-than guessed.
+Phase 1 targets Arista EOS. Cisco IOS shares enough structure that a second dialect should be
+cheap; NX-OS and IOS-XR less so. Do not generalise until a second dialect actually exists.
 
 ### 5.3 Slice fidelity
 
-cEOS does not perfectly reproduce IOS-XE/NX-OS timer behaviour, and a result on a container
-may not hold on hardware. Every finding carries an explicit fidelity caveat. Where a
-scenario translates a protocol (HSRP → VRRP, because no free container NOS implements HSRP),
-it carries a second one.
+Container NOSes do not perfectly reproduce hardware timer behaviour, and the CI validator
+inherits this: a model validated against FRR is validated against FRR. Findings carry the
+caveat. This bounds how strong a claim the tool can make, and the honest phrasing is "your
+configs permit this sequence," not "your network will break."
 
-For a result that matters enough to justify the effort, the escalation is vrnetlab-packaged
-vendor images running the real protocol — heavier per node, and worth it only to confirm a
-finding, never to discover one. See `docs/emulation-fidelity.md`.
+### 5.4 What the user does with a finding
 
-### 5.4 How much of this is worth automating
-
-A personal tool used occasionally has very different automation economics from a service.
-Resist building machinery before the manual version is annoying.
-
-## 6. Deferred: the discovery layer
-
-The previous version of this document specified an autonomous pipeline: a cheap model
-(SCOUT) generating ~2,000 conjectures per cycle, a deterministic filter and scheduler
-(WARDEN) killing ~85% before any tool call, and a frontier model (PROSECUTOR) attempting to
-falsify the survivors in emulation. With a conjecture schema, a learned per-class escalation
-policy, prompt-cached fact packs, batched generation, and a circuit breaker on
-findings-per-dollar.
-
-**Why it is deferred.** All of that machinery exists to make *volume* affordable. At the
-scale of one person and their own labs, the volume is not there, so the machinery is cost
-without benefit — and it sits on top of a scenario harness that does not exist yet. The
-harness is the substrate either way; the generator is optional.
-
-**What it would take to bring it back.** Phases 1–3 complete, a library of hand-written
-scenarios large enough to see what a generated one should look like, and a real answer to
-§5.1. At that point the discovery layer becomes "propose new scenarios," which is a much
-better-defined job than "find bugs," and it inherits the runner, scorer, and controls that
-already work.
-
-**What survives from it regardless**, and is already reflected above:
-
-- Facts are materialised by deterministic code; nothing composes a query (§1.2).
-- Verdicts are hard conditions with exit codes, never model judgment (§2.4).
-- A survivor is only meaningful if something genuinely tried to kill it (§2.5).
-- A result that static analysis could have found is not a result (§2.6).
-
-The full prior specification is in git history.
+A finding they cannot act on is noise. Every finding needs the specific lines responsible and
+the change that would remove it.
 
 ---
 
-## 7. Notes on this revision
+## 6. Building this
 
-Section numbers referenced from code and docs were preserved: §1.3, §1.4, §2.2, §2.5, §3.1,
-§4.1, §4.2, §4.3, §5.3. Two moved:
+The build itself runs as an autonomous loop, defined in `docs/CONVENTIONS.md` §7. The
+operating rule: **decide and record, do not block.** Decisions go to `docs/DECISIONS.md` with
+their reasoning and how to reverse them. Escalation to the repository owner is reserved for
+the short list in that section — irreversible or external actions, licensing, anything
+contradicting this document, and choices that would waste a phase if wrong.
 
-- **§2.3** was the conjecture schema; it is now the runner. The conjecture schema is in §6.
-- **Section 4.4** was the scale target (25 nodes, Aether-comparable). It is gone entirely:
-  comparability with a research benchmark is not a goal of a personal tool. Scenario size is
-  governed by §3.1 instead. Written without the § sigil deliberately — it names a section
-  that no longer exists, and `tests/test_spec_references.py` rejects citations that do not
-  resolve.
+---
 
-## 8. Source index
+## 7. Deferred: the discovery layer
+
+Earlier versions specified an autonomous pipeline: a cheap model generating conjectures, a
+deterministic filter, a frontier model attempting falsification in emulation. That machinery
+exists to make *volume* affordable, and at this scale the volume is not there.
+
+In v3 it has a clearer future job than it ever had: **the TIMING tier enumerates sequences
+mechanically, and enumeration does not scale to interesting search spaces.** A model proposing
+which sequences are worth enumerating is a well-defined problem, unlike "find bugs." Revisit
+after Phase 4, when there is a validated model to propose against.
+
+What survives regardless, and is reflected above: facts materialised by deterministic code,
+verdicts as hard conditions rather than judgment, a survivor meaning nothing unless something
+tried to kill it, and a result static analysis could have found not being a result.
+
+---
+
+## 8. Notes on this revision
+
+v2 made the scenario harness the product, which required every user to run Containerlab and
+obtain a licensed cEOS image. That is a lab, and building a lab is not a thing a personal QA
+tool may ask of the person using it.
+
+v3 keeps every capability and moves the cost: the input is config text, the tiers that run on
+the user's machine are pure Python, and emulation becomes CI infrastructure that validates the
+timing model rather than a prerequisite for using the tool.
+
+Section numbers cited elsewhere in the repository were checked by
+`tests/test_spec_references.py`. §2.2 was the Fact Pack and is now the TIMING tier; the Fact
+Pack is §3. Section 2.5 was falsification controls; the EMULATION tier is now §2.3 and the controls
+are §2.4. Written without the § sigil because it names a numbering that no longer
+exists, and `tests/test_spec_references.py` rejects citations that do not resolve. §4.2 (phases),
+§4.3 (kill criteria), §1.3, §1.4 and §5.3 keep their meanings.
+
+## 9. Source index
 
 - SIGCOMM 2023 — Lessons from the evolution of the Batfish configuration analysis tool
 - arXiv:2604.18233 — Aether, network validation using agentic AI and digital twin
 - SIGCOMM 2024 — Relational Network Verification
 - PLDI 2024 — Diffy: data-driven bug finding for configurations
-- containerlab.dev — kinds, resource limits, multi-node
-- batfish.readthedocs.io — supported devices, differential questions, question framework
+- containerlab.dev — kinds, resource limits
+- batfish.readthedocs.io — supported devices, question framework

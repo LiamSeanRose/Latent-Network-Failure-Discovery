@@ -168,7 +168,7 @@ never against the end state.
 
 ## Observables and pass/fail
 
-Hard conditions, per §2.5 — not judgment. All are evaluated over the sampled
+Hard conditions, per §2.4 — not judgment. All are evaluated over the sampled
 timeline in `runs/<stamp>/vrrp.log`, not over the final state.
 
 - **Primary:** group 14 master transitions ≥ 4 within the window. Six are
@@ -179,7 +179,7 @@ timeline in `runs/<stamp>/vrrp.log`, not over the final state.
   `run.sh baseline`.
 
 Confirmation requires the observable in ≥ 2 of 3 runs **and** absent in the
-no-trigger control. Controls to run, all three from §2.5:
+no-trigger control. Controls to run, all three from §2.4:
 
 1. No-trigger control — same lab, no flap. Observable must not appear.
 2. Timing perturbation — flap intervals randomized ±20%. If the result only

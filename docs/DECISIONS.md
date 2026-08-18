@@ -1,0 +1,79 @@
+# Decision log
+
+Newest first. Format and purpose: `CONVENTIONS.md` §7.3.
+
+Every non-trivial choice the build loop makes is recorded here with its reasoning and what
+reversing it would cost, so the repository owner can audit and overrule after the fact rather
+than being asked in advance.
+
+---
+
+## Phase status
+
+Per `PROJECT.md` §4.2. The loop updates this every iteration.
+
+- [ ] **Phase 1 — Fact Pack builders.** Parse Arista EOS config text into the schema.
+      *Done when* `cassandra facts <dir>` prints a complete fact pack and round-trips every
+      construct in `scenarios/site14_vrrp_lockstep/configs/`.
+- [ ] **Phase 2 — FACTS tier and CLI.** `cassandra check <dir>`.
+- [ ] **Phase 3 — TIMING tier.** Rediscovers the site14 divergence from configs alone.
+- [ ] **Phase 4 — CI emulation validation.** Disagreement with the model fails the build.
+- [ ] **Phase 5 — The app.**
+
+Carried over, owner-only, not blocking any phase:
+
+- [ ] Delete the old default branch on GitHub (Settings → default to `main`, then delete
+      `claude/cassandra-project-init-b18ddl`). It still holds pre-scrub history.
+
+---
+
+## 2026-08-18 — Emulation becomes CI infrastructure, not a user requirement
+
+**Context:** v2 required every user to install Containerlab and obtain a licensed cEOS image
+before the tool did anything. That is asking someone to build a lab in order to use a personal
+QA tool, and it put the project's only useful output behind an evening of setup.
+
+**Options:** (a) ship the lab and have the app install Docker and Containerlab itself;
+(b) run the lab in the cloud and have users read results; (c) answer timing questions with an
+explicit model on the user's machine and use emulation only to validate that model.
+
+**Chosen:** (c). The input was never a lab — it is config text, which users already have. A
+discrete-event timer model runs in pure Python in seconds, and emulation moves to CI where it
+proves the model tells the truth. (a) still requires Docker and root; (b) requires hosting,
+an account, and sending someone's configs to a server, which is the worst option for a tool
+whose input is network configuration.
+
+**Reversal:** cheap in one direction — the emulation tier is already built and tested, so
+promoting it back to user-facing is a packaging decision. Expensive in the other: if the
+timing model proves untrustworthy in Phase 4, the tool's headline capability goes with it,
+which is why Phase 4 exists and why it is a kill criterion.
+
+---
+
+## 2026-08-18 — Write our own config parser rather than depend on Batfish
+
+**Context:** the Fact Pack needs config text turned into structured facts. Batfish does this
+extremely well and requires Docker — the dependency being removed.
+
+**Options:** (a) require Batfish; (b) vendor a third-party parser; (c) write a line-oriented
+parser for the narrow slice actually needed.
+
+**Chosen:** (c). The tool needs interfaces, addressing, VLANs, FHRP, tracking and timers — not
+RIB computation. Arista and Cisco share enough config structure that one parser covers the
+plausible corpus. Batfish stays as an optional cross-check where Docker happens to exist.
+
+**Reversal:** cheap. The parser sits behind the Fact Pack schema, so swapping it out changes
+one module. The risk is scope creep — hence the Phase 1 kill criterion about vendor special
+cases piling up.
+
+---
+
+## 2026-08-18 — Keep the standing rules in `docs/CONVENTIONS.md`, not `CLAUDE.md`
+
+**Context:** the natural filename for agent instructions identifies the tooling, which the
+owner asked be kept out of the repository entirely.
+
+**Chosen:** rules live in `docs/CONVENTIONS.md` under a neutral name. A local, untracked
+pointer file can reference it so the rules load in a terminal session without being published.
+
+**Reversal:** trivial, and blocked by rule 3 unless the owner changes that rule.

@@ -144,7 +144,7 @@ def test_built_fact_pack_is_hashable_and_immutable() -> None:
 
 
 def test_unimplemented_sections_are_absent_not_stubbed() -> None:
-    """PROJECT.md §2.2 bullets without builders yet must not appear as empty
+    """PROJECT.md §3 bullets without builders yet must not appear as empty
     fields that read as 'this network has none'."""
     present = {f.name for f in dataclasses.fields(schema.StaticFactPack)}
     for absent in (

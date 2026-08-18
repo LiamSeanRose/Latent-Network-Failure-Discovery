@@ -3,7 +3,7 @@
     python score.py runs/20260818T173000-trigger
 
 Exit status is the verdict: 0 if the run matches what its mode should produce,
-1 if it does not. That makes it usable as a hard condition (PROJECT.md §2.5
+1 if it does not. That makes it usable as a hard condition (PROJECT.md §2.4
 wants exit codes, not judgment) rather than something a human eyeballs.
 
 The scoring logic and the log parsing are deliberately separated. The logic is

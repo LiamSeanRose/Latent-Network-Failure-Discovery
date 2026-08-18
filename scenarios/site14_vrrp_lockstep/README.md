@@ -70,7 +70,7 @@ yours does.
 ./run.sh trigger     # one flap sequence + 120s observation
 ./run.sh control     # same window, no flap
 ./run.sh perturb     # flap intervals randomised ±20%
-./run.sh suite       # all of §2.5: 3x trigger, control, perturb (~30 min)
+./run.sh suite       # all of §2.4: 3x trigger, control, perturb (~30 min)
 ./run.sh destroy
 ```
 
@@ -78,7 +78,7 @@ yours does.
 independent rather than each inheriting the previous run's VRRP state.
 
 Confirmation requires the observable in **≥2 of 3 `trigger` runs and absent in
-`control`** (§2.5). One green run is not a result.
+`control`** (§2.4). One green run is not a result.
 
 Score each run:
 
@@ -87,7 +87,7 @@ python score.py runs/<stamp>-<mode>
 ```
 
 Exit status is the verdict — 0 if the run matches what its mode should produce,
-1 if not — so it works as a hard condition (§2.5 wants exit codes, not judgment).
+1 if not — so it works as a hard condition (§2.4 wants exit codes, not judgment).
 A `control` run's criterion is **inverted, not skipped**: a control that shows the
 observable means the trigger was not what caused it, and the run scores as a
 failure.
@@ -162,7 +162,7 @@ the syntax.
 - **Container vs hardware** (§5.3). Before trusting any timing result, measure
   observed VRRP advertisement intervals against configured. If host scheduling
   jitter is comparable to the margins this scenario depends on, the ±20% timing
-  control in §2.5 is measuring the machine rather than the network.
+  control in §2.4 is measuring the machine rather than the network.
 
 ## Still provisional
 

@@ -5,11 +5,11 @@
 #   ./run.sh trigger     one flap sequence + observation
 #   ./run.sh control     same window, NO flap (must not show the observable)
 #   ./run.sh perturb     flap intervals randomised ±20% (knife-edge check)
-#   ./run.sh suite       the full §2.5 control set: 3x trigger, 1x control,
+#   ./run.sh suite       the full §2.4 control set: 3x trigger, 1x control,
 #                        1x perturb, each on a freshly deployed lab (~30 min)
 #   ./run.sh destroy     tear down
 #
-# Confirmation (PROJECT.md §2.5) requires the observable in >=2 of 3 trigger runs
+# Confirmation (PROJECT.md §2.4) requires the observable in >=2 of 3 trigger runs
 # AND absent in control. One green run is not a result, which is why `suite`
 # exists — the discipline belongs in the tool, not in a README nobody rereads.
 set -euo pipefail
@@ -50,7 +50,7 @@ sample_vrrp() {
   done
 }
 
-# ±20% of a base interval, per §2.5's knife-edge control.
+# ±20% of a base interval, per §2.4's knife-edge control.
 jitter() {
   local base=$1
   echo $(( base * (80 + RANDOM % 41) / 100 ))

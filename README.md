@@ -1,19 +1,27 @@
-# Cassandra — network lab QA
+# Cassandra — network config QA
 
-A QA tool for network labs you own.
+**Point it at a directory of network configs. Get back a ranked list of latent failure modes,
+each with the evidence that produced it.**
 
-Describe a scenario — a topology, an event sequence, and hard conditions for what must and
-must not happen. It runs the scenario in emulation with real protocol timing, scores it
-against those conditions, and separately asks a static analyser the same question about the
-same configs.
+```
+$ cassandra check ./configs
+HIGH   agg-a  VRRP 14 and 24 can diverge under repeated uplink flap
+              group 14 preempts back immediately; group 24 waits 90s
+              trigger: flap Ethernet1 twice within 90s
+LOW    acc1   trunk Ethernet2 omits VLAN 99, which agg-b has an SVI in
+```
 
-**The interesting output is the disagreement.** Failures that are real under timing and
-invisible to steady-state analysis are a class of bug that config verification structurally
-cannot reach.
+No lab, no containers, no account. The interesting findings are the timing-dependent ones —
+failures that no steady-state config analysis can express, because they are properties of a
+configuration *plus* a sequence of events *plus* the timers governing the reaction.
+
+Emulation still exists, but it runs in this project's CI to prove the timing model tells the
+truth. It is never something a user has to set up.
 
 **[PROJECT.md](PROJECT.md) is the spec and the source of truth.** Read it first.
-[docs/CONVENTIONS.md](docs/CONVENTIONS.md) holds the standing rules for working in this
-repository.
+[docs/CONVENTIONS.md](docs/CONVENTIONS.md) holds the standing rules, including how the
+autonomous build loop makes decisions. [docs/DECISIONS.md](docs/DECISIONS.md) is the log of
+those decisions and the current phase status.
 
 ## Setup
 
@@ -36,17 +44,16 @@ be parsed by Batfish.
 Target layout is PROJECT.md §4.1. What exists today:
 
 ```
-cassandra/factpack/schema.py            static facts: inventory, adjacency, FHRP, timers
-scenarios/site14_vrrp_lockstep/         Phase 0 scenario — topology, configs, runner, scorer
-docs/                                   conventions, emulation fidelity, Phase 0 design
-tests/                                  schema invariants, scenario lint, scoring logic
+cassandra/factpack/schema.py       static facts: inventory, adjacency, FHRP, timers
+scenarios/site14_vrrp_lockstep/    CI emulation validator + its configs
+docs/                              spec conventions, decisions, fidelity, design
+tests/                             schema, scenario lint, scoring, spec references
 ```
 
 ## State
 
-**Phase 0 is in progress and unverified.** The scenario is written and statically checked,
-but has never been booted — it was authored in an environment with no Docker daemon. Its
-README lists the untested assumptions in order of likelihood.
+**Phase 1** — Fact Pack builders. See `docs/DECISIONS.md` for live phase status.
 
-Phase 0 is the existence proof: a timing-dependent failure that reproduces in emulation
-while Batfish calls the identical configs healthy. Nothing else gets built until it runs.
+The symbolic half of the original ground-truth scenario has been run and passes: Batfish
+parses the configs, models all six VRRP groups, and reports the network healthy, with a
+recorded caveat about the lines it does not parse. The emulation half runs in CI from Phase 4.
