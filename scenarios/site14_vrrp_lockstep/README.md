@@ -55,10 +55,15 @@ yours does.
 
 ```sh
 ./run.sh baseline    # deploy, settle 90s, confirm healthy
-./run.sh trigger     # flap sequence + 120s observation
+./run.sh trigger     # one flap sequence + 120s observation
 ./run.sh control     # same window, no flap
+./run.sh perturb     # flap intervals randomised ±20%
+./run.sh suite       # all of §2.5: 3x trigger, control, perturb (~30 min)
 ./run.sh destroy
 ```
+
+`suite` redeploys the lab between runs so the three trigger runs are actually
+independent rather than each inheriting the previous run's VRRP state.
 
 Confirmation requires the observable in **≥2 of 3 `trigger` runs and absent in
 `control`** (§2.5). One green run is not a result.
@@ -67,8 +72,13 @@ Confirmation requires the observable in **≥2 of 3 `trigger` runs and absent in
 preempt delay and returns roughly 90 s after the last flap, so the groups
 re-converge before the window closes and the final `show vrrp` looks healthy. That
 is the failure being transient, not the run failing. The evidence is in
-`runs/<stamp>/vrrp.log`: group 14 transitioning ≥4 times, and ≥60 s of contiguous
-samples where group 24 and group 34 have different masters.
+`runs/<stamp>-<mode>/vrrp.log`: group 14 transitioning ≥4 times, and ≥60 s of
+contiguous samples where group 24 and group 34 have different masters.
+
+Each sample is written twice — human-readable to `vrrp.log`, and `| json` to
+`vrrp.json.log`, both delimited by `### <epoch> <node>` lines. Build the
+transition counter on the JSON: `show vrrp` text formatting is not a stable
+interface, and this script was written with no lab to check it against.
 
 Then the other half:
 
