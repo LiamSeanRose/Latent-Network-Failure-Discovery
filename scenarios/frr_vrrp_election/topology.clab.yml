@@ -1,0 +1,38 @@
+# Two FRR routers on one segment, contesting a VRRP group.
+#
+# FRR requires the macvlan device to exist before vrrpd will use it, with the
+# RFC-assigned virtual MAC (00:00:5e:00:01:<vrid>). Containerlab `exec` creates it
+# at boot; doing it in the config file does not work.
+name: frr-vrrp-election
+
+topology:
+  kinds:
+    linux:
+      image: quay.io/frrouting/frr:10.2.1
+      memory: 256Mb
+      cpu: 0.5
+
+  nodes:
+    r1:
+      kind: linux
+      binds:
+        - r1/daemons:/etc/frr/daemons
+        - r1/frr.conf:/etc/frr/frr.conf
+      exec:
+        - ip link add vrrp4-1-14 link eth1 addrgenmode random type macvlan mode bridge
+        - ip link set dev vrrp4-1-14 address 00:00:5e:00:01:0e
+        - ip link set dev vrrp4-1-14 up
+        - /usr/lib/frr/frrinit.sh start
+    r2:
+      kind: linux
+      binds:
+        - r2/daemons:/etc/frr/daemons
+        - r2/frr.conf:/etc/frr/frr.conf
+      exec:
+        - ip link add vrrp4-1-14 link eth1 addrgenmode random type macvlan mode bridge
+        - ip link set dev vrrp4-1-14 address 00:00:5e:00:01:0e
+        - ip link set dev vrrp4-1-14 up
+        - /usr/lib/frr/frrinit.sh start
+
+  links:
+    - endpoints: ["r1:eth1", "r2:eth1"]

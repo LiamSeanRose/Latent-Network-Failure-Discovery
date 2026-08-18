@@ -1,0 +1,49 @@
+# Partial Phase 4: check the election half of the TIMING model against FRR.
+#
+# Free images only, so this runs on every push. It does not validate interface
+# tracking or preempt delay — FRR implements neither — so it narrows the
+# unvalidated surface rather than closing it. See the scenario README.
+name: validate-election
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  election:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: install containerlab
+        run: bash -c "$(curl -sL https://get.containerlab.dev)"
+
+      - name: deploy
+        working-directory: scenarios/frr_vrrp_election
+        run: sudo containerlab deploy -t topology.clab.yml
+
+      - name: validate
+        working-directory: scenarios/frr_vrrp_election
+        run: sudo python3 validate.py
+
+      - name: diagnostics on failure
+        if: failure()
+        working-directory: scenarios/frr_vrrp_election
+        run: |
+          sudo containerlab inspect -t topology.clab.yml || true
+          for n in r1 r2; do
+            echo "=== $n ==="
+            sudo docker logs "clab-frr-vrrp-election-$n" 2>&1 | tail -40 || true
+            sudo docker exec "clab-frr-vrrp-election-$n" vtysh -c 'show vrrp' || true
+            sudo docker exec "clab-frr-vrrp-election-$n" ip -d link show || true
+          done
+
+      - name: teardown
+        if: always()
+        working-directory: scenarios/frr_vrrp_election
+        run: sudo containerlab destroy -t topology.clab.yml --cleanup || true
