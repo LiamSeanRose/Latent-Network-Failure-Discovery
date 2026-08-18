@@ -319,3 +319,17 @@ def test_transit_vlan_runs_no_vrrp() -> None:
     for node in AGGS:
         block = interface_blocks(config(node))[f"Vlan{TRANSIT_VLAN}"]
         assert not any(line.startswith("vrrp ") for line in block)
+
+
+def test_ceos_image_is_configurable_without_editing_the_topology() -> None:
+    """A placeholder image tag that must be hand-edited is a merge conflict every
+    time someone with a different cEOS build runs the scenario."""
+    image = topology()["kinds"]["arista_ceos"]["image"]
+    assert image.startswith("${CEOS_IMAGE"), f"image {image!r} is not overridable"
+    assert ":=" in image, "no default, so the topology fails with CEOS_IMAGE unset"
+
+
+def test_preflight_is_executable() -> None:
+    preflight = SCENARIO / "preflight.sh"
+    assert preflight.is_file()
+    assert preflight.stat().st_mode & 0o111, "preflight.sh is not executable"

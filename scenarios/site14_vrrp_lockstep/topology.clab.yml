@@ -16,8 +16,10 @@ topology:
 
   kinds:
     arista_ceos:
-      # Retag to whatever `docker images` shows for your imported cEOS.
-      image: ceos:4.32.0F
+      # Set CEOS_IMAGE to whatever `docker images` shows for your imported cEOS;
+      # `./preflight.sh` prints the export line for you. Containerlab expands
+      # ${VAR:=default} in topology files, so there is nothing to hand-edit.
+      image: ${CEOS_IMAGE:=ceos:4.32.0F}
       memory: 2Gb
       cpu: 1
     linux:

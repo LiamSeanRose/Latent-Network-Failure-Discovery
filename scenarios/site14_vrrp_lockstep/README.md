@@ -50,6 +50,13 @@ steady state contains it, so no steady-state analysis can reach it.
 
 ## Running it
 
+Check the machine first — it answers the EOS-version question and prints the
+`CEOS_IMAGE` line to export:
+
+```sh
+./preflight.sh
+```
+
 Containerlab needs root on most installs; export `CLAB="sudo containerlab"` if
 yours does.
 
@@ -134,8 +141,9 @@ the syntax.
    `agg-a Ethernet1` in config. That drives `line-protocol` tracking correctly but
    does not exercise carrier-delay or debounce behaviour, which a real flap would.
    Noted in `docs/emulation-fidelity.md` as an open fidelity item.
-4. **cEOS image tag** in `topology.clab.yml` is a placeholder — retag to match
-   `docker images`.
+4. **cEOS image tag** is read from `$CEOS_IMAGE` (containerlab expands
+   `${VAR:=default}` in topology files), so there is nothing to hand-edit —
+   `preflight.sh` prints the export line.
 5. **OSPF adjacency over the SVIs** is suppressed with `passive-interface`, so the
    aggs peer with core1 only. If they unexpectedly peer with each other through
    acc1, that is a config bug here, not a finding.
