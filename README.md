@@ -33,6 +33,11 @@ VRRP 24 sits on `agg-b` while 14 and 34 sit on `agg-a`. That gap **is** the fail
 state contains it, which is why static analysis reports this network healthy — and Batfish,
 run against these same configs, does exactly that.
 
+Above it, the tool draws the cause: three groups on one device pair, one of which waits ninety
+seconds before taking mastership back, one of which waits for nothing, and one of which does
+not track the uplink at all. Two rows that do not match are two groups that will answer the
+same event at different speeds.
+
 ```
 $ cassandra check ./configs --explain
 HIGH  agg-a  VRRP 14 and VRRP 24 can end up on different devices
