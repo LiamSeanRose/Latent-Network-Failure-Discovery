@@ -38,3 +38,19 @@ jobs:
           uv run cassandra check scenarios/site14_vrrp_lockstep/configs --explain \
             | tee /tmp/out.txt || true
           grep -q "fhrp-divergence" /tmp/out.txt
+      - name: check read every line of its own corpus
+        # The shipped corpus is the one input this tool must understand
+        # completely. A line it cannot read here is a parser gap, and the notice
+        # goes to stderr precisely so it can be caught.
+        run: |
+          uv run cassandra check scenarios/site14_vrrp_lockstep/configs \
+            2>/tmp/err.txt >/dev/null || true
+          if grep -q "not understood" /tmp/err.txt; then cat /tmp/err.txt; exit 1; fi
+      - name: every rule explains itself
+        run: uv run cassandra rules
+      - name: the shareable report renders
+        run: |
+          uv run cassandra report scenarios/site14_vrrp_lockstep/configs \
+            -o /tmp/report.html || true
+          test -s /tmp/report.html
+          grep -q "fhrp-divergence" /tmp/report.html

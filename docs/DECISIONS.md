@@ -587,3 +587,48 @@ search from the conclusions it reaches.
 
 **Reversal:** the generator can be deleted and the file frozen at any point. Doing so re-opens
 exactly the drift the generator exists to prevent.
+
+---
+
+## 2026-08-19 — Analysis cost must follow the collection, not its square
+
+**Context:** the tool took 105 seconds on a hundred devices. Worse, a site cost more to
+analyse the more unrelated sites shared its directory — the answer for one site depended on
+how the archive happened to be filed.
+
+**Cause:** two instances of the same mistake. The sequence enumeration compared every FHRP
+group against every other one in the pack, including pairs at different sites that cannot see
+each other's events. And `simulate()` rebuilt two whole-pack lookups for every group of every
+simulation, with one simulation run per device.
+
+**Chosen:** `simulate()` takes the groups to advance, and the enumeration passes only the
+groups the flapping device belongs to. This is safe for exactly the reason the assumption
+register's A20 states — groups are advanced independently — so a named group's result is
+identical either way. The lookups are cached per pack.
+
+**Cache key:** object identity, not `meta.fact_pack_id`. That id is content-addressed only
+when `build_fact_pack` produced it; a hand-built pack can carry any string, and the test suite
+proves it — every pack in `test_timing_model_assumptions.py` is called `assumptions`. The pack
+is held in the cache entry and compared with `is`, so a recycled address cannot give a wrong
+answer, and the cache is bounded at two entries.
+
+**Result:** 105s to 2.6s, identical findings. `tests/test_scale.py` pins both properties.
+
+**Reversal:** cheap; `only` defaults to None and the cache is transparent.
+
+---
+
+## 2026-08-19 — Say what was not read, next to what was found
+
+**Context:** pointing the tool at configs whose FHRP lines it could not parse produced a
+hundred confident findings and no hint that most of each config had been skipped. `cassandra
+facts` listed the unparsed lines; nothing pointed anyone at it from where they would look.
+
+**Chosen:** the count appears beside the findings in the web view and on stderr before them in
+the CLI. Only when there is something to say, so it means something when it appears.
+
+**Reasoning:** a rule can only reason about facts that were extracted, and a line nobody read
+is not neutral. A group whose priority line was missed still gets checked, and the answer is
+wrong in a way nothing else on the page would suggest.
+
+**Reversal:** trivial, and would be a regression in honesty rather than in function.
