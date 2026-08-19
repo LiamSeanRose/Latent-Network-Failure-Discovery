@@ -423,6 +423,8 @@ svg.topology a.node-link:focus-visible circle { outline: 2px solid var(--accent)
 details summary { cursor: pointer; color: var(--ink-3); font-size: .82rem; }
 details ul { margin: .45rem 0 0; padding-left: 1.1rem; font-family: ui-monospace,
   SFMono-Regular, Menlo, monospace; font-size: .78rem; color: var(--ink-2); }
+.offer { margin: .9rem 0 0; padding-top: .8rem;
+  border-top: 1px solid var(--line); color: var(--ink-2); }
 .empty, .error, .note { background: var(--surface-1); border: 1px solid var(--line);
   border-radius: 10px; padding: 1.1rem; }
 .error { border-left: 3px solid var(--s-critical); }

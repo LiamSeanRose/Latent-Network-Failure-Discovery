@@ -902,3 +902,29 @@ def test_wide_figures_scroll_inside_their_own_card() -> None:
     assert "svg.viz { width: 100%; min-width: 520px" in STYLE
     figure = re.search(r"\.figure \{([^}]*)\}", STYLE)
     assert figure and "overflow-x: auto" in figure.group(1)
+
+
+def test_the_landing_page_offers_a_corpus_to_someone_who_has_none(
+    base_url: str,
+) -> None:
+    """The premise is that installing the tool is the entire setup. Landing on a
+    text box with nothing to type into it walks that back."""
+    _, body = get(base_url + "/")
+    assert "Analyse the example network" in body
+    assert "examples" in body
+
+    # And the link works.
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    assert quote(str(examples), safe="") in body.replace("%2F", "%2F")
+    assert "fhrp-divergence" in view(base_url, examples)
+
+
+def test_the_offer_is_absent_when_the_examples_are_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installed copy ships no examples directory, and a link to one that is
+    not there is worse than no link."""
+    import cassandra.app as app
+
+    monkeypatch.setattr(app, "_EXAMPLE", Path("/definitely/not/here"))
+    assert app._example_offer() == ""

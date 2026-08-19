@@ -695,6 +695,29 @@ def _comparison_html(comparison: Comparison) -> str:
     )
 
 
+# Only when running from a checkout. An installed copy has no examples
+# directory, and offering a link to one that is not there is worse than not
+# offering it.
+_EXAMPLE: Final = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+
+
+def _example_offer() -> str:
+    """A way in for someone who has not got a directory of configs to hand.
+
+    The whole premise is that installing the tool is the entire setup. Landing
+    on a text box and having nothing to type into it walks that back.
+    """
+    if not _EXAMPLE.is_dir():
+        return ""
+    link = html.escape(f"/?{urlencode({'dir': str(_EXAMPLE)})}")
+    return (
+        f'<p class="offer">No configs to hand? '
+        f'<a href="{link}">Analyse the example network</a> — two sites, six '
+        "devices, four planted defects, walked through in "
+        "<code>docs/TUTORIAL.md</code>.</p>"
+    )
+
+
 def _unparsed_html(analysis: Analysis) -> str:
     """What the parsers did not understand, said out loud.
 
@@ -789,7 +812,7 @@ def page(
             "back early, the other waits out a delay — and the hatched window "
             "is the stretch where they sit on different devices. Steady-state "
             "analysis never sees it, because at rest the configuration is "
-            "correct.</p></div>"
+            "correct.</p>" + _example_offer() + "</div>"
         )
     elif not analysis.findings:
         sections.append(
