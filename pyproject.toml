@@ -59,7 +59,7 @@ packages = ["cassandra"]
 [tool.hatch.build.targets.sdist]
 # The source distribution is published surface: it carries the spec, the docs, the
 # corpus and the tests, but not repository-local scaffolding.
-exclude = [".github", "CLAUDE.md"]
+exclude = [".github"]
 
 [tool.ruff]
 target-version = "py312"

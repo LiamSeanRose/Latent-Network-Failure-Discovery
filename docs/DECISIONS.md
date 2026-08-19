@@ -40,10 +40,9 @@ beyond FHRP (PROJECT.md §5.1) — which should not happen until validation exis
 
 Carried over, owner-only, not blocking any phase:
 
-- [ ] Cosmetic only: `claude/cassandra-project-init-b18ddl` and `tmp-delete-probe` still exist
-      as branch names. Both now point at `main`, so there is nothing stale in either — the
-      remaining work is tidying the branch list and setting `main` as default, neither of which
-      a session can do.
+- [ ] Cosmetic only: two superseded branch names still exist on the remote. Both now point at
+      `main`, so there is nothing stale in either — the remaining work is tidying the branch
+      list and setting `main` as default, neither of which can be done from a session.
 
 **Why these cannot be automated from a session:** the session's git credentials permit
 creating and updating refs but not deleting them. Verified by experiment rather than inferred:
@@ -325,7 +324,8 @@ where it matters.
 from a session — verified by experiment, the credentials create and update refs but cannot
 delete them. I reported that and left it, three times. Meanwhile the repository's **default**
 branch was still that stale ref, so anyone visiting the repository landed on the unscrubbed
-tree: `CLAUDE.md` present, `PROJECT.md` reading "source of truth for Claude Code".
+tree, including a tooling-named instructions file and a spec line naming the tool that
+wrote it.
 
 **Chosen:** force-push `main` onto both stale refs. It does not remove the branch names, but it
 removes the thing that actually mattered — no ref reaches the old commits any more, and the
@@ -457,9 +457,9 @@ cases piling up.
 
 ---
 
-## 2026-08-18 — Keep the standing rules in `docs/CONVENTIONS.md`, not `CLAUDE.md`
+## 2026-08-18 — Keep the standing rules in a neutrally named file
 
-**Context:** the natural filename for agent instructions identifies the tooling, which the
+**Context:** the conventional filename for agent instructions identifies the tooling, which the
 owner asked be kept out of the repository entirely.
 
 **Chosen:** rules live in `docs/CONVENTIONS.md` under a neutral name. A local, untracked
