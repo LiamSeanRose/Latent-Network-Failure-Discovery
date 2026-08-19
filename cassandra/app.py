@@ -20,14 +20,14 @@ from __future__ import annotations
 import html
 import json
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from cassandra import art, visuals
+from cassandra import art, baseline, visuals
 from cassandra.catalogue import RuleDoc, catalogue
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
@@ -251,6 +251,7 @@ input[type=text]:focus {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
+input[type=text].since { flex: 0 1 13rem; font-size: .92rem; }
 button.go {
   padding: .62rem 1.15rem; border: 0; border-radius: 8px; background: var(--accent);
   color: #fff; font: inherit; font-weight: 620; cursor: pointer;
@@ -390,6 +391,25 @@ details ul { margin: .45rem 0 0; padding-left: 1.1rem; font-family: ui-monospace
   border-radius: 10px; padding: 1.1rem; }
 .error { border-left: 3px solid var(--s-critical); }
 .note.unparsed { border-left: 3px solid var(--s-warning); margin-bottom: 1rem; }
+/* ---- comparison ---- */
+.compare { background: var(--surface-1); border: 1px solid var(--line);
+  border-left: 3px solid var(--s-good); border-radius: 10px;
+  padding: 1rem; margin-bottom: 1rem; }
+.compare.regressed { border-left-color: var(--s-critical); }
+.compare .counts-inline { display: flex; gap: 1rem; flex-wrap: wrap;
+  margin: .5rem 0 .3rem; }
+.compare .c { font-weight: 640; font-variant-numeric: tabular-nums; }
+.compare .c.new { color: var(--s-critical); }
+.compare .c.fixed { color: var(--s-good); }
+.compare .c.known { color: var(--ink-3); }
+.tag.state { font-weight: 660; }
+.tag.state.new { color: var(--s-critical); border-color: var(--s-critical); }
+.tag.state.fixed { color: var(--s-good); border-color: var(--s-good); }
+.finding.is-new { border-left-width: 5px; }
+.finding.is-known { opacity: .82; }
+.finding.is-known:hover { opacity: 1; }
+.finding.is-fixed { border-left-color: var(--s-good); opacity: .78; }
+.finding.is-fixed h2 { text-decoration: line-through; text-decoration-thickness: 1px; }
 .note.unparsed .mono { color: var(--ink-1); }
 .caveat { color: var(--ink-3); font-size: .84rem; margin-top: 2rem;
   border-top: 1px solid var(--line); padding-top: .9rem; }
@@ -458,6 +478,11 @@ class Filters:
     tiers: frozenset[Tier] = frozenset()
     devices: frozenset[str] = frozenset()
     unknown: tuple[str, ...] = ()
+    # Not a filter: it selects nothing and hides nothing. It lives here because
+    # every link and every hidden form field on the page is built from this
+    # object, and a comparison that falls off the moment you click a severity is
+    # a comparison nobody can use.
+    since: str = ""
 
     @property
     def active(self) -> bool:
@@ -497,6 +522,42 @@ def analyse_directory(config_dir: Path) -> tuple[list[Finding], str | None]:
     """Findings for a directory, or a message explaining why there are none."""
     result = analyse(config_dir)
     return list(result.findings), result.error
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Comparison:
+    """A run measured against a saved one, or the reason there is no measure."""
+
+    diff: baseline.Diff | None = None
+    error: str | None = None
+    path: str = ""
+
+    def state(self, finding: Finding) -> str:
+        """ "new" for a finding the baseline did not have, "known" otherwise.
+
+        Identity comes from `baseline`, not from the rendered text, for the same
+        reason it does there: rewording a finding is not a regression.
+        """
+        if self.diff is None:
+            return ""
+        fresh = {baseline.identity(f) for f in self.diff.new}
+        return "new" if baseline.identity(finding) in fresh else "known"
+
+
+def compare_with(analysis: Analysis, path: str) -> Comparison:
+    """Diff this analysis against a saved baseline named by the query string."""
+    if not path:
+        return Comparison()
+    if analysis.pack is None:
+        return Comparison(path=path, error="nothing to compare: no configs were read")
+    try:
+        previous = baseline.load(Path(path).expanduser())
+        current = baseline.snapshot(list(analysis.findings), analysis.pack)
+        return Comparison(diff=baseline.compare(previous, current), path=path)
+    except baseline.BaselineError as error:
+        return Comparison(path=path, error=str(error))
+    except OSError as error:
+        return Comparison(path=path, error=f"could not read {path}: {error}")
 
 
 def _requested(
@@ -546,6 +607,7 @@ def parse_filters(params: dict[str, list[str]]) -> Filters:
         tiers=frozenset(tiers),
         devices=frozenset(devices),
         unknown=tuple(unknown),
+        since=(params.get("since") or [""])[0].strip(),
     )
 
 
@@ -558,6 +620,8 @@ def _query_pairs(config_dir: str, filters: Filters) -> list[tuple[str, str]]:
     )
     pairs.extend(("tier", t.value) for t in _TIER_ORDER if t in filters.tiers)
     pairs.extend(("device", device) for device in sorted(filters.devices))
+    if filters.since:
+        pairs.append(("since", filters.since))
     return pairs
 
 
@@ -595,7 +659,7 @@ def _filter_bar(
         _chip(
             "all",
             len(by_tier),
-            href("/", config_dir, Filters(tiers=filters.tiers)),
+            href("/", config_dir, replace(filters, severities=frozenset())),
             on=not filters.severities,
         ),
     ]
@@ -606,10 +670,7 @@ def _filter_bar(
             href(
                 "/",
                 config_dir,
-                Filters(
-                    severities=_toggle(filters.severities, severity),
-                    tiers=filters.tiers,
-                ),
+                replace(filters, severities=_toggle(filters.severities, severity)),
             ),
             on=severity in filters.severities,
         )
@@ -626,7 +687,7 @@ def _filter_bar(
         _chip(
             "all",
             len(by_severity),
-            href("/", config_dir, Filters(severities=filters.severities)),
+            href("/", config_dir, replace(filters, tiers=frozenset())),
             on=not filters.tiers,
         ),
     ]
@@ -637,10 +698,7 @@ def _filter_bar(
             href(
                 "/",
                 config_dir,
-                Filters(
-                    severities=filters.severities,
-                    tiers=_toggle(filters.tiers, tier),
-                ),
+                replace(filters, tiers=_toggle(filters.tiers, tier)),
             ),
             on=tier in filters.tiers,
         )
@@ -667,7 +725,7 @@ def _filter_bar(
                 href(
                     "/",
                     config_dir,
-                    Filters(severities=filters.severities, tiers=filters.tiers),
+                    replace(filters, devices=frozenset()),
                 ),
                 on=not filters.devices,
             ),
@@ -679,11 +737,7 @@ def _filter_bar(
                 href(
                     "/",
                     config_dir,
-                    Filters(
-                        severities=filters.severities,
-                        tiers=filters.tiers,
-                        devices=_toggle(filters.devices, device),
-                    ),
+                    replace(filters, devices=_toggle(filters.devices, device)),
                 ),
                 on=device in filters.devices,
             )
@@ -735,9 +789,12 @@ def _counts_html(visible: list[Finding], total: int) -> str:
     )
 
 
-def _finding_html(finding: Finding, figure: str = "") -> str:
+def _finding_html(finding: Finding, figure: str = "", state: str = "") -> str:
+    classes = f"finding {html.escape(finding.severity.value)}"
+    if state:
+        classes += f" is-{state}"
     parts = [
-        f'<article class="finding {html.escape(finding.severity.value)}">',
+        f'<article class="{classes}">',
         f"<h2>{html.escape(finding.title)}</h2>",
         f'<p class="meta"><span class="mono">{html.escape(finding.device)}</span>'
         f'<span class="sev {html.escape(finding.severity.value)}">'
@@ -750,6 +807,7 @@ def _finding_html(finding: Finding, figure: str = "") -> str:
             if finding.tier is Tier.TIMING
             else ""
         )
+        + (f' <span class="tag state {state}">{state}</span>' if state else "")
         + "</p>",
         f'<p class="detail">{html.escape(finding.detail)}</p>',
     ]
@@ -782,7 +840,10 @@ def _by_device(findings: list[Finding]) -> list[tuple[str, list[Finding]]]:
 
 
 def _device_html(
-    device: str, findings: list[Finding], pack: StaticFactPack | None = None
+    device: str,
+    findings: list[Finding],
+    pack: StaticFactPack | None = None,
+    comparison: Comparison | None = None,
 ) -> str:
     """One device's findings.
 
@@ -798,8 +859,9 @@ def _device_html(
         if pack is not None and not drawn and finding.tier is Tier.TIMING:
             figure = visuals.timeline_svg(pack, finding)
             drawn = bool(figure)
+        state = comparison.state(finding) if comparison is not None else ""
         cards.append(
-            _finding_html(finding, figure).replace(
+            _finding_html(finding, figure, state).replace(
                 '<article class="finding',
                 f'<article style="--i:{index}" class="finding',
                 1,
@@ -891,6 +953,64 @@ def _rulebook_html(findings: list[Finding]) -> str:
     ).format(plural, len(book), "".join(_rule_entry(doc) for doc in seen))
 
 
+def _comparison_html(comparison: Comparison) -> str:
+    """What changed since the baseline, above the findings it changes.
+
+    Only new findings mean a regression. The pre-existing ones were known and
+    accepted when the baseline was taken, and treating them as failures makes
+    every run red until a backlog is cleared, which is how a check gets ignored.
+    """
+    if comparison.error:
+        return (
+            '<div class="error">Baseline '
+            f"<code>{html.escape(comparison.path)}</code>: "
+            f"{html.escape(comparison.error)}</div>"
+        )
+    diff = comparison.diff
+    if diff is None:
+        return ""
+
+    taken = diff.baseline_taken_at.strftime("%Y-%m-%d %H:%M")
+    verdict = "regressed" if diff.new else "clean"
+    moved = (
+        "The configs have not changed since it was taken."
+        if not diff.configs_changed
+        else ""
+    )
+    counts = (
+        f'<span class="c new">{len(diff.new)} new</span>'
+        f'<span class="c fixed">{len(diff.fixed)} fixed</span>'
+        f'<span class="c known">{len(diff.unchanged)} unchanged</span>'
+    )
+    churn = ""
+    if diff.devices_added or diff.devices_removed:
+        # A device appearing or leaving explains a pile of new or fixed findings
+        # that would otherwise read as a change in the network's health.
+        bits = []
+        if diff.devices_added:
+            bits.append("added " + ", ".join(diff.devices_added))
+        if diff.devices_removed:
+            bits.append("gone " + ", ".join(diff.devices_removed))
+        churn = f'<p class="cap">Devices: {html.escape("; ".join(bits))}.</p>'
+
+    fixed = ""
+    if diff.fixed:
+        cards = "".join(_finding_html(f, state="fixed") for f in diff.fixed)
+        fixed = (
+            '<details class="device-group"><summary>no longer reported'
+            f'<span class="n">{len(diff.fixed)}</span></summary>{cards}</details>'
+        )
+
+    return (
+        f'<div class="compare {verdict}"><strong>Compared with a baseline taken '
+        f"{html.escape(taken)}.</strong> "
+        f'<div class="counts-inline">{counts}</div>'
+        f'<p class="cap">{html.escape(moved)} Only new findings are a '
+        "regression: the rest were known when the baseline was taken.</p>"
+        f"{churn}</div>{fixed}"
+    )
+
+
 def _unparsed_html(analysis: Analysis) -> str:
     """What the parsers did not understand, said out loud.
 
@@ -920,14 +1040,24 @@ def _unparsed_html(analysis: Analysis) -> str:
 
 
 def _hidden_filters(filters: Filters) -> str:
-    """Keep the active filters when the directory form is submitted."""
+    """Keep the active filters when the directory form is submitted.
+
+    `since` is skipped: the form carries it in a visible field, and submitting
+    two inputs of the same name sends both.
+    """
     return "".join(
         f'<input type="hidden" name="{name}" value="{html.escape(value)}">'
         for name, value in _query_pairs("", filters)
+        if name != "since"
     )
 
 
-def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
+def page(
+    config_dir: str,
+    analysis: Analysis,
+    filters: Filters,
+    comparison: Comparison | None = None,
+) -> str:
     visible = [finding for finding in analysis.findings if filters.matches(finding)]
     sections: list[str] = []
 
@@ -953,6 +1083,9 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
             f'<p class="note">No device here is called {named}. '
             "Names come from each config's own hostname line.</p>"
         )
+
+    if comparison is not None and (comparison.diff or comparison.error):
+        sections.append(_comparison_html(comparison))
 
     if analysis.error:
         sections.append(f'<div class="error">{html.escape(analysis.error)}</div>')
@@ -985,11 +1118,20 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
         if visible:
             sections.append(_counts_html(visible, len(analysis.findings)))
             sections.extend(
-                _device_html(device, group, analysis.pack)
+                _device_html(device, group, analysis.pack, comparison)
                 for device, group in _by_device(visible)
             )
         else:
-            clear = href("/", config_dir, Filters())
+            clear = href(
+                "/",
+                config_dir,
+                replace(
+                    filters,
+                    severities=frozenset(),
+                    tiers=frozenset(),
+                    devices=frozenset(),
+                ),
+            )
             sections.append(
                 '<div class="empty">No findings match these filters. '
                 f'<a href="{clear}">Show all {len(analysis.findings)}</a>.</div>'
@@ -1033,11 +1175,7 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
                 href(
                     "/",
                     config_dir,
-                    Filters(
-                        severities=filters.severities,
-                        tiers=filters.tiers,
-                        devices=_toggle(filters.devices, device),
-                    ),
+                    replace(filters, devices=_toggle(filters.devices, device)),
                 )
                 if device in with_findings
                 else ""
@@ -1056,6 +1194,10 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
          value="{html.escape(config_dir)}" autofocus accesskey="d"
          aria-label="directory of device configs to analyse"
          spellcheck="false" autocapitalize="off" autocorrect="off">
+  <input type="text" name="since" class="since" placeholder="baseline.json"
+         value="{html.escape(filters.since)}" spellcheck="false"
+         aria-label="a saved baseline to compare this run against"
+         autocapitalize="off" autocorrect="off">
   {_hidden_filters(filters)}
   <button class="go" type="submit">Analyse</button>
 </form>"""
@@ -1167,6 +1309,8 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as exc:
                 analysis = Analysis(error=f"could not read {config_dir}: {exc}")
 
+        comparison = compare_with(analysis, filters.since)
+
         if parsed.path == "/report.html":
             # Imported here rather than at module scope: report_html imports
             # this module for the renderer, and one of the two has to be late.
@@ -1199,7 +1343,10 @@ class Handler(BaseHTTPRequestHandler):
             self._respond("not found", "text/plain", status=404)
             return
 
-        self._respond(page(config_dir, analysis, filters), "text/html; charset=utf-8")
+        self._respond(
+            page(config_dir, analysis, filters, comparison),
+            "text/html; charset=utf-8",
+        )
 
     def _respond(
         self,

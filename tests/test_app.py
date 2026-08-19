@@ -20,6 +20,7 @@ from urllib.request import urlopen
 
 import pytest
 
+from cassandra import baseline
 from cassandra.app import Handler, analyse, analyse_directory
 from cassandra.factpack.builders import build_fact_pack
 
@@ -532,3 +533,93 @@ def test_lines_that_were_not_read_are_reported_beside_the_findings(
 def test_a_fully_understood_directory_says_nothing_about_reading(base_url: str) -> None:
     """The notice has to mean something when it appears."""
     assert "Not everything was read" not in view(base_url, CORPUS)
+
+
+@pytest.fixture
+def regressed(tmp_path: Path) -> tuple[Path, Path]:
+    """A corpus, a baseline of it, and then a change that makes things worse.
+
+    Shrinking a tracking decrement produces one new finding and, because the
+    group can no longer lose the election, removes another — a fix that masks a
+    problem, which is exactly the shape a comparison exists to show.
+    """
+    configs = tmp_path / "configs"
+    shutil.copytree(CORPUS, configs)
+    before = analyse(configs)
+    base = tmp_path / "base.json"
+    baseline.save(list(before.findings), before.pack, base)
+
+    config = configs / "agg-a.cfg"
+    config.write_text(config.read_text().replace("decrement 40", "decrement 5", 1))
+    return configs, base
+
+
+def test_a_baseline_splits_findings_into_new_and_known(
+    base_url: str, regressed: tuple[Path, Path]
+) -> None:
+    configs, base = regressed
+    body = view(base_url, configs, f"since={quote(str(base))}")
+    assert "Compared with a baseline taken" in body
+    assert "1 new" in body
+    assert '<span class="tag state new">new</span>' in body
+    assert '<span class="tag state known">known</span>' in body
+
+
+def test_a_baseline_shows_what_stopped_being_reported(
+    base_url: str, regressed: tuple[Path, Path]
+) -> None:
+    """A finding that disappeared is the only copy left of itself, and the
+    reason it went may be a fix or may be a second defect masking the first."""
+    configs, base = regressed
+    body = view(base_url, configs, f"since={quote(str(base))}")
+    assert "no longer reported" in body
+    assert "1 fixed" in body
+
+
+def test_the_baseline_survives_clicking_a_filter(
+    base_url: str, regressed: tuple[Path, Path]
+) -> None:
+    """A comparison that falls off the moment you narrow the view is one nobody
+    can use."""
+    configs, base = regressed
+    body = view(base_url, configs, f"since={quote(str(base))}&severity=high")
+    assert "Compared with a baseline taken" in body
+    assert f"since={quote(str(base), safe='')}" in body
+
+
+def test_a_baseline_that_is_not_there_is_reported(base_url: str, mixed: Path) -> None:
+    body = view(base_url, mixed, "since=/definitely/not/here.json")
+    assert "Baseline" in body
+    assert "/definitely/not/here.json" in body
+    # The findings are still shown: a missing baseline is not a reason to
+    # withhold the answer to the question that was actually asked.
+    assert "fhrp-divergence" in body
+
+
+def test_a_baseline_of_a_different_network_is_refused(
+    base_url: str, tmp_path: Path, mixed: Path
+) -> None:
+    """Comparing two networks with no device in common has an answer for every
+    finding and a meaning for none of them."""
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "far1.cfg").write_text(
+        "hostname far1\nvlan 20\ninterface Ethernet1\n"
+        "   switchport mode trunk\n   switchport trunk allowed vlan 20\n"
+        "interface Vlan99\n   ip address 10.88.0.1/24\n"
+    )
+    elsewhere = analyse(other)
+    base = tmp_path / "far.json"
+    baseline.save(list(elsewhere.findings), elsewhere.pack, base)
+
+    body = view(base_url, mixed, f"since={quote(str(base))}")
+    assert "Baseline" in body
+    assert "fhrp-divergence" in body
+
+
+def test_no_baseline_means_no_comparison_on_the_page(
+    base_url: str, mixed: Path
+) -> None:
+    body = view(base_url, mixed)
+    assert "Compared with a baseline" not in body
+    assert 'class="tag state' not in body

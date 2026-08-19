@@ -66,6 +66,9 @@ uv run cassandra check ./configs --since base.json           # what changed sinc
 
 `--since` answers the question a QA tool is actually for: *did I break something?* Only new
 findings fail it — the ones you already knew about were accepted when the baseline was taken.
+The web view takes the same baseline: findings arrive tagged new or known, and the ones that
+stopped being reported get their own section, because a finding that disappeared may be a fix
+or may be a second defect masking the first.
 
 ### Pointing it at real files
 
