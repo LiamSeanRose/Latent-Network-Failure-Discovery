@@ -36,6 +36,17 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
       and TIMING tiers needed no changes, which is the evidence that the parser is the only
       dialect-aware component.
 
+- [x] **Cisco NX-OS dialect.** Done 2026-08-18. Third dialect; same result.
+
+- [x] **Cisco IOS-XR dialect.** Done 2026-08-19. Fourth, and the first genuinely different
+      one: PROJECT.md §5.2 named it as the harder of the two obvious next ones, and it is the
+      real test of the claim above. IOS-XR puts a first-hop redundancy group in a top-level
+      `router vrrp` block that nests the interface under itself, four levels down and often a
+      hundred lines from the interface stanza. Nothing outside the parser changed — no rule,
+      no timer record, no view. The one thing it cost is a second splitter: `stanzas` cuts at
+      column zero and strips, which cannot represent that, so `blocks` cuts at the shallowest
+      indentation and hands the bodies back still indented, ready to be cut again.
+
 **All phases complete except Phase 4's validation, which needs a cEOS image (see above).**
 The next substantive work is either supplying that image, or widening the timing model
 beyond FHRP (PROJECT.md §5.1) — which should not happen until validation exists.
@@ -53,6 +64,38 @@ Work since the phases closed, none of it widening the model:
   longer depend on what else is filed beside it.
 - The palette is measured rather than asserted, in both themes and under simulated red-green
   colour blindness.
+- BGP and spanning-tree timers are read, and four rules check what they imply. The two fields
+  had been in the schema since it was written and filled by nothing.
+- `check --format sarif` and `--format junit`, so a pipeline that already reads one of those
+  needs nothing written for this tool. Deterministic byte-for-byte, and neither offers an
+  autofix: a suggested change is lines typed on a device, sometimes not the device the finding
+  is located on.
+- The coverage report answers the second half of its own question. A rule with no input was
+  visible; a fact no rule reads was not, and those are different gaps — the first is a property
+  of the collection, the second is a check nobody has written.
+- Rule assessment is roughly seven times faster at two hundred devices: `sys.monitoring` with
+  per-location disabling instead of a global trace, and a recorder that settles a path once it
+  has answered.
+
+Six defects an adversarial read of the whole repository found, all reproduced before they were
+fixed and all with a test that fails without the fix:
+
+- VRRP preemption is on by default and every parser recorded an unstated preempt as off. That
+  produced a false LOW *instead of* a real oscillation finding, because the timing model gates
+  every challenger on the flag — the opposite finding, at a lower severity, on the same config.
+- `switchport trunk allowed vlan add N` was read by nothing, so a trunk that permits a VLAN was
+  reported as not permitting it — and that line is what the native-VLAN rule suggests as its own
+  fix, so applying the tool's advice left the finding exactly where it was.
+- On a tie between dialects the parser chose by list order, so an L2-only Arista switch was read
+  as IOS and its millisecond hello time became two thousand seconds.
+- `fhrp-divergence` paired any two groups sharing one device and told the reader they shared a
+  pair, with a remedy that could not apply.
+- The ±20% perturbation control counted the unperturbed run among the perturbed ones, so a
+  finding could ship with the observable entirely absent at one perturbation.
+- `fhrp-track-ineffective` compared with `>` where the protocol requires strictly greater, so a
+  decrement landing exactly on the peer's priority — tracking that does nothing — read as clean.
+- Every finding printed blank: the card's entrance keyframe starts at `opacity: 0` and is driven
+  by scroll position, and a printed page has none.
 
 Carried over, owner-only, not blocking any phase:
 
