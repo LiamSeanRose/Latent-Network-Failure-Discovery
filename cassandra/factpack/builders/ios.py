@@ -18,9 +18,11 @@ from cassandra.factpack.builders.common import (
     ParsedDevice,
     declared_vlans_from,
     interface_kind,
+    is_out_of_scope,
     netmask_to_prefix_length,
     seconds_to_ms,
     stanzas,
+    strip_banners,
     vlan_list,
 )
 from cassandra.factpack.schema import (
@@ -62,6 +64,7 @@ def looks_like_ios(text: str) -> bool:
 
 
 def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
+    text = strip_banners(text)
     hostname = device_id or "unknown"
     interfaces: list[Interface] = []
     tracked: list[TrackedObject] = []
@@ -103,10 +106,17 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
             unparsed.extend(leftover)
             continue
 
+        # An out-of-scope section takes its body with it. Reporting the body
+        # of a route-map or a management stanza is the same noise as reporting
+        # its header, and it is the noise that makes the list unreadable.
+        if is_out_of_scope(header):
+            continue
         if not _UNINTERESTING.fullmatch(header):
             unparsed.append(header)
         unparsed.extend(
-            line for line in stanza.body if not _UNINTERESTING.fullmatch(line)
+            line
+            for line in stanza.body
+            if not _UNINTERESTING.fullmatch(line) and not is_out_of_scope(line)
         )
 
     return ParsedDevice(

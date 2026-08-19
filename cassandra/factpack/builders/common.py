@@ -8,6 +8,7 @@ describe its differences.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -123,3 +124,54 @@ def declared_vlans_from(device: str, stanza: Stanza) -> list[Vlan]:
         Vlan(device=device, vlan_id=vid, name=name if len(ids) == 1 else None)
         for vid in ids
     ]
+
+
+# Top-level configuration domains this tool does not model, by design. They carry
+# no fact any tier reads, and listing them as "unparsed" buries the lines that
+# genuinely indicate a missing fact under a wall of AAA and SNMP.
+#
+# Deliberately conservative: anything not listed here is still reported, because
+# the cost of a surprising line going unnoticed is higher than the cost of one
+# extra line of output.
+OUT_OF_SCOPE: Final = re.compile(
+    r"^(?:no )?("
+    r"aaa|username|role|enable |privilege|tacacs|radius|"
+    r"banner|alias|prompt|terminal|"
+    r"boot |service |transceiver|hardware|agent |daemon|platform|"
+    r"clock|ntp|dns |ip name-server|ip domain|ip host|"
+    r"snmp-server|logging|event-handler|sflow|monitor |archive|"
+    r"management|line (con|vty|aux)|"
+    r"crypto|certificate|key |pki|ssl|"
+    r"ip (prefix-list|access-list|community-list|as-path)|"
+    r"mac access-list|route-map|class-map|policy-map|qos |errdisable|"
+    r"lldp|cdp|spanning-tree|queue-monitor|load-interval|"
+    r"end|exit"
+    r")\b"
+)
+
+
+def is_out_of_scope(line: str) -> bool:
+    """True for configuration this tool intentionally does not model."""
+    return bool(OUT_OF_SCOPE.match(line.strip()))
+
+
+def strip_banners(text: str) -> str:
+    """Remove banner bodies before stanza parsing.
+
+    Banner text sits at column zero and is arbitrary prose, so a stanza parser
+    reads every line of it as a separate top-level command. On a real device
+    config that is the single largest source of nonsense.
+    """
+    out: list[str] = []
+    in_banner = False
+    for line in text.splitlines():
+        if not in_banner and line.strip().startswith("banner "):
+            in_banner = True
+            continue
+        if in_banner:
+            # EOS terminates with a lone EOF; IOS uses a delimiter character.
+            if line.strip() in {"EOF", "!", ""} or line.strip().startswith("^"):
+                in_banner = False
+            continue
+        out.append(line)
+    return "\n".join(out)

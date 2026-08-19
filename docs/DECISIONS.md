@@ -54,6 +54,37 @@ operation, so there is no second route.
 
 ---
 
+## 2026-08-19 — Filter config the tool does not model, and strip banners
+
+**Context:** ran the tool against a config shaped like a real device dump rather than a tidy
+fixture — AAA, SNMP, NTP, a login banner, route-maps, prefix-lists, management API. It found the
+right defects, and reported **22 unparsed lines** doing it.
+
+That number is the problem. The unparsed list exists to warn that a fact is missing. Buried in
+twenty lines of SNMP and banner prose, the one line that matters is invisible, and a reader
+learns to skip the section — which makes it worse than not having it.
+
+Two distinct causes:
+
+1. **Banner prose is parsed as configuration.** Banner bodies sit at column zero, so a stanza
+   parser reads every line of the login message as a top-level command. This is the single
+   largest source of nonsense in a real config.
+2. **No notion of out-of-scope.** Every unmodelled section was reported, header and body alike.
+
+**Chosen:** strip banner bodies before parsing, and add a shared, deliberately conservative
+matcher for configuration domains this tool does not model. An out-of-scope section takes its
+body with it. 22 lines became 1 — and that survivor, a BGP `neighbor ... remote-as`, is a
+genuine gap, since peering is not modelled yet.
+
+**The risk this creates, and the guard against it:** a filter that hides a real gap is worse
+than noise, because the failure is silent. So the matcher lists only what is known irrelevant,
+anything unlisted is still reported, and two tests assert that an unrecognised interface
+sub-command and an unrecognised top-level section both still appear.
+
+**Reversal:** one regex and one function; deleting them restores the old behaviour.
+
+---
+
 ## 2026-08-19 — VLAN declarations reach the fact pack
 
 **Context:** all three parsers matched `vlan 10,20` and threw the result away. IOS and NX-OS
