@@ -122,6 +122,12 @@ body {
 }
 main { max-width: 60rem; margin: 0 auto; padding: 2.25rem 1.1rem 4rem; }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Default browser blue is the one colour on this page nobody chose. */
+a { color: var(--accent); text-decoration-color: color-mix(in srgb,
+  var(--accent) 45%, transparent); text-underline-offset: 2px; }
+a:hover { text-decoration-color: currentColor; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
+  border-radius: 3px; }
 
 /* ---- masthead ---- */
 .masthead { position: relative; margin-bottom: 1.6rem; }
@@ -140,6 +146,24 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
 .tagline { color: var(--ink-2); margin: .3rem 0 0; }
+
+/* ---- reading position ---- */
+/* Scroll-linked, so it costs no script. A findings page is long and mostly
+   uniform; knowing how much of it is left is the one thing scrolling does not
+   tell you. Without support the bar stays at zero width and is simply not
+   there, which is the right fallback for something purely orienting. */
+.progress {
+  position: fixed; inset: 0 auto auto 0; height: 3px; width: 100%;
+  transform: scaleX(0); transform-origin: 0 50%; z-index: 10;
+  background: linear-gradient(90deg, var(--series-1), var(--s-critical));
+}
+@supports (animation-timeline: scroll()) {
+  .progress {
+    animation: fill linear;
+    animation-timeline: scroll(root block);
+  }
+}
+@keyframes fill { to { transform: scaleX(1); } }
 
 /* ---- mark ---- */
 /* The glyph animates once and stops. A logo that never settles is a logo that
@@ -405,6 +429,19 @@ svg.topology a.node-link:focus-visible circle { outline: 2px solid var(--accent)
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: none; }
 }
+/* Where the browser can drive an animation from scroll position, cards rise as
+   they arrive rather than all at once on load — on a page of two hundred, a
+   staggered load animation is over before most of them are ever seen. The range
+   ends inside the entry, so anything already on screen is drawn fully.
+   Everywhere else the load animation above still applies. */
+@supports (animation-timeline: view()) {
+  .finding {
+    animation: rise linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 55%;
+    animation-delay: 0s;
+  }
+}
 .finding.high { border-left-color: var(--s-critical); }
 .finding.medium { border-left-color: var(--s-serious); }
 .finding.low { border-left-color: var(--s-warning); }
@@ -469,7 +506,7 @@ footer.meta-foot { color: var(--ink-3); font-size: .78rem; margin-top: 1.6rem; }
 @media print {
   body { background: #fff; color: #000; background-image: none; }
   main { max-width: none; padding: 0; }
-  form.finder, .chips, .pulse, .theme, .theme-input { display: none; }
+  form.finder, .chips, .pulse, .theme, .theme-input, .progress { display: none; }
   .finding, .figure { break-inside: avoid; border: 1px solid #ccc; }
   .finding { box-shadow: none; }
   a[href]::after { content: ""; }
@@ -1413,7 +1450,9 @@ def _shell(body: str, *, pulse: str = "pulse") -> str:
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cassandra</title><style>{_STYLE}</style></head>
-<body><main>
+<body>
+<div class="progress" aria-hidden="true"></div>
+<main>
 <header class="masthead">
   <input class="theme-input" type="checkbox" id="theme-toggle">
   <label class="theme" for="theme-toggle" title="switch between light and dark">
