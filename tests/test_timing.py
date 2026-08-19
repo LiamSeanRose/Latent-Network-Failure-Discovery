@@ -289,12 +289,15 @@ def test_a_knife_edge_result_does_not_survive_perturbation() -> None:
         if f.rule == "fhrp-divergence"
     }
     assert reported, "the corpus divergence must survive its own controls"
-    # And every flap-driven one survives all three runs, which is what its
-    # evidence claims.
+    # And every flap-driven one survives both perturbations, which is what its
+    # evidence claims. The count is read from the constant rather than written
+    # out, because the number in the sentence is exactly what was wrong before:
+    # it said three of three when one of the three was the run being tested.
+    held = f"held in {sequences.PERTURBED_RUNS} of {sequences.PERTURBED_RUNS}"
     for finding in sequences.analyse(pack):
         if finding.rule == "fhrp-divergence" and finding.trigger:
             if finding.trigger.startswith("flap"):
-                assert "held in 3 of 3" in " ".join(finding.evidence)
+                assert held in " ".join(finding.evidence)
 
 
 def test_two_groups_chasing_say_why_their_triggers_differ() -> None:
@@ -454,3 +457,215 @@ def test_an_unknown_dialect_suggests_nothing_rather_than_guessing() -> None:
         ),
     )
     assert all(not f.change for f in sequences.analyse(unknown))
+
+
+# ---------------------------------------------------------------------------
+# What a divergence pair has to be
+#
+# `_groups_by_device` pairs two groups as soon as they share one device, which
+# is the right question for "can one event move both" and the wrong one for the
+# finding: it tells the reader the groups share a device pair and offers a
+# remedy that only exists if they do.
+# ---------------------------------------------------------------------------
+
+HUB: Final = """hostname agg1
+vlan 10,20
+{track}interface Ethernet1
+   no switchport
+   ip address 10.0.0.1/31
+interface Vlan10
+   ip address 10.10.0.2/24
+   vrrp 10 ipv4 10.10.0.1
+   vrrp 10 priority-level 110
+   vrrp 10 preempt
+   vrrp 10 preempt delay minimum 90
+{track10}interface Vlan20
+   ip address 10.20.0.2/24
+   vrrp 20 ipv4 10.20.0.1
+   vrrp 20 priority-level 110
+   vrrp 20 preempt
+{track20}"""
+
+PARTNER: Final = """hostname {name}
+vlan {vlan}
+interface Ethernet1
+   no switchport
+   ip address 10.0.0.{p2p}/31
+interface Vlan{vlan}
+   ip address 10.{vlan}.0.3/24
+   vrrp {vlan} ipv4 10.{vlan}.0.1
+   vrrp {vlan} priority-level 100
+   vrrp {vlan} preempt
+"""
+
+TRACK_DEFINITION: Final = "track UPLINK interface Ethernet1 line-protocol\n"
+TRACK10: Final = "   vrrp 10 tracked-object UPLINK decrement 40\n"
+TRACK20: Final = "   vrrp 20 tracked-object UPLINK decrement 40\n"
+
+
+def one_device_two_pairs(tmp_path: Path, *, tracked: bool) -> StaticFactPack:
+    """agg1 shares VRRP 10 with agg2 and VRRP 20 with agg3, and nothing else.
+
+    Ordinary in a real network: one aggregation switch that ended up paired with
+    a different neighbour per VLAN. The two groups have a device in common and
+    no device *pair* in common, and agg1 answers an event differently for each —
+    group 10 waits 90s to preempt back, group 20 does not.
+
+    `tracked` decides which enumeration reaches it. Untracked, no flap can move
+    an election, so only the reload sequence runs; tracked, the flap sequence
+    runs as well and reports the same pair sooner.
+    """
+    (tmp_path / "agg1.cfg").write_text(
+        HUB.format(
+            track=TRACK_DEFINITION if tracked else "",
+            track10=TRACK10 if tracked else "",
+            track20=TRACK20 if tracked else "",
+        )
+    )
+    (tmp_path / "agg2.cfg").write_text(PARTNER.format(name="agg2", vlan=10, p2p=3))
+    (tmp_path / "agg3.cfg").write_text(PARTNER.format(name="agg3", vlan=20, p2p=5))
+    pack, _ = build_fact_pack(tmp_path)
+    return pack
+
+
+def test_two_groups_on_different_device_pairs_are_not_a_divergence(
+    tmp_path: Path,
+) -> None:
+    """The finding says the groups share a device pair, so it may only be made
+    about groups that do.
+
+    Before this was filtered, both enumerations reported agg1's two groups HIGH
+    — under a reload, which takes the whole device's group set down at once, and
+    under a flap where both groups track the same uplink. The remedy offered,
+    consistent tracking and preempt delay across the groups on the pair, has
+    nowhere to be applied: there is no pair, and no timer on agg1 can stop
+    VRRP 10 landing on agg2 while VRRP 20 is on agg3.
+    """
+    for tracked in (False, True):
+        pack = one_device_two_pairs(tmp_path, tracked=tracked)
+        assert {
+            frozenset(member.device for member in group.members)
+            for group in pack.fhrp_groups
+        } == {frozenset({"agg1", "agg2"}), frozenset({"agg1", "agg3"})}
+        divergences = [
+            f for f in sequences.analyse(pack) if f.rule == "fhrp-divergence"
+        ]
+        assert divergences == [], (tracked, [f.title for f in divergences])
+
+
+def test_a_group_is_paired_only_with_one_on_exactly_its_own_devices() -> None:
+    """Sharing two devices with a three-member group is not sharing a pair.
+
+    Pinning the choice rather than the code path: equality of the member device
+    sets, not a non-empty overlap and not an overlap of two. A group with a
+    third member can be served by a device its neighbour has no member on, so a
+    split the timeline shows may be between that device and a shared one —
+    which no consistency between the two groups' timers would prevent, making
+    the finding's remedy wrong rather than merely unhelpful.
+    """
+    devices_of = {
+        "pair-a": frozenset({"agg1", "agg2"}),
+        "pair-b": frozenset({"agg1", "agg2"}),
+        "trio": frozenset({"agg1", "agg2", "agg3"}),
+        "elsewhere": frozenset({"agg1", "agg3"}),
+    }
+    assert sequences._divergence_pairs(list(devices_of), devices_of) == [
+        ("pair-a", "pair-b")
+    ]
+
+
+# ---------------------------------------------------------------------------
+# What the perturbation control has to count
+#
+# PROJECT.md §2.4: a result that appears only at exact timings is a knife-edge
+# artifact. The run that produced the result cannot be one of the runs that
+# corroborate it.
+# ---------------------------------------------------------------------------
+
+KNIFE_EDGE_MASTER: Final = """hostname agg-a
+vlan 10
+track UPLINK interface Ethernet1 line-protocol
+interface Ethernet1
+   no switchport
+   ip address 10.0.0.1/31
+interface Vlan10
+   ip address 10.10.0.2/24
+   vrrp 10 ipv4 10.10.0.1
+   vrrp 10 priority-level 110
+   vrrp 10 preempt
+   vrrp 10 preempt delay minimum 200
+   vrrp 10 tracked-object UPLINK decrement 40
+"""
+
+KNIFE_EDGE_BACKUP: Final = """hostname agg-b
+vlan 10
+interface Ethernet1
+   no switchport
+   ip address 10.0.0.3/31
+interface Vlan10
+   ip address 10.10.0.3/24
+   vrrp 10 ipv4 10.10.0.1
+   vrrp 10 priority-level 100
+   vrrp 10 preempt
+"""
+
+KNIFE_EDGE_INTERVAL_MS: Final = 230_000
+
+
+def knife_edge(tmp_path: Path) -> StaticFactPack:
+    """A pair whose chasing exists at one flap interval and not just below it.
+
+    The 200s preempt delay puts `_candidate_intervals` at 230s up, where agg-a
+    is eligible again 20s before the next flap and hands the group back and
+    forth. Twenty percent lower, the next flap arrives first and agg-a never
+    preempts at all — one handover, and no chasing whatever.
+    """
+    (tmp_path / "agg-a.cfg").write_text(KNIFE_EDGE_MASTER)
+    (tmp_path / "agg-b.cfg").write_text(KNIFE_EDGE_BACKUP)
+    pack, _ = build_fact_pack(tmp_path)
+    return pack
+
+
+def test_an_observable_absent_at_one_perturbation_is_not_reported(
+    tmp_path: Path,
+) -> None:
+    """The knife-edge case §2.4's perturbation control exists to reject.
+
+    The model does see the chasing at the nominal interval — asserted here, so
+    that this cannot pass because the tier found nothing to talk about — and
+    sees none of it twenty percent below. Counting the nominal run among the
+    perturbed ones made that two of three, which shipped.
+    """
+    pack = knife_edge(tmp_path)
+    nominal, low, high = sequences._intervals_around(KNIFE_EDGE_INTERVAL_MS)
+    moves: dict[int, int] = {}
+    for interval in (nominal, low, high):
+        _, timeline = sequences._run(
+            pack, "agg-a", "Ethernet1", 3, interval, ["vrrp-10"]
+        )
+        moves[interval] = sequences._transitions(timeline, "vrrp-10")
+    assert moves[nominal] >= sequences.MIN_TRANSITIONS, moves
+    assert moves[low] == 0, moves
+
+    assert [f for f in sequences.analyse(pack) if f.rule == "fhrp-oscillation"] == []
+
+
+def test_the_evidence_does_not_call_the_unperturbed_run_a_perturbation() -> None:
+    """The sentence is what a reader weighs the finding by.
+
+    It used to report three runs at ±20% when one of the three was the run at
+    the interval as configured, which reads as a control with a margin it did
+    not have.
+    """
+    assert sequences.PERTURBED_RUNS == 2
+    pack, _ = build_fact_pack(CORPUS)
+    notes = [
+        line
+        for finding in sequences.analyse(pack)
+        for line in finding.evidence
+        if "±" in line
+    ]
+    assert notes
+    for note in notes:
+        assert f"of {sequences.PERTURBED_RUNS} runs" in note
+        assert "not counting the unperturbed one" in note

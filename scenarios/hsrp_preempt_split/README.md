@@ -164,7 +164,7 @@ HIGH  dist-1  HSRP 120 and HSRP 220 can end up on different devices
         trigger: flap dist-1:Ethernet1/1 1x (10s down, 15s up)
         evidence: t=0s dist-1:Ethernet1/1 down
         evidence: t=10s dist-1:Ethernet1/1 up
-        evidence: held in 3 of 3 runs at ±20% of the interval; absent with no events
+        evidence: held in 2 of 2 runs at ±20% of the interval, not counting the unperturbed one; absent with no events
         fix: make tracking and preempt delay consistent across groups on the same pair
         rule: fhrp-divergence (timing)
 

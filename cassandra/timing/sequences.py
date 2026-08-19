@@ -56,8 +56,19 @@ MIN_TRANSITIONS: Final = 4
 # three runs of one sequence are one run three times. It is the emulator that
 # needs it.
 PERTURBATION: Final = 0.2
-PERTURBED_RUNS: Final = 3
-MIN_CONFIRMATIONS: Final = 2
+
+# How many *perturbed* runs there are: one at -20% and one at +20%. The
+# unperturbed run is not one of them. It produced the observation being tested,
+# so counting it as evidence that the observation survives perturbation is the
+# control agreeing with the thing it was asked to doubt — and at a threshold of
+# two out of three it let a finding ship whose observable was entirely absent at
+# one of the two perturbations, which is exactly the knife-edge artifact §2.4
+# exists to reject.
+#
+# The threshold is therefore both of them, not a majority of them: a majority of
+# two is two, and a second constant saying so would only be somewhere for the
+# two to drift apart. Registered as A28.
+PERTURBED_RUNS: Final = 2
 
 
 def _tracked_interfaces(pack: StaticFactPack) -> dict[str, set[str]]:
@@ -260,9 +271,15 @@ def _control_note(held: int | None) -> str:
             "absent with no events; a reload has no interval, so the "
             "perturbation control does not apply"
         )
+    # "not counting the unperturbed one" is the load-bearing clause. The
+    # sentence used to say three runs of three when only two of them were
+    # perturbed, so a reader weighing the finding was told the control had a
+    # margin it did not have — and the run that produced the observation was
+    # being offered as evidence that the observation survives being perturbed.
     return (
         f"held in {held} of {PERTURBED_RUNS} runs at "
-        f"±{int(PERTURBATION * 100)}% of the interval; absent with no events"
+        f"±{int(PERTURBATION * 100)}% of the interval, not counting the "
+        f"unperturbed one; absent with no events"
     )
 
 
@@ -290,8 +307,14 @@ def _divergence(
     Reported only past MIN_DIVERGENCE_MS. A brief divergence *during* an event is
     expected behaviour; one that persists long after recovery is the defect.
 
+    Reported only for two groups whose members sit on the same set of devices,
+    because that is the only shape the sentence below describes: sharing one
+    device is enough for one event to move both groups and not enough for them
+    to share a pair. `_divergence_pairs` argues the case.
+
     Silent unless the split survives the flap interval being twenty percent
-    either side of the one that produced it, and silent if the same split is
+    either side of the one that produced it — *both* sides, not one of them and
+    the unperturbed run agreeing with itself — and silent if the same split is
     there with no events at all. Those two controls are what separate a property
     of the configuration from an artifact of the model's sampling grid.
 
@@ -341,7 +364,10 @@ def _oscillation(
     genuine failure causes does not count as chasing.
 
     Silent unless the chasing survives the flap interval being twenty percent
-    either side, and silent if the group moves that often with no events at all.
+    either side — at both perturbations, since a group that stops chasing
+    entirely at one of them chases at a rhythm rather than because of the
+    configuration — and silent if the group moves that often with no events at
+    all.
 
     The finding names the group's own preempt delay, because two groups on one
     device can both chase and need different flap intervals to do it — and
@@ -384,6 +410,12 @@ def _intervals_around(up_ms: int) -> tuple[int, ...]:
     Twenty percent, per §2.4. Sub-sample perturbations collapse back onto the
     nominal run, which would turn the control into three copies of the same
     thing agreeing with itself.
+
+    The first element is the nominal interval and the other two are the
+    perturbations — an order callers depend on, because the run that produces an
+    observation cannot also be evidence that the observation survives being
+    perturbed. There are `PERTURBED_RUNS` of the latter, which is why that
+    constant is two and not three.
     """
     low = max(DEFAULT_ADVERT_MS, round(up_ms * (1 - PERTURBATION)))
     high = round(up_ms * (1 + PERTURBATION))
@@ -446,6 +478,55 @@ def _groups_by_device(pack: StaticFactPack) -> dict[str, list[str]]:
     return index
 
 
+def _group_devices(pack: StaticFactPack) -> dict[str, frozenset[str]]:
+    """The devices each group has a member on.
+
+    Built once per analysis rather than per candidate pair: both pairing loops
+    need it on every pair they consider, and it cannot change between runs.
+    """
+    return {
+        group.id: frozenset(member.device for member in group.members)
+        for group in pack.fhrp_groups
+    }
+
+
+def _divergence_pairs(
+    group_ids: list[str], devices_of: dict[str, frozenset[str]]
+) -> list[tuple[str, str]]:
+    """The group pairs a divergence finding can honestly be written about.
+
+    `group_ids` comes from `_groups_by_device`, so two groups reach here as soon
+    as they share *one* device. That is the right filter for "can one event move
+    both of them" and the wrong one for the finding: `_divergence` tells the
+    reader the groups "share a device pair", and offers a remedy — consistent
+    tracking and preempt delay across the groups on that pair — which has
+    nowhere to be applied when there is no such pair. One device belonging to
+    two groups with different partners is ordinary in a real network, and a
+    reload takes that device's whole group set down at once, so the unfiltered
+    pairing reported it as HIGH on any collection shaped that way.
+
+    The test is that the member device sets are equal, which is stronger than
+    "these two groups have a pair in common". A three-member group and a
+    two-member group overlapping on two devices do share a pair, and this skips
+    them deliberately: the wider group can also be served by a device the
+    narrower one has no member on, so a split the timeline shows may be between
+    a shared device and that third one — a placement no amount of consistency
+    between the two groups' timers can prevent, and the remedy would be wrong.
+    Deciding which of the two cases a given timeline is in means looking at
+    where each group actually sat sample by sample, which is a different
+    question from which pairs are worth enumerating. Until something asks it,
+    the conservative filter loses a finding that would be reported anyway on any
+    pair whose groups are configured alike, and the alternative ships a sentence
+    that is not true. Registered as A27.
+    """
+    return [
+        (first, second)
+        for index, first in enumerate(group_ids)
+        for second in group_ids[index + 1 :]
+        if devices_of.get(first, frozenset()) == devices_of.get(second, frozenset())
+    ]
+
+
 def analyse(pack: StaticFactPack) -> list[Finding]:
     """Every finding the enumeration produces, worst first.
 
@@ -456,6 +537,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
     seen: set[tuple[str, str, str]] = set()
     labels = {group.id: group.label for group in pack.fhrp_groups}
     on_device = _groups_by_device(pack)
+    devices_of = _group_devices(pack)
     delays = _preempt_delays(pack)
     interfaces_of = _device_interfaces(pack)
 
@@ -475,48 +557,51 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                         _run(pack, device, interface, flaps, interval, group_ids)
                         for interval in _intervals_around(up_ms)
                     ]
-                    events, timeline = runs[0]
+                    # The first run is the nominal one, and it is the one every
+                    # observation below is read off; the rest are the two
+                    # perturbations, and they are the only runs the control
+                    # counts.
+                    (events, timeline), perturbed = runs[0], runs[1:]
                     trigger = (
                         f"flap {device}:{interface} {flaps}x "
                         f"({DOWN_MS // 1000}s down, {up_ms // 1000}s up)"
                     )
 
-                    for i, first in enumerate(group_ids):
-                        for second in group_ids[i + 1 :]:
-                            span = _longest_divergence_ms(timeline, first, second)
-                            if span < MIN_DIVERGENCE_MS:
-                                continue
-                            key = ("divergence", first, second)
-                            if key in seen:
-                                continue
-                            held = sum(
-                                _longest_divergence_ms(t, first, second)
-                                >= MIN_DIVERGENCE_MS
-                                for _, t in runs
+                    for first, second in _divergence_pairs(group_ids, devices_of):
+                        span = _longest_divergence_ms(timeline, first, second)
+                        if span < MIN_DIVERGENCE_MS:
+                            continue
+                        key = ("divergence", first, second)
+                        if key in seen:
+                            continue
+                        held = sum(
+                            _longest_divergence_ms(t, first, second)
+                            >= MIN_DIVERGENCE_MS
+                            for _, t in perturbed
+                        )
+                        if held < PERTURBED_RUNS:
+                            continue
+                        if (
+                            _longest_divergence_ms(control, first, second)
+                            >= MIN_DIVERGENCE_MS
+                        ):
+                            # Split with no events at all. The sequence did not
+                            # cause it, so reporting it under this trigger would
+                            # point at the wrong thing.
+                            continue
+                        seen.add(key)
+                        findings.append(
+                            _divergence(
+                                device=device,
+                                first=first,
+                                second=second,
+                                labels=labels,
+                                span_ms=span,
+                                trigger=trigger,
+                                events=events,
+                                held=held,
                             )
-                            if held < MIN_CONFIRMATIONS:
-                                continue
-                            if (
-                                _longest_divergence_ms(control, first, second)
-                                >= MIN_DIVERGENCE_MS
-                            ):
-                                # Split with no events at all. The sequence did
-                                # not cause it, so reporting it under this
-                                # trigger would point at the wrong thing.
-                                continue
-                            seen.add(key)
-                            findings.append(
-                                _divergence(
-                                    device=device,
-                                    first=first,
-                                    second=second,
-                                    labels=labels,
-                                    span_ms=span,
-                                    trigger=trigger,
-                                    events=events,
-                                    held=held,
-                                )
-                            )
+                        )
 
                     for group_id in group_ids:
                         moves = _transitions(timeline, group_id)
@@ -527,9 +612,9 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                             continue
                         held = sum(
                             _transitions(t, group_id) >= MIN_TRANSITIONS
-                            for _, t in runs
+                            for _, t in perturbed
                         )
-                        if held < MIN_CONFIRMATIONS:
+                        if held < PERTURBED_RUNS:
                             continue
                         if _transitions(control, group_id) >= MIN_TRANSITIONS:
                             continue
@@ -567,27 +652,26 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
         horizon = down_ms + SETTLE_MS + 120_000
         timeline = simulate(pack, list(events), until_ms=horizon, only=group_ids)
         trigger = f"reload {device} ({down_ms // 1000}s down)"
-        for i, first in enumerate(group_ids):
-            for second in group_ids[i + 1 :]:
-                span = _longest_divergence_ms(timeline, first, second)
-                if span < MIN_DIVERGENCE_MS:
-                    continue
-                key = ("divergence", first, second)
-                if key in seen:
-                    continue
-                if _longest_divergence_ms(control, first, second) >= MIN_DIVERGENCE_MS:
-                    continue
-                seen.add(key)
-                findings.append(
-                    _divergence(
-                        device=device,
-                        first=first,
-                        second=second,
-                        labels=labels,
-                        span_ms=span,
-                        trigger=trigger,
-                        events=events,
-                        held=None,
-                    )
+        for first, second in _divergence_pairs(group_ids, devices_of):
+            span = _longest_divergence_ms(timeline, first, second)
+            if span < MIN_DIVERGENCE_MS:
+                continue
+            key = ("divergence", first, second)
+            if key in seen:
+                continue
+            if _longest_divergence_ms(control, first, second) >= MIN_DIVERGENCE_MS:
+                continue
+            seen.add(key)
+            findings.append(
+                _divergence(
+                    device=device,
+                    first=first,
+                    second=second,
+                    labels=labels,
+                    span_ms=span,
+                    trigger=trigger,
+                    events=events,
+                    held=None,
                 )
+            )
     return findings

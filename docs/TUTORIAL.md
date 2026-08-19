@@ -279,7 +279,7 @@ HIGH  north-agg1  VRRP 10 and VRRP 20 can end up on different devices
         source: north/north-agg1.cfg
         evidence: t=0s north-agg1:Ethernet1 down
         evidence: t=10s north-agg1:Ethernet1 up
-        evidence: held in 3 of 3 runs at ±20% of the interval; absent with no events
+        evidence: held in 2 of 2 runs at ±20% of the interval, not counting the unperturbed one; absent with no events
         fix: make tracking and preempt delay consistent across groups on the same pair
         rule: fhrp-divergence (timing)
 ```
@@ -328,7 +328,7 @@ detail are where they differ.
 ```
         evidence: t=0s north-agg1:Ethernet1 down
         evidence: t=10s north-agg1:Ethernet1 up
-        evidence: held in 3 of 3 runs at ±20% of the interval; absent with no events
+        evidence: held in 2 of 2 runs at ±20% of the interval, not counting the unperturbed one; absent with no events
 ```
 
 The first two lines are the event log the model was advanced through, on the model's own clock.
@@ -410,7 +410,7 @@ MED   north-agg1  VRRP 10 changes master 5 times under a single flap sequence
         evidence: t=110s north-agg1:Ethernet1 up
         evidence: t=200s north-agg1:Ethernet1 down
         evidence: t=210s north-agg1:Ethernet1 up
-        evidence: held in 3 of 3 runs at ±20% of the interval; absent with no events
+        evidence: held in 2 of 2 runs at ±20% of the interval, not counting the unperturbed one; absent with no events
         fix: raise the preempt delay past 60s, or damp the interface so it stops flapping
         rule: fhrp-oscillation (timing)
 ...

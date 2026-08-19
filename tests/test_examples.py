@@ -225,12 +225,23 @@ def test_every_finding_says_which_file_it_came_from() -> None:
 
 
 def test_every_timing_finding_records_the_falsification_controls() -> None:
-    """Section 6 reads the last evidence line as a claim about the controls."""
+    """Section 6 reads the last evidence line as a claim about the controls.
+
+    The count comes from `sequences.PERTURBED_RUNS` rather than being written
+    out, because it moved once: the control used to count the unperturbed run
+    among the perturbed ones, so a finding could ship with the observable
+    entirely absent at one of the two perturbations. What this test is for is
+    that every timing finding states its controls, not what the number is.
+    """
+    from cassandra.timing.sequences import PERTURBED_RUNS
+
     timing = [f for f in evaluate(CORPUS) if f.tier is Tier.TIMING]
     assert timing
+    held = f"held in {PERTURBED_RUNS} of {PERTURBED_RUNS} runs at"
     for found in timing:
-        assert found.evidence[-1].startswith("held in 3 of 3 runs at")
+        assert found.evidence[-1].startswith(held)
         assert "absent with no events" in found.evidence[-1]
+        assert "not counting the unperturbed one" in found.evidence[-1]
 
 
 def test_every_trigger_on_this_corpus_is_a_flap() -> None:
