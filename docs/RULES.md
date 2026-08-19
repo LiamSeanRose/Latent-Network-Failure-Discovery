@@ -80,6 +80,8 @@ Silent when a trunk on the device permits the VLAN, when the device has an SVI f
 
 **Stays silent when:**
 
+- Trunking the vlan removes the access port finding  
+  `test_examples.py::test_trunking_the_vlan_removes_the_access_port_finding`
 - A VLAN the trunk permits leaves the switch, which is the whole of what the rule asks: the port is in a live broadcast domain and reaches its gateway.  
   `test_facts_rules.py::test_access_vlan_the_uplink_carries_is_silent`
 - Spare ports parked in a VLAN nothing else terminates are deliberate, and indistinguishable from this rule's defect except by that fact.  
@@ -189,6 +191,8 @@ Decidable only when both devices are present, so it stays silent on a single-dev
 
 **Stays silent when:**
 
+- The reciprocal neighbor removes the one sided session  
+  `test_examples.py::test_the_reciprocal_neighbor_removes_the_one_sided_session`
 - An upstream provider is not in your config directory and is not a defect.  
   `test_facts_rules.py::test_peer_outside_the_corpus_is_not_a_one_sided_session`
 - Ios reciprocated bgp session is silent  
@@ -849,16 +853,22 @@ A decrement too small to lose the election is tracking that does nothing.
 
 This is the quiet one: the config looks correct, the intent is visible, and the failover silently never happens.
 
+"Too small" includes landing exactly on the best rival: both VRRP and HSRP need a strictly greater priority to displace a live master, which is the same protocol fact `cassandra.timing.model._settle` encodes as A6. A decrement to equality is therefore no failover either, and it is the shape an operator most easily writes by subtracting the difference itself.
+
+It says nothing about *when* the failover happens, only that it can. A decrement large enough to lose the election on a peer that does not preempt, or preempts late, is the TIMING tier's subject and not this rule's.
+
 **Reports:** {…} tracking can never cause a failover
 
-**Detail:** priority {…} minus the total decrement {…} is {…}, still above the highest peer priority {…}
+**Detail:** priority {…} minus the total decrement {…} is {…}, which does not fall below the highest peer priority {…}
 
-**Remedy:** increase the decrement past {…}
+**Remedy:** increase the total decrement to at least {…}
 
 **Stays silent when:**
 
 - Sufficient decrement does not fire  
   `test_facts_rules.py::test_sufficient_decrement_does_not_fire`
+- The rule goes quiet once its own remedy is applied, and the network it describes actually changes. A remedy is a number the operator will type, so one that lands the priority *on* the peer's rather than below it silences nothing and leaves the failover exactly as absent (PROJECT.md §5.4).  
+  `test_facts_rules.py::test_the_remedy_names_a_decrement_that_moves_the_group`
 
 ### `igp-dead-under-three-hellos`
 
@@ -920,7 +930,11 @@ An addressed SVI for a VLAN no trunk on the device carries.
 
 The interface is up and has an address, so the device can route for the VLAN; nothing can reach it, because the VLAN leaves on no uplink. It is the shape a VLAN takes after it is removed from a trunk's allowed list during some unrelated cleanup and the SVI is left behind.
 
+Both halves of that sentence are checked, not assumed. An SVI with no address routes for nothing and a shut one forwards nothing, so neither can exhibit the failure described above — and an SVI left shut and unaddressed is what a decommissioned VLAN usually looks like in a config that was tidied only halfway.
+
 Only checked on devices that have at least one trunk. A device with none is not carrying VLANs anywhere, which is a different thing entirely.
+
+It says nothing about whether the neighbour behind the trunk carries the VLAN either: one trunk on this device permitting it is enough to silence the rule, because pruning at the far end is a different defect.
 
 **Reports:** {…} has no trunk carrying VLAN {…}
 
@@ -934,6 +948,12 @@ Only checked on devices that have at least one trunk. A device with none is not 
   `test_facts_rules.py::test_an_svi_on_a_device_that_trunks_nothing`
 - A VLAN needs one trunk that carries it, not every trunk. Trunks are pruned to what the neighbour behind them needs, so a VLAN absent from a trunk to a device that has no use for it is the allowed list doing its job.  
   `test_facts_rules.py::test_a_vlan_carried_on_one_trunk_but_not_another`
+- The finding says the device can route for the VLAN and nothing can reach it. An SVI with no address routes for nothing, so the first half is false and there is no isolation to report — only an interface that does nothing.  
+  `test_facts_rules.py::test_an_svi_with_no_address`
+- A shut SVI forwards nothing whether or not a trunk carries its VLAN, so the trunk's allowed list is not what is keeping it silent. Reporting it would tell the operator to change a trunk to fix an interface they turned off.  
+  `test_facts_rules.py::test_an_svi_left_shut`
+- Both preconditions absent at once, which is what decommissioning a VLAN halfway actually leaves behind: the SVI shut and stripped, the VLAN pulled from the trunk, and nothing wrong. It is the commonest shape in a real config that this rule must not fire on.  
+  `test_facts_rules.py::test_a_decommissioned_svi_left_shut_and_unaddressed`
 
 ### `trunk-native-vlan-not-allowed`
 
@@ -1097,7 +1117,9 @@ Both groups see one event. They answer it at different speeds — a different tr
 
 Reported only past MIN_DIVERGENCE_MS. A brief divergence *during* an event is expected behaviour; one that persists long after recovery is the defect.
 
-Silent unless the split survives the flap interval being twenty percent either side of the one that produced it, and silent if the same split is there with no events at all. Those two controls are what separate a property of the configuration from an artifact of the model's sampling grid.
+Reported only for two groups whose members sit on the same set of devices, because that is the only shape the sentence below describes: sharing one device is enough for one event to move both groups and not enough for them to share a pair. `_divergence_pairs` argues the case.
+
+Silent unless the split survives the flap interval being twenty percent either side of the one that produced it — *both* sides, not one of them and the unperturbed run agreeing with itself — and silent if the same split is there with no events at all. Those two controls are what separate a property of the configuration from an artifact of the model's sampling grid.
 
 Two event classes reach this: a link flapping, and a device reloading. The reload is enumerated last and reports only pairs a flap cannot reach — a group that tracks nothing is untouched by a flap and moved by a reload, and only then does a difference in preempt delay between it and its neighbour show. A reload carries no interval, so the perturbation control does not apply to one and its evidence says so.
 
@@ -1113,6 +1135,8 @@ Two event classes reach this: a link flapping, and a device reloading. The reloa
   `test_timing.py::test_symmetric_groups_produce_no_divergence`
 - Not a finding, and the distinction matters. With group 14 tracking and group 24 not, the two split the moment the uplink drops — but group 14 has no preempt delay, so it reclaims the instant the link returns and the split ends with the outage. A brief divergence *during* an event is expected behaviour; a divergence that persists long after recovery is the defect. The threshold is what separates them, and reporting the first kind would bury the second in noise.  
   `test_timing.py::test_tracking_asymmetry_alone_diverges_only_while_the_link_is_down`
+- The finding says the groups share a device pair, so it may only be made about groups that do. Before this was filtered, both enumerations reported agg1's two groups HIGH — under a reload, which takes the whole device's group set down at once, and under a flap where both groups track the same uplink. The remedy offered, consistent tracking and preempt delay across the groups on the pair, has nowhere to be applied: there is no pair, and no timer on agg1 can stop VRRP 10 landing on agg2 while VRRP 20 is on agg3.  
+  `test_timing.py::test_two_groups_on_different_device_pairs_are_not_a_divergence`
 
 ### `fhrp-oscillation`
 
@@ -1124,7 +1148,7 @@ A group with preempt and no preempt delay follows its tracked interface exactly:
 
 Reported past MIN_TRANSITIONS, which is high enough that the one handover a genuine failure causes does not count as chasing.
 
-Silent unless the chasing survives the flap interval being twenty percent either side, and silent if the group moves that often with no events at all.
+Silent unless the chasing survives the flap interval being twenty percent either side — at both perturbations, since a group that stops chasing entirely at one of them chases at a rhythm rather than because of the configuration — and silent if the group moves that often with no events at all.
 
 The finding names the group's own preempt delay, because two groups on one device can both chase and need different flap intervals to do it — and without the delays written down, two findings whose only visible difference is a number in the trigger look like the same finding printed twice.
 
@@ -1140,6 +1164,8 @@ The finding names the group's own preempt delay, because two groups on one devic
   `test_timing.py::test_tracking_too_weak_to_lose_the_election_cannot_chase`
 - Disabling preempt is the standard cure for a group that chases a flapping uplink: a backup will not displace a master that is still advertising, however far the master's priority has been decremented. Nothing hands the group back and forth, so there is nothing to report.  
   `test_timing.py::test_a_group_without_preempt_cannot_be_taken_from_a_live_master`
+- The knife-edge case §2.4's perturbation control exists to reject. The model does see the chasing at the nominal interval — asserted here, so that this cannot pass because the tier found nothing to talk about — and sees none of it twenty percent below. Counting the nominal run among the perturbed ones made that two of three, which shipped.  
+  `test_timing.py::test_an_observable_absent_at_one_perturbation_is_not_reported`
 
 ## Silence across a whole rule set
 

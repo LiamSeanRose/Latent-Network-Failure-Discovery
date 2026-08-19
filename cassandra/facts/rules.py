@@ -314,6 +314,16 @@ def tracking_cannot_change_the_outcome(pack: StaticFactPack) -> Iterator[Finding
 
     This is the quiet one: the config looks correct, the intent is visible, and
     the failover silently never happens.
+
+    "Too small" includes landing exactly on the best rival: both VRRP and HSRP
+    need a strictly greater priority to displace a live master, which is the
+    same protocol fact `cassandra.timing.model._settle` encodes as A6. A
+    decrement to equality is therefore no failover either, and it is the shape
+    an operator most easily writes by subtracting the difference itself.
+
+    It says nothing about *when* the failover happens, only that it can. A
+    decrement large enough to lose the election on a peer that does not preempt,
+    or preempts late, is the TIMING tier's subject and not this rule's.
     """
     for group in pack.fhrp_groups:
         if len(group.members) < 2:
@@ -325,7 +335,9 @@ def tracking_cannot_change_the_outcome(pack: StaticFactPack) -> Iterator[Finding
             rivals = [m.priority for m in group.members if m is not member]
             if not rivals:
                 continue
-            if member.priority - total > max(rivals):
+            # A6: an equal priority never displaces a live master, so equality
+            # is as ineffective as staying above the rival.
+            if member.priority - total >= max(rivals):
                 yield Finding(
                     rule="fhrp-track-ineffective",
                     tier=Tier.FACTS,
@@ -333,14 +345,17 @@ def tracking_cannot_change_the_outcome(pack: StaticFactPack) -> Iterator[Finding
                     device=member.device,
                     title=f"{group.label} tracking can never cause a failover",
                     detail=f"priority {member.priority} minus the total decrement "
-                    f"{total} is {member.priority - total}, still above the highest "
-                    f"peer priority {max(rivals)}",
+                    f"{total} is {member.priority - total}, which does not fall "
+                    f"below the highest peer priority {max(rivals)}",
                     evidence=tuple(
                         f"{t.id}->{t.target} -{t.decrement}"
                         for t in member.tracked_objects
                     ),
-                    remedy=f"increase the decrement past "
-                    f"{member.priority - max(rivals)}",
+                    # A6 again: the decrement has to land the priority *below*
+                    # the rival, so the smallest one that works is one more than
+                    # the gap, not the gap itself.
+                    remedy=f"increase the total decrement to at least "
+                    f"{member.priority - max(rivals) + 1}",
                 )
 
 
@@ -353,8 +368,18 @@ def svi_vlan_missing_from_every_trunk(pack: StaticFactPack) -> Iterator[Finding]
     shape a VLAN takes after it is removed from a trunk's allowed list during
     some unrelated cleanup and the SVI is left behind.
 
+    Both halves of that sentence are checked, not assumed. An SVI with no
+    address routes for nothing and a shut one forwards nothing, so neither can
+    exhibit the failure described above — and an SVI left shut and unaddressed
+    is what a decommissioned VLAN usually looks like in a config that was
+    tidied only halfway.
+
     Only checked on devices that have at least one trunk. A device with none is
     not carrying VLANs anywhere, which is a different thing entirely.
+
+    It says nothing about whether the neighbour behind the trunk carries the
+    VLAN either: one trunk on this device permitting it is enough to silence
+    the rule, because pruning at the far end is a different defect.
     """
     for device in pack.devices:
         trunks = [i for i in device.interfaces if i.allowed_vlans]
@@ -365,7 +390,15 @@ def svi_vlan_missing_from_every_trunk(pack: StaticFactPack) -> Iterator[Finding]
             if not interface.name.startswith("Vlan"):
                 continue
             vlan_id = interface.name.removeprefix("Vlan")
-            if not vlan_id.isdigit() or int(vlan_id) in carried:
+            if not vlan_id.isdigit():
+                continue
+            # Each precondition its own statement, so `cassandra/coverage.py`
+            # can tell which one a silent run stopped at.
+            if not interface.addresses:
+                continue
+            if not interface.admin_enabled:
+                continue
+            if int(vlan_id) in carried:
                 continue
             yield Finding(
                 rule="svi-vlan-not-trunked",

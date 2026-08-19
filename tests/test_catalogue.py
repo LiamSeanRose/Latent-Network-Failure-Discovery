@@ -23,7 +23,6 @@ import pytest
 from cassandra import catalogue as cat
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.facts import rules as facts_rules
-from cassandra.findings import Severity, Tier
 from cassandra.timing import sequences, timer_rules
 
 REPO: Final = Path(__file__).resolve().parents[1]
@@ -37,6 +36,8 @@ SOURCE_FILES: Final = (
 )
 
 RULE_LITERAL: Final = re.compile(r'\brule="([a-z0-9][a-z0-9-]*)"')
+TIER_LITERAL: Final = re.compile(r"\btier=Tier\.([A-Z_]+)")
+SEVERITY_LITERAL: Final = re.compile(r"\bseverity=Severity\.([A-Z_]+)")
 
 REGENERATE: Final = (
     "docs/RULES.md is out of date. Regenerate it with "
@@ -50,6 +51,32 @@ def rule_ids_in_source() -> set[str]:
         for path in SOURCE_FILES
         for match in RULE_LITERAL.findall(path.read_text())
     }
+
+
+def tier_and_severity_in_source() -> dict[str, set[tuple[str, str]]]:
+    """Every `(tier, severity)` each rule id is constructed with, from the text.
+
+    A second reading of the same three files, by splitting on the constructor
+    rather than by walking the AST — for the reason in this module's docstring:
+    an extraction bug that the test shares with the code is a test that proves
+    nothing. Every construction site is kept, not just the first, so a rule id
+    emitted at two severities shows up as two pairs and cannot be documented as
+    though it had one.
+    """
+    pairs: dict[str, set[tuple[str, str]]] = {}
+    for path in SOURCE_FILES:
+        for call in path.read_text().split("Finding(")[1:]:
+            rule_id = RULE_LITERAL.search(call)
+            tier = TIER_LITERAL.search(call)
+            severity = SEVERITY_LITERAL.search(call)
+            assert rule_id and tier and severity, (
+                f"{path.name}: a Finding is built without a rule id, a tier or a "
+                f"severity, so nothing can document it"
+            )
+            pairs.setdefault(rule_id.group(1), set()).add(
+                (tier.group(1), severity.group(1))
+            )
+    return pairs
 
 
 # --------------------------------------------------------------------------
@@ -109,10 +136,19 @@ def test_tier_and_severity_match_what_the_rules_actually_emit():
         assert doc.severity is finding.severity
 
 
-def test_every_entry_names_its_tier_severity_and_message():
+def test_every_entry_carries_the_tier_and_severity_its_rule_emits():
+    """The catalogue's tier and severity are read out of the source, so the thing
+    worth checking is that they came back unchanged — and that no rule id is
+    documented at one severity while some branch of it emits another.
+
+    This replaces two assertions that could not fail: both fields are typed as
+    their enums and every construction site passes a member, so `doc.tier in
+    Tier` was true of every input the catalogue can produce. The independent
+    reading is what they were reaching for.
+    """
+    in_source = tier_and_severity_in_source()
     for doc in cat.catalogue():
-        assert doc.tier in Tier
-        assert doc.severity in Severity
+        assert {(doc.tier.name, doc.severity.name)} == in_source[doc.id], doc.id
         assert doc.reports, f"{doc.id} has no title to show"
 
 

@@ -7,6 +7,7 @@ that never fires and a rule set that always fires are equally useless.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Final
 
@@ -16,6 +17,7 @@ from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts.rules import evaluate
 from cassandra.findings import Finding, Severity, Tier
+from cassandra.timing.model import Event, EventKind, simulate
 
 CORPUS: Final = (
     Path(__file__).resolve().parents[1]
@@ -184,6 +186,59 @@ def test_sufficient_decrement_does_not_fire(tmp_path: Path) -> None:
     b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100)
     pack = pack_from(tmp_path, **{"agg-a": a, "agg-b": b})
     assert "fhrp-track-ineffective" not in rules_fired(pack)
+
+
+def tracked_pair(tmp_path: Path, decrement: int) -> StaticFactPack:
+    """The 110/100 pair, with agg-a decrementing by `decrement` on its uplink."""
+    a = (
+        GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110)
+        + f"   vrrp 14 tracked-object UPLINK decrement {decrement}\n"
+        + "track UPLINK interface Ethernet1 line-protocol\n"
+    )
+    b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100)
+    return pack_from(tmp_path, **{"agg-a": a, "agg-b": b})
+
+
+def holds_the_group_with_the_uplink_down(pack: StaticFactPack) -> bool:
+    """Whether agg-a still holds VRRP 14 long after its tracked uplink fails.
+
+    The FACTS tier claims a decrement can never cause a failover; this asks the
+    timing model the same question about the same configs, so the two tiers are
+    held to one answer rather than each to its own.
+    """
+    events = [
+        Event(
+            at_ms=5_000, kind=EventKind.LINK_DOWN, device="agg-a", interface="Ethernet1"
+        )
+    ]
+    final = simulate(pack, events, until_ms=60_000)[-1]
+    return final.masters["vrrp-14"] == "agg-a"
+
+
+def test_a_decrement_landing_exactly_on_the_peer_priority(tmp_path: Path) -> None:
+    """110 minus 10 is 100, and 100 does not displace 100: both VRRP and HSRP
+    need a strictly greater priority to take a group from a live master, which
+    the timing model states as A6. Tracking that lands on equality is tracking
+    that does nothing, which is precisely what this rule is for."""
+    pack = tracked_pair(tmp_path, decrement=10)
+    finding = _found(pack, "fhrp-track-ineffective")
+    assert "100" in finding.detail
+    assert holds_the_group_with_the_uplink_down(pack)
+
+
+def test_the_remedy_names_a_decrement_that_moves_the_group(tmp_path: Path) -> None:
+    """The rule goes quiet once its own remedy is applied, and the network it
+    describes actually changes. A remedy is a number the operator will type, so
+    one that lands the priority *on* the peer's rather than below it silences
+    nothing and leaves the failover exactly as absent (PROJECT.md §5.4)."""
+    ineffective = tracked_pair(tmp_path, decrement=5)
+    finding = _found(ineffective, "fhrp-track-ineffective")
+    assert holds_the_group_with_the_uplink_down(ineffective)
+
+    suggested = int(re.findall(r"\d+", finding.remedy)[-1])
+    fixed = tracked_pair(tmp_path, decrement=suggested)
+    assert "fhrp-track-ineffective" not in rules_fired(fixed)
+    assert not holds_the_group_with_the_uplink_down(fixed)
 
 
 def test_svi_vlan_carried_by_no_trunk(tmp_path: Path) -> None:
@@ -767,6 +822,48 @@ interface Vlan24
    ip address 10.24.0.5/24
 """,
     )
+    assert "svi-vlan-not-trunked" not in rules_fired(pack)
+
+
+def svi_device(tmp_path: Path, svi_body: str) -> StaticFactPack:
+    """One switch trunking VLAN 10 only, plus a Vlan99 written by the caller."""
+    return pack_from(
+        tmp_path,
+        acc1="""hostname acc1
+vlan 10,99
+interface Ethernet1
+   switchport mode trunk
+   switchport trunk allowed vlan 10
+interface Vlan10
+   ip address 10.10.0.5/24
+interface Vlan99
+"""
+        + svi_body,
+    )
+
+
+def test_an_svi_with_no_address(tmp_path: Path) -> None:
+    """The finding says the device can route for the VLAN and nothing can reach
+    it. An SVI with no address routes for nothing, so the first half is false and
+    there is no isolation to report — only an interface that does nothing."""
+    pack = svi_device(tmp_path, "   description held for a future tenant\n")
+    assert "svi-vlan-not-trunked" not in rules_fired(pack)
+
+
+def test_an_svi_left_shut(tmp_path: Path) -> None:
+    """A shut SVI forwards nothing whether or not a trunk carries its VLAN, so
+    the trunk's allowed list is not what is keeping it silent. Reporting it would
+    tell the operator to change a trunk to fix an interface they turned off."""
+    pack = svi_device(tmp_path, "   ip address 10.99.0.5/24\n   shutdown\n")
+    assert "svi-vlan-not-trunked" not in rules_fired(pack)
+
+
+def test_a_decommissioned_svi_left_shut_and_unaddressed(tmp_path: Path) -> None:
+    """Both preconditions absent at once, which is what decommissioning a VLAN
+    halfway actually leaves behind: the SVI shut and stripped, the VLAN pulled
+    from the trunk, and nothing wrong. It is the commonest shape in a real config
+    that this rule must not fire on."""
+    pack = svi_device(tmp_path, "   description decommissioned\n   shutdown\n")
     assert "svi-vlan-not-trunked" not in rules_fired(pack)
 
 
