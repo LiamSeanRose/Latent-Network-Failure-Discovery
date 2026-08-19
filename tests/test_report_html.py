@@ -92,3 +92,43 @@ def test_the_report_holds_every_finding(tmp_path: Path) -> None:
     assert body.count('<article style="--i:') == len(result.findings)
     assert "Render all" not in body
     assert "Showing the worst" not in body
+
+
+def test_the_report_carries_the_reading_it_rests_on(tmp_path: Path) -> None:
+    """A report is the copy that travels, and its reader is the one least able
+    to go and check the configs it was made from — they may not have them."""
+    body = write(analyse(CORPUS), CORPUS, tmp_path / "r.html").read_text()
+    assert "What the tool read from 4 devices" in body
+    for device in ("agg-a", "agg-b", "acc1", "core1"):
+        assert device in body
+    # Folded: it is the appendix to the findings, not the point of the document.
+    assert 'class="read-appendix"' in body
+    assert "<details" in body
+
+
+def test_the_report_has_no_link_to_a_page_it_cannot_reach(tmp_path: Path) -> None:
+    """A dead link in a file someone was sent reads as the file being broken.
+
+    Checked as a class rather than route by route: every new endpoint would
+    otherwise have to remember to come and be stripped.
+    """
+    body = write(analyse(CORPUS), CORPUS, tmp_path / "r.html").read_text()
+    assert not re.findall(r'href="/[^"]*"', body)
+    # In-page anchors are the point of the rule panel and must survive.
+    assert re.findall(r'href="#rule-', body)
+
+
+def test_the_map_still_draws_its_nodes_after_the_links_come_out(
+    tmp_path: Path,
+) -> None:
+    """A node is a link wrapping markup, not text, so it needs unwrapping rather
+    than deleting — deleting takes the device off the map with it."""
+    body = write(analyse(CORPUS), CORPUS, tmp_path / "r.html").read_text()
+    assert body.count('class="node') == 4, "one per device in the corpus"
+
+
+def test_the_provenance_line_has_no_dangling_separator(tmp_path: Path) -> None:
+    body = write(analyse(CORPUS), CORPUS, tmp_path / "r.html").read_text()
+    line = re.search(r'<p class="provenance">.*?</p>', body, re.S)
+    assert line and "digest" in line.group(0)
+    assert not line.group(0).rstrip().endswith("· </p>")

@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from cassandra.app import Analysis, Comparison, Filters, page
+from cassandra.view import facts_cards
 
 
 def render(
@@ -32,9 +33,47 @@ def render(
     # a server a reader of the file does not have, and a commented-out control
     # still ships its markup for anyone reading the source.
     html = re.sub(r'<form class="finder".*?</form>', "", html, flags=re.S)
-    # Same for the links to endpoints only the server has. A dead link in a file
-    # someone was sent reads as the file being broken.
-    return re.sub(r'<a href="/rules(\.json)?">[^<]*</a>\s*(·\s*)?', "", html)
+    # The filter bar goes with it. Every chip is a link to a query this file
+    # cannot answer, and the counts they carry are already in the summary below.
+    html = re.sub(r'<div class="filters">.*?</div>\s*</div>', "", html, flags=re.S)
+    html = html.replace("</main>", _what_was_read(analysis) + "</main>", 1)
+    # Then every remaining link to the server itself. A dead link in a file
+    # someone was sent reads as the file being broken, and naming the routes one
+    # at a time meant each new one had to remember to come here. In-page anchors
+    # start with "#" and are untouched.
+    html = re.sub(r'<a [^>]*href="/[^"]*"[^>]*>[^<]*</a>\s*(·\s*)?', "", html)
+    # The map's nodes are links wrapping markup rather than text, so they need
+    # unwrapping rather than deleting — the node still has to be drawn.
+    html = re.sub(
+        r'<a href="/[^"]*" class="node-link">(.*?)</a>',
+        r"\1",
+        html,
+        flags=re.S,
+    )
+    # And the separator left dangling where the last link on a line used to be.
+    return re.sub(r"\s*·\s*</p>", "</p>", html)
+
+
+def _what_was_read(analysis: Analysis) -> str:
+    """The fact pack the findings rest on, folded into the file.
+
+    A report is the copy that travels, and its reader is the one least able to
+    go and check the configs it was made from — they may not have them. Folded
+    rather than shown, because it is the appendix to the findings and not the
+    point of the document.
+    """
+    if analysis.pack is None:
+        return ""
+    devices = len(analysis.pack.devices)
+    return (
+        '<section class="rulebook"><details class="read-appendix">'
+        f"<summary>What the tool read from {devices} device"
+        f"{'' if devices == 1 else 's'}</summary>"
+        '<p class="cap">A finding is only as good as the reading under it. '
+        "This is that reading, as it stood when this file was written.</p>"
+        + facts_cards(analysis.pack, analysis.unparsed)
+        + "</details></section>"
+    )
 
 
 def write(

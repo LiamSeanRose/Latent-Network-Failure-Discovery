@@ -197,6 +197,8 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
 .rule .undocumented { color: var(--s-serious); font-size: .88rem; }
 .rule .inert-why { color: var(--ink-2); font-size: .88rem; }
 /* ---- what the tool read ---- */
+.read-appendix > summary { cursor: pointer; font-weight: 640; padding: .5rem 0;
+  border-bottom: 1px solid var(--line); margin-bottom: .8rem; }
 .device-facts { padding-bottom: .6rem; }
 table.facts { width: 100%; border-collapse: collapse; margin: .4rem 0 .9rem;
   font-size: .84rem; display: block; overflow-x: auto; }

@@ -1112,7 +1112,25 @@ def facts_page(
             f'<div class="{"error" if error else "empty"}">'
             f"{html.escape(message)}</div></section>"
         )
+    back = href("/", config_dir, Filters())
+    return _shell(
+        '<section class="rulebook"><h2>What the tool read</h2>'
+        '<p class="cap">A finding is only as good as the reading under it. '
+        f'This is that reading. <a href="{back}">Back to findings</a>.</p>'
+        + facts_cards(pack, unparsed)
+        + "</section>"
+    )
 
+
+def facts_cards(
+    pack: StaticFactPack, unparsed: tuple[tuple[str, int], ...]
+) -> str:
+    """The reading itself, without a page around it.
+
+    Separate so the standalone report can carry it too. A report is the copy
+    that travels, and its reader is the one least able to go and check the
+    configs it was made from.
+    """
     missed = dict(unparsed)
     cards: list[str] = []
     for device in pack.devices:
@@ -1158,15 +1176,7 @@ def facts_page(
         )
         + "</p>"
     )
-    back = href("/", config_dir, Filters())
-    return _shell(
-        '<section class="rulebook"><h2>What the tool read</h2>'
-        '<p class="cap">A finding is only as good as the reading under it. '
-        f'This is that reading. <a href="{back}">Back to findings</a>.</p>'
-        + summary
-        + "".join(cards)
-        + "</section>"
-    )
+    return summary + "".join(cards)
 
 
 def _shell(body: str, *, pulse: str = "pulse") -> str:
