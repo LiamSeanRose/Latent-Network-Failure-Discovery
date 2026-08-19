@@ -175,3 +175,53 @@ def test_every_timing_finding_says_how_it_was_derived() -> None:
         assert finding.trigger
         assert finding.evidence
         assert finding.remedy
+
+
+# ---------------------------------------------------------------------------
+# Deliberate silence
+#
+# Oscillation is the model's own claim that a group chases a flapping link, so
+# the near misses are the pairs where the flap sequence is enumerated in full
+# and the election still does not move.
+# ---------------------------------------------------------------------------
+
+WEAK14: Final = "   vrrp 14 tracked-object UPLINK decrement 5\n"
+WEAK24: Final = "   vrrp 24 tracked-object UPLINK decrement 5\n"
+
+
+def without_preempt(pack_dir: Path, *, g14: str, g24: str) -> StaticFactPack:
+    """The same pair with preempt removed from both groups on both devices."""
+    for name, host, priority in (("agg-a", 2, 110), ("agg-b", 3, 100)):
+        text = TEMPLATE.format(
+            name=name,
+            p2p=1 if name == "agg-a" else 3,
+            host=host,
+            priority=priority,
+            g14_extra=g14 if name == "agg-a" else "",
+            g24_extra=g24 if name == "agg-a" else "",
+        )
+        (pack_dir / f"{name}.cfg").write_text(
+            text.replace("   vrrp 14 preempt\n", "").replace("   vrrp 24 preempt\n", "")
+        )
+    pack, _ = build_fact_pack(pack_dir)
+    return pack
+
+
+def test_tracking_too_weak_to_lose_the_election_cannot_chase(tmp_path: Path) -> None:
+    """A decrement that leaves the master above its peer never moves the group, so
+    the interface it watches can flap as often as it likes without a single
+    handover. The tracking is ineffective, which the FACTS tier reports; it is not
+    a group chasing a link."""
+    pack = build(tmp_path, g14=WEAK14, g24=WEAK24)
+    assert [f for f in analyse(pack) if f.rule == "fhrp-oscillation"] == []
+
+
+def test_a_group_without_preempt_cannot_be_taken_from_a_live_master(
+    tmp_path: Path,
+) -> None:
+    """Disabling preempt is the standard cure for a group that chases a flapping
+    uplink: a backup will not displace a master that is still advertising, however
+    far the master's priority has been decremented. Nothing hands the group back
+    and forth, so there is nothing to report."""
+    pack = without_preempt(tmp_path, g14=TRACK14, g24=TRACK24)
+    assert [f for f in analyse(pack) if f.rule == "fhrp-oscillation"] == []

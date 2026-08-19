@@ -12,11 +12,16 @@ breaks the build.
 
 | Rule | Tier | Severity | Summary |
 | --- | --- | --- | --- |
+| [`access-vlan-not-trunked`](#access-vlan-not-trunked) | facts | high | An access port in a VLAN that cannot leave the switch it is on. |
+| [`bgp-peer-behind-shutdown`](#bgp-peer-behind-shutdown) | facts | high | A peering that can only run over an interface that is shut down. |
 | [`bgp-remote-as-mismatch`](#bgp-remote-as-mismatch) | facts | high | One end expects an AS the other does not use. |
+| [`bgp-router-id-duplicate`](#bgp-router-id-duplicate) | facts | high | One BGP router-id claimed by two devices. |
 | [`bgp-session-one-sided`](#bgp-session-one-sided) | facts | high | A peering only one end knows about. |
 | [`dampening-exceeds-sla`](#dampening-exceeds-sla) | facts | high | Max-suppress bounds how long a prefix stays withdrawn after the fault ends. |
+| [`device-isolated-by-shutdown`](#device-isolated-by-shutdown) | facts | high | A device whose every link into these configs is administratively down. |
 | [`duplicate-address`](#duplicate-address) | facts | high | One IPv4 address configured on two interfaces in the collection. |
 | [`fhrp-duplicate-member`](#fhrp-duplicate-member) | facts | high | One device holding two memberships of the same group on one subnet. |
+| [`fhrp-members-on-different-subnets`](#fhrp-members-on-different-subnets) | facts | high | A redundancy group whose two halves are not on the same subnet. |
 | [`fhrp-track-target-shutdown`](#fhrp-track-target-shutdown) | facts | high | A track whose target is administratively down. |
 | [`fhrp-track-undefined`](#fhrp-track-undefined) | facts | high | A group that decrements its priority for a track nobody defined. |
 | [`fhrp-virtual-collides`](#fhrp-virtual-collides) | facts | high | A virtual address a real interface on the same pair already owns. |
@@ -24,6 +29,7 @@ breaks the build.
 | [`fhrp-virtual-outside-subnet`](#fhrp-virtual-outside-subnet) | facts | high | A virtual address outside every subnet the member interface is on. |
 | [`fhrp-virtual-shared`](#fhrp-virtual-shared) | facts | high | Two groups on one interface answering for the same virtual address. |
 | [`mtu-mismatch`](#mtu-mismatch) | facts | high | Neighbours that disagree about how large a frame may be. |
+| [`subnet-mask-disagreement`](#subnet-mask-disagreement) | facts | high | Two devices on one wire that disagree about how wide the wire is. |
 | [`vlan-not-declared`](#vlan-not-declared) | facts | high | A port assigned to a VLAN the device never creates. |
 | [`bfd-no-clients`](#bfd-no-clients) | facts | medium | A session nothing registered against comes up, runs, and is never asked. |
 | [`bfd-no-faster-than-igp`](#bfd-no-faster-than-igp) | facts | medium | BFD exists to detect faster than the IGP. One that does not is decoration. |
@@ -32,6 +38,7 @@ breaks the build.
 | [`fhrp-priority-tie`](#fhrp-priority-tie) | facts | medium | Members sharing the top priority, so nothing decides the master. |
 | [`fhrp-track-ineffective`](#fhrp-track-ineffective) | facts | medium | A decrement too small to lose the election is tracking that does nothing. |
 | [`svi-vlan-not-trunked`](#svi-vlan-not-trunked) | facts | medium | An addressed SVI for a VLAN no trunk on the device carries. |
+| [`trunk-native-vlan-not-allowed`](#trunk-native-vlan-not-allowed) | facts | medium | A trunk whose native VLAN is missing from its own allowed list. |
 | [`fhrp-no-preempt-on-preferred`](#fhrp-no-preempt-on-preferred) | facts | low | The highest-priority member has preempt off, so it never takes back. |
 | [`trunk-vlan-dead`](#trunk-vlan-dead) | facts | low | A VLAN permitted on a trunk that no device in the topology terminates. |
 | [`l3-interface-isolated`](#l3-interface-isolated) | facts | info | An addressed interface on a subnet no other device shares. |
@@ -41,6 +48,52 @@ breaks the build.
 ## FACTS tier
 
 Decidable from the configuration text alone (PROJECT.md §2.1). A finding here is either true of the text or a bug in the rule — no model stands between the config and the claim.
+
+### `access-vlan-not-trunked`
+
+**high** · `cassandra.facts.rules.access_vlan_leaves_on_no_trunk`
+
+An access port in a VLAN that cannot leave the switch it is on.
+
+The port's VLAN is used elsewhere — another device has an SVI or an access port in it — but on this device no trunk permits it and no SVI terminates it. Whatever is plugged in comes up, learns MAC addresses from nothing, and reaches neither its gateway nor any other member of the VLAN. The usual cause is a port moved into a service VLAN that the uplink's allowed list was never extended to carry.
+
+Silent when a trunk on the device permits the VLAN, when the device has an SVI for it, and when the device has no trunk at all — a standalone switch is not failing to forward anywhere. Silent, too, when the VLAN appears nowhere else in the collection: unused ports parked in a spare VLAN look exactly like this and are deliberate.
+
+**Reports:** {…} is in VLAN {…}, which leaves {…} on no trunk
+
+**Detail:** VLAN {…} is terminated on {…}, but no trunk on {…} permits it and there is no SVI for it here, so anything on {…} is confined to this switch and has no route to its gateway
+
+**Remedy:** add VLAN {…} to the trunk that carries this switch's uplink, or move the port to a VLAN the uplink already carries
+
+**Stays silent when:**
+
+- A VLAN the trunk permits leaves the switch, which is the whole of what the rule asks: the port is in a live broadcast domain and reaches its gateway.  
+  `test_facts_rules.py::test_access_vlan_the_uplink_carries_is_silent`
+- Spare ports parked in a VLAN nothing else terminates are deliberate, and indistinguishable from this rule's defect except by that fact.  
+  `test_facts_rules.py::test_a_vlan_used_nowhere_else_is_a_parking_vlan_not_a_defect`
+
+### `bgp-peer-behind-shutdown`
+
+**high** · `cassandra.facts.rules.bgp_peer_behind_a_shutdown_interface`
+
+A peering that can only run over an interface that is shut down.
+
+Two shapes, one consequence. The peer address is on a subnet this device reaches through shut interfaces only, or the session's update source is itself shut. Either way the session cannot open, and the configuration reads as a healthy peering — the neighbour statement is present, the remote AS is right, and there is no `shutdown` under the BGP process to explain it.
+
+Silent when the neighbour is explicitly shut, which says the operator meant it, and when any interface carrying the peer's subnet is up. Silent when the peer address is on no local subnet at all: an update source, a multihop session or a plain typo are somebody else's finding.
+
+**Reports:** BGP peer {…} is only reachable over an interface that is shut down
+
+**Detail:** every interface on this device addressed in the peer's subnet is administratively down, so the TCP session cannot be established and the peering stays in Idle or Active
+
+**Remedy:** bring the interface up, or move the peering to one that is carrying traffic
+
+**Stays silent when:**
+
+- The interface carrying the peer's subnet is up, so nothing about the peering is prevented by administrative state and the rule has no claim.  
+  `test_facts_rules.py::test_bgp_peer_over_a_live_interface_is_silent`
+- `neighbor ... shutdown` says the operator meant the session to be down, so the interface underneath it being down as well is not news.  
+  `test_facts_rules.py::test_a_deliberately_shut_neighbour_is_not_a_broken_peering`
 
 ### `bgp-remote-as-mismatch`
 
@@ -62,6 +115,27 @@ One end expects an AS the other does not use.
   `test_ios_builder.py::test_ios_reciprocated_bgp_session_is_silent`
 - Nxos reciprocated bgp session is silent  
   `test_nxos_builder.py::test_nxos_reciprocated_bgp_session_is_silent`
+
+### `bgp-router-id-duplicate`
+
+**high** · `cassandra.facts.rules.bgp_router_id_duplicated`
+
+One BGP router-id claimed by two devices.
+
+The router-id is the BGP identifier in the OPEN message and the tie-breaker in best-path selection, and it has to be unique. Two devices sharing one cannot peer with each other at all — the OPEN is rejected as a collision — and where they peer with a common neighbour instead, that neighbour treats the second session as a duplicate of the first and the two routers take turns holding it.
+
+Silent for a device that states no router-id, since the platform then derives one from an interface address this tool cannot predict, and silent where one device declares the same id twice, which is one router, not two.
+
+**Reports:** BGP router-id {…} is claimed by {…}
+
+**Detail:** the router-id is the BGP identifier and has to be unique; two devices carrying the same one cannot peer with each other, and a common neighbour sees the second session as a duplicate of the first
+
+**Remedy:** give each device its own router-id, conventionally its loopback address
+
+**Stays silent when:**
+
+- Two devices with router-ids of their own collide over nothing; the rule is about the identifier being shared, not about it being configured.  
+  `test_facts_rules.py::test_distinct_router_ids_are_silent`
 
 ### `bgp-session-one-sided`
 
@@ -106,7 +180,35 @@ That window is invisible to steady-state analysis — every device is healthy, e
 
 **Stays silent when:**
 
-- _No test asserts this rule staying quiet. Its silence is untested, so read it as an absence of evidence._
+- Dampening is not itself a defect — a prefix that flaps hard should be held down. What is reported is a hold-down longer than the outage the site has committed to, and a max-suppress under that limit is the feature working.  
+  `test_timer_rules.py::test_a_bounded_suppression_window_inside_the_sla`
+- A window equal to the commitment is inside it. The finding claims the prefix stays withdrawn for longer than the SLA allows, and at the boundary that claim is not yet true.  
+  `test_timer_rules.py::test_a_suppression_window_landing_exactly_on_the_sla`
+- The threshold is the operator's number, not the tool's. The same hour-long max-suppress that breaks a five-minute commitment is a deliberate, documented hold-down on a site that allows two hours.  
+  `test_timer_rules.py::test_an_hour_long_window_a_looser_sla_permits`
+
+### `device-isolated-by-shutdown`
+
+**high** · `cassandra.facts.rules.device_reachable_only_through_shutdown_interfaces`
+
+A device whose every link into these configs is administratively down.
+
+The device is addressed in a subnet another device also uses, and every one of its own interfaces in such a subnet is shut. Nothing here can be an IGP, BGP, BFD or FHRP neighbour of it, so it is off the network while its configuration still reads as a fully connected device — the shape a box takes after a maintenance shutdown nobody undid.
+
+Reads the derived L3 adjacency graph, which already omits shut interfaces, and then asks whether re-admitting them would connect the device. Silent for a device that has a live neighbour, for a device that shares no subnet with anything in the pack — a peer outside the corpus is an incomplete collection rather than a defect — and for a pure layer-2 switch, which has no addresses to share in the first place.
+
+**Reports:** every interface joining {…} to these configs is shut down
+
+**Detail:** {…} is addressed in {…}, which other devices here also use, but each of its own interfaces in those subnets is administratively down; no neighbour in this collection can reach it and none of its adjacencies can come up
+
+**Remedy:** bring one of those interfaces up, or take the device out of the collection if it is genuinely decommissioned
+
+**Stays silent when:**
+
+- The rule is about a device with no way in at all, not about any shut interface: a second subnet that is up still carries every adjacency.  
+  `test_facts_rules.py::test_one_shut_interface_beside_a_live_one_does_not_isolate_a_device`
+- A device with no addresses shares no subnet with anything, so there is no adjacency for a shutdown to have taken away.  
+  `test_facts_rules.py::test_a_layer_two_switch_is_not_isolated`
 
 ### `duplicate-address`
 
@@ -118,6 +220,8 @@ Whichever device answers first wins, and which one that is depends on ARP timing
 
 Compares addresses, not prefixes: the same address with two different masks is still one address two devices claim.
 
+Scoped per VRF, like every other subnet-shaped rule in this module. Two VRFs reusing an address is the reason VRFs exist, and the mechanism this rule describes — whoever answers ARP first wins — cannot happen between segments that never see each other's ARP.
+
 **Reports:** {…} is configured twice
 
 **Detail:** also on {…}
@@ -126,7 +230,10 @@ Compares addresses, not prefixes: the same address with two different masks is s
 
 **Stays silent when:**
 
-- _No test asserts this rule staying quiet. Its silence is untested, so read it as an absence of evidence._
+- Both members of a group name the same virtual address — that is what makes them one group. Only an address configured on an interface is claimed by a device, so a virtual address repeated across the pair is not a duplicate.  
+  `test_facts_rules.py::test_a_virtual_address_written_on_both_members`
+- Two VRFs are two separate address spaces, so the same address in each is a deliberate design rather than a collision. Nothing on either segment ever sees the other's ARP, which is the mechanism the rule is written about.  
+  `test_facts_rules.py::test_the_same_address_in_two_vrfs_on_one_device`
 
 ### `fhrp-duplicate-member`
 
@@ -146,6 +253,27 @@ Group numbers are legitimately reused across unrelated subnets — group 1 on ev
 
 - Group 14 on two unrelated subnets is ordinary practice, not a defect.  
   `test_facts_rules.py::test_group_number_reused_on_another_subnet_is_not_a_duplicate`
+
+### `fhrp-members-on-different-subnets`
+
+**high** · `cassandra.facts.rules.fhrp_members_addressed_on_different_subnets`
+
+A redundancy group whose two halves are not on the same subnet.
+
+Two devices run the same protocol, the same group number and the same virtual address, which is as explicit as intent gets — and their interfaces are addressed in different subnets, so the Fact Pack holds them as two separate one-member groups rather than one pair. Each device is master of its own group, neither backs the other up, and the failover the numbers describe does not exist. A wrong octet or a wrong mask on one side produces exactly this, and both configurations look correct read on their own.
+
+Requires the group number *and* the virtual address to match, so reusing group 1 on every SVI — ordinary practice — stays silent. Silent, too, when the members share a subnet, which is the case where the group really is one group.
+
+**Reports:** {…} {…} is split across {…}
+
+**Detail:** {…} all run {…} {…} with virtual address {…}, but their interfaces are addressed in different subnets, so they are not members of one group: each is master of its own and none of them backs up any other
+
+**Remedy:** put every member of {…} {…} in one subnet, or give the groups that are genuinely separate their own numbers and virtual addresses
+
+**Stays silent when:**
+
+- Group 14 reused on an unrelated subnet with its own virtual address is ordinary practice: the intent to pair two devices is what the matching virtual address establishes, and it is absent here.  
+  `test_facts_rules.py::test_one_group_number_on_two_subnets_with_its_own_address_each`
 
 ### `fhrp-track-target-shutdown`
 
@@ -184,7 +312,10 @@ High severity for a rule about an absent line: this is failover that looks confi
 
 **Stays silent when:**
 
-- _No test asserts this rule staying quiet. Its silence is untested, so read it as an absence of evidence._
+- A tracked object is resolved wherever in the file it is written, so a definition that precedes the group referencing it is as good as one that follows. Only a name nothing defines anywhere is a dangling reference.  
+  `test_facts_rules.py::test_a_track_defined_above_the_group_that_references_it`
+- Tracked objects are device-local: each member resolves the definition in its own configuration. A pair that both use the name UPLINK for their own uplink is the normal way a symmetric pair is written, not one device borrowing the other's track.  
+  `test_facts_rules.py::test_both_devices_defining_their_own_copy_of_a_track_name`
 
 ### `fhrp-virtual-collides`
 
@@ -202,7 +333,10 @@ The virtual address is meant to be answered by whichever member is master. When 
 
 **Stays silent when:**
 
-- _No test asserts this rule staying quiet. Its silence is untested, so read it as an absence of evidence._
+- Every member of a group is configured with the identical virtual address; a group whose members disagreed about it would not be a group. The collision is a member owning that address as its own interface address, which is a different line entirely.  
+  `test_facts_rules.py::test_both_members_advertising_the_same_virtual_address`
+- A member interface may carry several real addresses on the segment it serves. Sharing the subnet with the virtual address is the requirement, not the defect — only an interface configured with the virtual address itself answers for it while it is backup.  
+  `test_facts_rules.py::test_a_virtual_address_beside_a_secondary_on_the_same_subnet`
 
 ### `fhrp-virtual-not-a-host-address`
 
@@ -283,6 +417,29 @@ Only explicitly configured values are compared. An unset MTU is a platform defau
   `test_facts_rules.py::test_matching_mtu_does_not_fire`
 - An unset MTU is a platform default the tool does not claim to know.  
   `test_facts_rules.py::test_one_configured_mtu_is_not_a_mismatch`
+
+### `subnet-mask-disagreement`
+
+**high** · `cassandra.facts.rules.prefix_length_disagreement`
+
+Two devices on one wire that disagree about how wide the wire is.
+
+One address falls inside the other's subnet, so by the operator's own arithmetic the two interfaces are on one segment — but the masks differ, so the ends hold different beliefs about which destinations are local. The end with the wider mask ARPs for addresses the end with the narrower mask sends to its default gateway, and the range where they disagree is reachable in one direction only. Every ping between the two interface addresses succeeds, which is what lets this survive for years.
+
+Silent when the prefix lengths agree, and when neither address is inside the other's subnet — two unrelated subnets are not a disagreement about one. Silent on loopbacks and host addresses, which describe no segment, and across VRFs, where two devices sharing a subnet is the point of the VRF.
+
+**Reports:** {…} and {…} share a segment with different masks
+
+**Detail:** {…} and {…} overlap — one of them is inside the other's subnet — so the two interfaces are on one wire with two different ideas of how far it reaches; the addresses in {…} but outside {…} are local to one end and remote to the other, so traffic to them is delivered in one direction only
+
+**Remedy:** agree one mask for the segment: /{…} at both ends, or /{…} at both
+
+**Stays silent when:**
+
+- A /32 states a routing identity, not the width of a wire, so a loopback numbered out of a LAN prefix is not two devices disagreeing about a segment.  
+  `test_facts_rules.py::test_a_host_address_inside_another_subnet_is_not_a_mask_disagreement`
+- Neither address falls inside the other's subnet, so the two interfaces make no competing claim about one segment and there is nothing to reconcile.  
+  `test_facts_rules.py::test_unrelated_subnets_with_different_masks_are_not_a_disagreement`
 
 ### `vlan-not-declared`
 
@@ -380,7 +537,10 @@ Either the peer's configuration is not in the directory — in which case the fi
 
 **Stays silent when:**
 
-- _No test asserts this rule staying quiet. Its silence is untested, so read it as an absence of evidence._
+- Membership is decided by group number and subnet, not by interface name: an SVI on one device and a routed port on the other are still each other's peer, and the group has the second device it needs.  
+  `test_facts_rules.py::test_members_of_one_group_on_differently_named_interfaces`
+- Reusing a group number on another VLAN is ordinary practice, and each subnet keeps its own pair of members. Counting members by group number alone would split them into single-member groups that do not exist.  
+  `test_facts_rules.py::test_one_group_number_reused_on_a_second_subnet`
 
 ### `fhrp-priority-tie`
 
@@ -398,7 +558,10 @@ The protocols break the tie on address comparison, which is deterministic but no
 
 **Stays silent when:**
 
-- _No test asserts this rule staying quiet. Its silence is untested, so read it as an absence of evidence._
+- The tie that matters is between peers contending for one virtual address. Two groups on two VLANs may use whatever priorities they like, including the same numbers, because they never stand in the same election.  
+  `test_facts_rules.py::test_equal_priorities_in_two_different_groups`
+- Only the members contending for master can be tied. A third device sharing the backup's priority decides nothing: the group still has one member above both of them, so who holds it is not left to address comparison.  
+  `test_facts_rules.py::test_a_tie_below_the_top_priority`
 
 ### `fhrp-track-ineffective`
 
@@ -437,7 +600,31 @@ Only checked on devices that have at least one trunk. A device with none is not 
 
 **Stays silent when:**
 
-- _No test asserts this rule staying quiet. Its silence is untested, so read it as an absence of evidence._
+- A router terminating a VLAN it does not bridge onward has no trunks to omit it from. The rule is about a VLAN that leaves on no uplink; a device with no uplinks carrying VLANs at all is a different design, not a broken one.  
+  `test_facts_rules.py::test_an_svi_on_a_device_that_trunks_nothing`
+- A VLAN needs one trunk that carries it, not every trunk. Trunks are pruned to what the neighbour behind them needs, so a VLAN absent from a trunk to a device that has no use for it is the allowed list doing its job.  
+  `test_facts_rules.py::test_a_vlan_carried_on_one_trunk_but_not_another`
+
+### `trunk-native-vlan-not-allowed`
+
+**medium** · `cassandra.facts.rules.native_vlan_not_permitted_on_the_trunk`
+
+A trunk whose native VLAN is missing from its own allowed list.
+
+The native VLAN is the one the trunk sends and expects untagged. When the allowed list does not contain it the untagged traffic is discarded at both ends, silently and in both directions — the trunk comes up, every tagged VLAN on it works, and only the one service that was never tagged fails.
+
+Only checked where both facts are present: a trunk stating no allowed list permits everything on real hardware, and the Fact Pack does not distinguish that from a construct the parser did not read, so it is left alone.
+
+**Reports:** {…} is native in VLAN {…} but does not permit it
+
+**Detail:** the trunk sends VLAN {…} untagged and its allowed list is {…}, so every untagged frame on the link is dropped while the tagged VLANs keep working
+
+**Remedy:** add VLAN {…} to the allowed list, or make a permitted VLAN the native one
+
+**Stays silent when:**
+
+- A native VLAN the trunk also permits is the ordinary configuration: the untagged frames belong to a VLAN the link is allowed to carry.  
+  `test_facts_rules.py::test_native_vlan_inside_the_allowed_list_is_silent`
 
 ### `fhrp-no-preempt-on-preferred`
 
@@ -449,6 +636,8 @@ After the first failover the group stays on the backup for good. That is a legit
 
 Low severity because it is a defensible configuration. It is reported so the choice is visible rather than assumed.
 
+Silent when the top priority is shared. There is then no preferred master to fail to reclaim — firing once per tied member would state, twice and contradictorily, that each of them is the preferred one. `fhrp-priority-tie` is the finding for that group.
+
 **Reports:** {…} {…} will not return to its preferred master
 
 **Detail:** {…} has the highest priority ({…}) but preempt is off, so after any failover the group stays on the backup indefinitely
@@ -457,7 +646,10 @@ Low severity because it is a defensible configuration. It is reported so the cho
 
 **Stays silent when:**
 
-- _No test asserts this rule staying quiet. Its silence is untested, so read it as an absence of evidence._
+- Preempt on a backup governs nothing: it never has a higher priority to reclaim with. Only the highest-priority member can fail to take the group back, so the setting is reported there and nowhere else.  
+  `test_facts_rules.py::test_preempt_left_off_on_the_backup`
+- With every member at the same priority there is no preferred master to fail to return to — whoever wins the address comparison is entitled to keep the group. The tie is worth reporting, and `fhrp-priority-tie` is what reports it.  
+  `test_facts_rules.py::test_every_member_sharing_one_priority_has_no_master_to_reclaim`
 
 ### `trunk-vlan-dead`
 
@@ -550,7 +742,10 @@ Reported past MIN_TRANSITIONS, which is high enough that the one handover a genu
 
 **Stays silent when:**
 
-- _No test asserts this rule staying quiet. Its silence is untested, so read it as an absence of evidence._
+- A decrement that leaves the master above its peer never moves the group, so the interface it watches can flap as often as it likes without a single handover. The tracking is ineffective, which the FACTS tier reports; it is not a group chasing a link.  
+  `test_timing.py::test_tracking_too_weak_to_lose_the_election_cannot_chase`
+- Disabling preempt is the standard cure for a group that chases a flapping uplink: a backup will not displace a master that is still advertising, however far the master's priority has been decremented. Nothing hands the group back and forth, so there is nothing to report.  
+  `test_timing.py::test_a_group_without_preempt_cannot_be_taken_from_a_live_master`
 
 ## Silence across a whole rule set
 

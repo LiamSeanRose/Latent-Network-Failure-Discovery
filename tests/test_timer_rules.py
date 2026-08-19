@@ -375,3 +375,42 @@ def test_multiplier_scales_detection_linearly(multiplier: int) -> None:
         detect_multiplier=multiplier,
     )
     assert bfd_detection_ms(session) == 300 * multiplier
+
+
+# --------------------------------------------------------------------------
+# Deliberate silence
+#
+# The dampening rule compares two numbers, so the ways it can be wrong are the
+# near misses around that comparison: a window that is long but bounded, one
+# that lands exactly on the limit, and one the site's own commitment allows.
+# --------------------------------------------------------------------------
+
+# 5 minutes, which is `Limits.sla_max_suppress_s` exactly.
+AT_THE_LIMIT: Final = "half-life 1 reuse 750 suppress 2000 max-suppress-time 5"
+
+
+def test_a_bounded_suppression_window_inside_the_sla() -> None:
+    """Dampening is not itself a defect — a prefix that flaps hard should be held
+    down. What is reported is a hold-down longer than the outage the site has
+    committed to, and a max-suppress under that limit is the feature working."""
+    pack = pack_from(DAMPENED.format(profile=NARROW))
+    assert "dampening-exceeds-sla" not in rules_fired(pack)
+
+
+def test_a_suppression_window_landing_exactly_on_the_sla() -> None:
+    """A window equal to the commitment is inside it. The finding claims the
+    prefix stays withdrawn for longer than the SLA allows, and at the boundary
+    that claim is not yet true."""
+    pack = pack_from(DAMPENED.format(profile=AT_THE_LIMIT))
+    assert pack.timers.dampening[0].max_suppress_s == 300
+    assert "dampening-exceeds-sla" not in rules_fired(pack)
+
+
+def test_an_hour_long_window_a_looser_sla_permits() -> None:
+    """The threshold is the operator's number, not the tool's. The same hour-long
+    max-suppress that breaks a five-minute commitment is a deliberate, documented
+    hold-down on a site that allows two hours."""
+    pack = pack_from(DAMPENED.format(profile=WIDE))
+    assert "dampening-exceeds-sla" not in rules_fired(
+        pack, limits=Limits(sla_max_suppress_s=7200)
+    )

@@ -15,11 +15,13 @@ from collections.abc import Callable, Iterator
 from typing import Final
 
 from cassandra.factpack.schema import (
+    BgpProcess,
     FhrpGroup,
     FhrpMember,
     Interface,
     InterfaceKind,
     StaticFactPack,
+    SwitchportMode,
     TrackedObjectKind,
     VlanId,
     VrfName,
@@ -30,6 +32,7 @@ Rule = Callable[[StaticFactPack], Iterator[Finding]]
 RULES: list[Rule] = []
 
 type Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+type Address = ipaddress.IPv4Interface | ipaddress.IPv6Interface
 type SubnetKey = tuple[VrfName | None, Network]
 
 # A /30 or /31 with one end in the corpus is far more often a link to something
@@ -317,13 +320,19 @@ def duplicate_addresses(pack: StaticFactPack) -> Iterator[Finding]:
 
     Compares addresses, not prefixes: the same address with two different masks
     is still one address two devices claim.
+
+    Scoped per VRF, like every other subnet-shaped rule in this module. Two VRFs
+    reusing an address is the reason VRFs exist, and the mechanism this rule
+    describes — whoever answers ARP first wins — cannot happen between segments
+    that never see each other's ARP.
     """
-    seen: dict[str, str] = {}
+    seen: dict[tuple[VrfName | None, str], str] = {}
     for device in pack.devices:
         for interface in device.interfaces:
             for assignment in interface.addresses:
                 where = f"{device.id}:{interface.name}"
-                if (previous := seen.get(assignment.address)) is not None:
+                key = (interface.vrf, assignment.address)
+                if (previous := seen.get(key)) is not None:
                     yield Finding(
                         rule="duplicate-address",
                         tier=Tier.FACTS,
@@ -334,7 +343,7 @@ def duplicate_addresses(pack: StaticFactPack) -> Iterator[Finding]:
                         evidence=(previous, where),
                         remedy="renumber one of them",
                     )
-                seen[assignment.address] = where
+                seen[key] = where
 
 
 @rule
@@ -348,11 +357,18 @@ def preferred_master_will_not_reclaim(pack: StaticFactPack) -> Iterator[Finding]
 
     Low severity because it is a defensible configuration. It is reported so the
     choice is visible rather than assumed.
+
+    Silent when the top priority is shared. There is then no preferred master to
+    fail to reclaim — firing once per tied member would state, twice and
+    contradictorily, that each of them is the preferred one. `fhrp-priority-tie`
+    is the finding for that group.
     """
     for group in pack.fhrp_groups:
         if len(group.members) < 2:
             continue
         top = max(m.priority for m in group.members)
+        if sum(1 for m in group.members if m.priority == top) > 1:
+            continue
         for member in group.members:
             if member.priority == top and not member.preempt:
                 yield Finding(
@@ -900,3 +916,427 @@ def bgp_peer_on_no_local_subnet(pack: StaticFactPack) -> Iterator[Finding]:
                 remedy="correct the peer address, or add update-source / "
                 "ebgp-multihop if the peering really is not direct",
             )
+
+
+# --------------------------------------------------------------------------
+# Addressing agreement, layer-2 edges, and what a shutdown takes with it
+#
+# These read parts of the Fact Pack the rules above never touch: the derived
+# L3 adjacency graph, `admin_enabled`, `native_vlan`, and `BgpProcess.router_id`.
+# --------------------------------------------------------------------------
+
+
+def _addressed(pack: StaticFactPack) -> list[tuple[Interface, Address]]:
+    """Every interface address that makes a claim about a shared segment.
+
+    Host addresses and the kinds in `OFF_THE_WIRE` are excluded: a /32 is a
+    routing identity rather than a statement about a wire, and a loopback shares
+    a segment with nothing by construction.
+    """
+    out: list[tuple[Interface, Address]] = []
+    for device in pack.devices:
+        for interface in device.interfaces:
+            if interface.kind in OFF_THE_WIRE:
+                continue
+            for assignment in interface.addresses:
+                try:
+                    address = ipaddress.ip_interface(assignment.prefix)
+                except ValueError:
+                    continue
+                if address.network.prefixlen == address.network.max_prefixlen:
+                    continue
+                out.append((interface, address))
+    return out
+
+
+@rule
+def prefix_length_disagreement(pack: StaticFactPack) -> Iterator[Finding]:
+    """Two devices on one wire that disagree about how wide the wire is.
+
+    One address falls inside the other's subnet, so by the operator's own
+    arithmetic the two interfaces are on one segment — but the masks differ, so
+    the ends hold different beliefs about which destinations are local. The end
+    with the wider mask ARPs for addresses the end with the narrower mask sends
+    to its default gateway, and the range where they disagree is reachable in
+    one direction only. Every ping between the two interface addresses succeeds,
+    which is what lets this survive for years.
+
+    Silent when the prefix lengths agree, and when neither address is inside the
+    other's subnet — two unrelated subnets are not a disagreement about one.
+    Silent on loopbacks and host addresses, which describe no segment, and
+    across VRFs, where two devices sharing a subnet is the point of the VRF.
+    """
+    for (a_interface, a), (b_interface, b) in itertools.combinations(
+        _addressed(pack), 2
+    ):
+        if a_interface.device == b_interface.device:
+            continue
+        if a_interface.vrf != b_interface.vrf or a.version != b.version:
+            continue
+        if a.network.prefixlen == b.network.prefixlen:
+            continue
+        if a.ip not in b.network and b.ip not in a.network:
+            continue
+        wider, narrower = sorted((a.network, b.network), key=lambda net: net.prefixlen)
+        yield Finding(
+            rule="subnet-mask-disagreement",
+            tier=Tier.FACTS,
+            severity=Severity.HIGH,
+            device=a_interface.device,
+            title=f"{a_interface.device} and {b_interface.device} share a segment "
+            f"with different masks",
+            detail=f"{a} and {b} overlap — one of them is inside the other's "
+            f"subnet — so the two interfaces are on one wire with two different "
+            f"ideas of how far it reaches; the addresses in {wider} but outside "
+            f"{narrower} are local to one end and remote to the other, so traffic "
+            f"to them is delivered in one direction only",
+            evidence=(
+                f"{a_interface.device}:{a_interface.name} {a}",
+                f"{b_interface.device}:{b_interface.name} {b}",
+            ),
+            remedy=f"agree one mask for the segment: /{narrower.prefixlen} at both "
+            f"ends, or /{wider.prefixlen} at both",
+        )
+
+
+@rule
+def device_reachable_only_through_shutdown_interfaces(
+    pack: StaticFactPack,
+) -> Iterator[Finding]:
+    """A device whose every link into these configs is administratively down.
+
+    The device is addressed in a subnet another device also uses, and every one
+    of its own interfaces in such a subnet is shut. Nothing here can be an IGP,
+    BGP, BFD or FHRP neighbour of it, so it is off the network while its
+    configuration still reads as a fully connected device — the shape a box
+    takes after a maintenance shutdown nobody undid.
+
+    Reads the derived L3 adjacency graph, which already omits shut interfaces,
+    and then asks whether re-admitting them would connect the device. Silent for
+    a device that has a live neighbour, for a device that shares no subnet with
+    anything in the pack — a peer outside the corpus is an incomplete collection
+    rather than a defect — and for a pure layer-2 switch, which has no addresses
+    to share in the first place.
+    """
+    if len(pack.devices) < 2:
+        return
+    connected = {ref.device for adj in pack.l3_adjacencies for ref in adj.members}
+    shared = [
+        (net, members)
+        for (_vrf, net), members in _ordered_subnets(pack)
+        if len({i.device for i in members}) > 1
+    ]
+    for device in pack.devices:
+        if device.id in connected:
+            continue
+        stranded = [
+            (interface, net)
+            for net, members in shared
+            for interface in members
+            if interface.device == device.id and not interface.admin_enabled
+        ]
+        if not stranded:
+            continue
+        subnets = ", ".join(str(net) for _interface, net in stranded)
+        yield Finding(
+            rule="device-isolated-by-shutdown",
+            tier=Tier.FACTS,
+            severity=Severity.HIGH,
+            device=device.id,
+            title=f"every interface joining {device.id} to these configs is shut down",
+            detail=f"{device.id} is addressed in {subnets}, which other devices "
+            f"here also use, but each of its own interfaces in those subnets is "
+            f"administratively down; no neighbour in this collection can reach it "
+            f"and none of its adjacencies can come up",
+            evidence=tuple(
+                f"{interface.device}:{interface.name} {net} shutdown"
+                for interface, net in stranded
+            ),
+            remedy="bring one of those interfaces up, or take the device out of "
+            "the collection if it is genuinely decommissioned",
+        )
+
+
+@rule
+def access_vlan_leaves_on_no_trunk(pack: StaticFactPack) -> Iterator[Finding]:
+    """An access port in a VLAN that cannot leave the switch it is on.
+
+    The port's VLAN is used elsewhere — another device has an SVI or an access
+    port in it — but on this device no trunk permits it and no SVI terminates
+    it. Whatever is plugged in comes up, learns MAC addresses from nothing, and
+    reaches neither its gateway nor any other member of the VLAN. The usual
+    cause is a port moved into a service VLAN that the uplink's allowed list was
+    never extended to carry.
+
+    Silent when a trunk on the device permits the VLAN, when the device has an
+    SVI for it, and when the device has no trunk at all — a standalone switch is
+    not failing to forward anywhere. Silent, too, when the VLAN appears nowhere
+    else in the collection: unused ports parked in a spare VLAN look exactly
+    like this and are deliberate.
+    """
+    terminated: dict[VlanId, set[str]] = {}
+    for device in pack.devices:
+        for interface in device.interfaces:
+            if (vlan := _svi_vlan(interface)) is not None:
+                terminated.setdefault(vlan, set()).add(device.id)
+            if interface.access_vlan is not None:
+                terminated.setdefault(interface.access_vlan, set()).add(device.id)
+
+    for device in pack.devices:
+        trunks = [i for i in device.interfaces if i.allowed_vlans]
+        if not trunks:
+            continue
+        carried = {vlan for trunk in trunks for vlan in trunk.allowed_vlans}
+        svis = {
+            vlan
+            for interface in device.interfaces
+            if (vlan := _svi_vlan(interface)) is not None
+        }
+        for interface in device.interfaces:
+            vlan = interface.access_vlan
+            if vlan is None or not interface.admin_enabled:
+                continue
+            if vlan in carried or vlan in svis:
+                continue
+            elsewhere = sorted(terminated.get(vlan, set()) - {device.id})
+            if not elsewhere:
+                continue
+            yield Finding(
+                rule="access-vlan-not-trunked",
+                tier=Tier.FACTS,
+                severity=Severity.HIGH,
+                device=device.id,
+                title=f"{interface.name} is in VLAN {vlan}, which leaves "
+                f"{device.id} on no trunk",
+                detail=f"VLAN {vlan} is terminated on "
+                + ", ".join(elsewhere)
+                + f", but no trunk on {device.id} permits it and there is no SVI "
+                f"for it here, so anything on {interface.name} is confined to this "
+                f"switch and has no route to its gateway",
+                evidence=(
+                    f"{device.id}:{interface.name} access vlan {vlan}",
+                    *(
+                        f"{device.id}:{trunk.name} allowed "
+                        + ",".join(str(v) for v in trunk.allowed_vlans)
+                        for trunk in trunks
+                    ),
+                ),
+                remedy=f"add VLAN {vlan} to the trunk that carries this switch's "
+                f"uplink, or move the port to a VLAN the uplink already carries",
+            )
+
+
+@rule
+def native_vlan_not_permitted_on_the_trunk(pack: StaticFactPack) -> Iterator[Finding]:
+    """A trunk whose native VLAN is missing from its own allowed list.
+
+    The native VLAN is the one the trunk sends and expects untagged. When the
+    allowed list does not contain it the untagged traffic is discarded at both
+    ends, silently and in both directions — the trunk comes up, every tagged
+    VLAN on it works, and only the one service that was never tagged fails.
+
+    Only checked where both facts are present: a trunk stating no allowed list
+    permits everything on real hardware, and the Fact Pack does not distinguish
+    that from a construct the parser did not read, so it is left alone.
+    """
+    for device in pack.devices:
+        for interface in device.interfaces:
+            native = interface.native_vlan
+            if native is None or not interface.allowed_vlans:
+                continue
+            if interface.switchport_mode is not SwitchportMode.TRUNK:
+                continue
+            if native in interface.allowed_vlans:
+                continue
+            allowed = ",".join(str(v) for v in interface.allowed_vlans)
+            yield Finding(
+                rule="trunk-native-vlan-not-allowed",
+                tier=Tier.FACTS,
+                severity=Severity.MEDIUM,
+                device=device.id,
+                title=f"{interface.name} is native in VLAN {native} but does not "
+                f"permit it",
+                detail=f"the trunk sends VLAN {native} untagged and its allowed "
+                f"list is {allowed}, so every untagged frame on the link is "
+                f"dropped while the tagged VLANs keep working",
+                evidence=(
+                    f"{device.id}:{interface.name} native vlan {native}",
+                    f"{device.id}:{interface.name} allowed {allowed}",
+                ),
+                remedy=f"add VLAN {native} to the allowed list, or make a "
+                f"permitted VLAN the native one",
+            )
+
+
+@rule
+def fhrp_members_addressed_on_different_subnets(
+    pack: StaticFactPack,
+) -> Iterator[Finding]:
+    """A redundancy group whose two halves are not on the same subnet.
+
+    Two devices run the same protocol, the same group number and the same
+    virtual address, which is as explicit as intent gets — and their interfaces
+    are addressed in different subnets, so the Fact Pack holds them as two
+    separate one-member groups rather than one pair. Each device is master of
+    its own group, neither backs the other up, and the failover the numbers
+    describe does not exist. A wrong octet or a wrong mask on one side produces
+    exactly this, and both configurations look correct read on their own.
+
+    Requires the group number *and* the virtual address to match, so reusing
+    group 1 on every SVI — ordinary practice — stays silent. Silent, too, when
+    the members share a subnet, which is the case where the group really is one
+    group.
+    """
+    by_intent: dict[tuple[str, int, str], list[FhrpGroup]] = {}
+    for group in pack.fhrp_groups:
+        if group.virtual_ipv4 and group.subnet:
+            key = (group.protocol.value, group.group_number, group.virtual_ipv4)
+            by_intent.setdefault(key, []).append(group)
+
+    for (protocol, number, virtual), groups in sorted(by_intent.items()):
+        subnets = sorted({group.subnet for group in groups if group.subnet})
+        devices = sorted({m.device for group in groups for m in group.members})
+        if len(subnets) < 2 or len(devices) < 2:
+            continue
+        yield Finding(
+            rule="fhrp-members-on-different-subnets",
+            tier=Tier.FACTS,
+            severity=Severity.HIGH,
+            device=devices[0],
+            title=f"{protocol.upper()} {number} is split across "
+            + " and ".join(subnets),
+            detail=", ".join(devices)
+            + f" all run {protocol} {number} with virtual address {virtual}, but "
+            f"their interfaces are addressed in different subnets, so they are not "
+            f"members of one group: each is master of its own and none of them "
+            f"backs up any other",
+            evidence=tuple(
+                f"{member.device}:{member.interface} {group.subnet} "
+                f"priority {member.priority}"
+                for group in groups
+                for member in group.members
+            ),
+            remedy=f"put every member of {protocol} {number} in one subnet, or "
+            f"give the groups that are genuinely separate their own numbers and "
+            f"virtual addresses",
+        )
+
+
+@rule
+def bgp_peer_behind_a_shutdown_interface(pack: StaticFactPack) -> Iterator[Finding]:
+    """A peering that can only run over an interface that is shut down.
+
+    Two shapes, one consequence. The peer address is on a subnet this device
+    reaches through shut interfaces only, or the session's update source is
+    itself shut. Either way the session cannot open, and the configuration reads
+    as a healthy peering — the neighbour statement is present, the remote AS is
+    right, and there is no `shutdown` under the BGP process to explain it.
+
+    Silent when the neighbour is explicitly shut, which says the operator meant
+    it, and when any interface carrying the peer's subnet is up. Silent when the
+    peer address is on no local subnet at all: an update source, a multihop
+    session or a plain typo are somebody else's finding.
+    """
+    for process in pack.bgp:
+        device = next((d for d in pack.devices if d.id == process.device), None)
+        if device is None:
+            continue
+        by_name = {interface.name: interface for interface in device.interfaces}
+        for neighbor in process.neighbors:
+            if neighbor.shutdown:
+                continue
+            source = by_name.get(neighbor.update_source or "")
+            if source is not None and not source.admin_enabled:
+                yield Finding(
+                    rule="bgp-peer-behind-shutdown",
+                    tier=Tier.FACTS,
+                    severity=Severity.HIGH,
+                    device=process.device,
+                    title=f"BGP peering with {neighbor.address} is sourced from "
+                    f"{source.name}, which is shut down",
+                    detail="the session takes its local address from an interface "
+                    "that is administratively down, so it has no source address "
+                    "and never leaves Idle",
+                    evidence=(
+                        f"{process.device} AS {process.local_as} -> {neighbor.address}",
+                        f"{process.device}:{source.name} shutdown",
+                    ),
+                    remedy=f"bring {source.name} up, or source the session from an "
+                    f"interface that is",
+                )
+                continue
+            if neighbor.update_source or neighbor.multihop:
+                continue
+            try:
+                address = ipaddress.ip_address(neighbor.address)
+            except ValueError:
+                continue
+            carrying = [
+                interface
+                for interface in device.interfaces
+                if any(address in net for net in _networks(interface))
+            ]
+            if not carrying or any(i.admin_enabled for i in carrying):
+                continue
+            yield Finding(
+                rule="bgp-peer-behind-shutdown",
+                tier=Tier.FACTS,
+                severity=Severity.HIGH,
+                device=process.device,
+                title=f"BGP peer {neighbor.address} is only reachable over an "
+                f"interface that is shut down",
+                detail="every interface on this device addressed in the peer's "
+                "subnet is administratively down, so the TCP session cannot be "
+                "established and the peering stays in Idle or Active",
+                evidence=(
+                    f"{process.device} AS {process.local_as} -> {neighbor.address}",
+                    *(
+                        f"{process.device}:{interface.name} shutdown"
+                        for interface in carrying
+                    ),
+                ),
+                remedy="bring the interface up, or move the peering to one that is "
+                "carrying traffic",
+            )
+
+
+@rule
+def bgp_router_id_duplicated(pack: StaticFactPack) -> Iterator[Finding]:
+    """One BGP router-id claimed by two devices.
+
+    The router-id is the BGP identifier in the OPEN message and the tie-breaker
+    in best-path selection, and it has to be unique. Two devices sharing one
+    cannot peer with each other at all — the OPEN is rejected as a collision —
+    and where they peer with a common neighbour instead, that neighbour treats
+    the second session as a duplicate of the first and the two routers take
+    turns holding it.
+
+    Silent for a device that states no router-id, since the platform then
+    derives one from an interface address this tool cannot predict, and silent
+    where one device declares the same id twice, which is one router, not two.
+    """
+    by_id: dict[str, list[BgpProcess]] = {}
+    for process in pack.bgp:
+        if process.router_id:
+            by_id.setdefault(process.router_id, []).append(process)
+
+    for router_id, processes in sorted(by_id.items()):
+        devices = sorted({process.device for process in processes})
+        if len(devices) < 2:
+            continue
+        yield Finding(
+            rule="bgp-router-id-duplicate",
+            tier=Tier.FACTS,
+            severity=Severity.HIGH,
+            device=devices[0],
+            title=f"BGP router-id {router_id} is claimed by " + " and ".join(devices),
+            detail="the router-id is the BGP identifier and has to be unique; two "
+            "devices carrying the same one cannot peer with each other, and a "
+            "common neighbour sees the second session as a duplicate of the first",
+            evidence=tuple(
+                f"{process.device}: router bgp {process.local_as} router-id {router_id}"
+                for process in processes
+            ),
+            remedy="give each device its own router-id, conventionally its "
+            "loopback address",
+        )
