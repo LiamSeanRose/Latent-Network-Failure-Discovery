@@ -54,6 +54,12 @@ from cassandra.factpack.schema import (
     Vlan,
 )
 
+# IOS decrements a tracked group's priority by 10 when `decrement` is omitted.
+# Reading a bare `standby N track X` as a decrement of zero turns real failover
+# into a track that does nothing, and the tool then calls the group stable — a
+# miss, which is the expensive direction to be wrong in.
+DEFAULT_TRACK_DECREMENT: Final = 10
+
 # `standby` is the giveaway; so is a netmask-form address. Either is enough to
 # prefer this dialect over EOS.
 MARKERS = (
@@ -286,8 +292,16 @@ def _parse_interface(
             group = int(m.group(1))
             rest = m.group(2)
             settings = groups.setdefault(group, {})
-            if t := re.fullmatch(r"track (\S+) decrement (\d+)", rest):
-                group_tracks.setdefault(group, []).append((t.group(1), int(t.group(2))))
+            if t := re.fullmatch(r"track (\S+)( decrement (\d+))?", rest):
+                decrement = t.group(3)
+                group_tracks.setdefault(group, []).append(
+                    (
+                        t.group(1),
+                        DEFAULT_TRACK_DECREMENT
+                        if decrement is None
+                        else int(decrement),
+                    )
+                )
             elif t := re.fullmatch(r"ip (\S+)( secondary)?", rest):
                 settings.setdefault("virtual_ipv4", t.group(1))
             elif t := re.fullmatch(r"priority (\d+)", rest):
