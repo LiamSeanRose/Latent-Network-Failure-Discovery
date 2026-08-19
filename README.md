@@ -61,6 +61,7 @@ uv run cassandra check ./configs --json        # machine-readable, with a config
 uv run cassandra check ./configs --fail-on high  # print everything, block on high only
 uv run cassandra facts ./configs               # the materialised fact pack
 uv run cassandra facts ./configs --json        # the same, whole, for checking against
+uv run cassandra check ./configs --coverage    # which checks had nothing to look at
 uv run cassandra rules                         # every check, and when each stays quiet
 uv run cassandra rules fhrp-divergence         # one rule in full
 uv run cassandra serve ./configs              # local web view, opened on that directory
@@ -98,6 +99,25 @@ Both are one renderer, so the file cannot drift from what the app shows. Both ar
 self-contained: no stylesheet, script, font or image is fetched, and there is no script tag at
 all — including the light/dark toggle, which is a checkbox and a stylesheet. A report you email
 to someone works on a laptop with no network, and anyone can read its source.
+
+### What a clean run does not mean
+
+`--coverage` answers the question a clean run raises. Forty-one checks, and on a corpus with no
+BGP, no BFD and no IGP timers, eighteen of them never had anything to examine — a rule that ran
+and found nothing and a rule that could not run at all look identical otherwise, and the second
+is the more common case on a real directory.
+
+```
+$ cassandra check ./configs --coverage
+23 of 41 checks had something to look at. 18 were inert:
+  bgp-remote-as-mismatch (no BGP process in these configs)
+  bfd-no-clients (no BFD timers in these configs)
+  ...
+```
+
+The verdict is measured, not declared: the fact pack is wrapped in a recorder, the rules are run
+against it, and a rule counts as inert only when it produced nothing, never reached the decision
+point its own source shows, and something it read was absent.
 
 ## What to distrust
 
@@ -143,7 +163,7 @@ cassandra/app.py       local web view (stdlib only)
 cassandra/visuals.py   figures drawn from facts
 cassandra/art.py       generated artwork, kept apart so it cannot be read as a result
 cassandra/cli.py       facts | check | report | rules | serve
-scenarios/             CI emulation validator + its configs
+scenarios/             two worked scenarios — EOS/VRRP and NX-OS/HSRP — and the CI validator
 docs/                  spec, conventions, decisions, rules, timing model, fidelity
 tests/                 the suite; run it with uv run pytest
 ```

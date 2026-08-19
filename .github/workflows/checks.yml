@@ -46,8 +46,21 @@ jobs:
           uv run cassandra check scenarios/site14_vrrp_lockstep/configs \
             2>/tmp/err.txt >/dev/null || true
           if grep -q "not understood" /tmp/err.txt; then cat /tmp/err.txt; exit 1; fi
+      - name: the second scenario finds its own defect
+        # A different dialect and a different protocol. If this one needs a
+        # change to either tier, the claim that only the parser is dialect-aware
+        # has stopped being true.
+        run: |
+          set -o pipefail
+          uv run cassandra check scenarios/hsrp_preempt_split/configs --explain \
+            | tee /tmp/hsrp.txt || true
+          grep -q "fhrp-divergence" /tmp/hsrp.txt
       - name: every rule explains itself
         run: uv run cassandra rules
+      - name: coverage reports on both corpora
+        run: |
+          uv run cassandra check examples/two-site --coverage || true
+          uv run cassandra check scenarios/hsrp_preempt_split/configs --coverage || true
       - name: the shareable report renders
         run: |
           uv run cassandra report scenarios/site14_vrrp_lockstep/configs \
