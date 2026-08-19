@@ -132,7 +132,7 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
 
 /* ---- hero ---- */
 .hero { width: 100%; max-width: 34rem; height: auto; display: block;
-  margin: .2rem 0 .4rem; }
+  margin: .2rem auto .4rem; }
 .hero text { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
   fill: var(--ink-3); }
 .hero .lane-label { fill: var(--ink-2); font-weight: 640; }
@@ -152,6 +152,53 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
   breathe 3.4s ease-in-out 1.9s infinite; }
 @keyframes split-in { to { opacity: 1; } }
 @keyframes breathe { 50% { opacity: .55; } }
+
+/* ---- the three shapes ---- */
+/* One card per family of finding, on the landing page. Each shape draws itself
+   once when it arrives and then holds, except the split, which keeps breathing
+   for the same reason it does in the hero: it is the part a first-time reader
+   has to notice. */
+.shapes { display: grid; gap: 1rem; margin: 1.5rem 0 .4rem;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+.shape { background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: 12px; padding: .9rem 1rem 1rem;
+  animation: rise .5s cubic-bezier(.2,.8,.3,1) both;
+  animation-delay: calc(var(--i) * 120ms);
+  transition: border-color .18s, transform .18s; }
+.shape:hover { transform: translateY(-2px); border-color: var(--ink-3); }
+.shape h3 { margin: .55rem 0 .3rem; font-size: .95rem; font-weight: 660;
+  letter-spacing: -.005em; }
+.shape p { margin: 0; color: var(--ink-2); font-size: .84rem; line-height: 1.55; }
+.vignette { width: 100%; height: auto; display: block; }
+.vignette text { font: 8.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+  fill: var(--ink-3); }
+.vignette .tick line { stroke: var(--ink-3); stroke-width: 1;
+  stroke-dasharray: 3 3; }
+.vignette .held { transform-box: fill-box; transform-origin: left center;
+  animation: grow .5s cubic-bezier(.2,.8,.3,1) both;
+  animation-delay: calc(var(--d) + var(--start, 0s)); }
+.vignette .count { fill: var(--ink-1); font-weight: 700; letter-spacing: .04em; }
+.vignette .down { fill: var(--s-critical); transform-box: fill-box;
+  transform-origin: left center;
+  animation: grow .45s cubic-bezier(.2,.8,.3,1) both; animation-delay: var(--d); }
+/* Near-black on the critical fill, in both themes, for the reason
+   `visuals.label_for` computes rather than assumes: white on #d03b3b is 4.0:1,
+   which eight-and-a-half-pixel text does not carry, and the dark candidate is
+   5.0:1 against the same fill. The dark theme's critical is lighter still, so
+   the same choice holds there. */
+.vignette .down + .count { fill: #0b0b0b; }
+.vignette .hello { fill: var(--series-1);
+  animation: pop .35s cubic-bezier(.2,1.3,.4,1) both; animation-delay: var(--d); }
+/* The missing hello is drawn as the hole it is — outlined, unfilled — rather
+   than left out. A gap in a row of six dots reads as a drawing that ran out of
+   room; a ring with nothing in it reads as one that did not arrive. */
+.vignette .hello.lost { fill: none; stroke: var(--ink-3); stroke-width: 1.4;
+  stroke-dasharray: 2.6 2.4; }
+.vignette .split-edge { fill: none; stroke: var(--s-critical); stroke-width: 1.4;
+  stroke-dasharray: 4 3; }
+.vignette .split { opacity: 0;
+  animation: split-in .55s ease-out 1.15s forwards,
+             breathe 3.4s ease-in-out 1.7s infinite; }
 
 /* ---- ring ---- */
 .ring { flex: none; }

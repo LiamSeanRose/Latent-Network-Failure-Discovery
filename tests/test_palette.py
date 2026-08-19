@@ -259,8 +259,28 @@ def test_a_band_label_is_readable_on_its_band(theme: str, index: int) -> None:
 
 def test_the_illustration_uses_the_same_colour_language_as_the_figures() -> None:
     """Teaching one set of colours in the hero and another in the timeline below
-    it would make the illustration actively misleading."""
-    svg = art.hero_svg()
-    assert visuals.SERIES[0][0] in svg
-    assert visuals.SERIES[1][0] in svg
-    assert visuals.SPLIT_COLOUR[0] in svg
+    it would make the illustration actively misleading.
+
+    The artwork names the palette's variables and the figures write the hex
+    values inline, because a figure's bands need a per-band light and dark value
+    and the artwork needs neither. So the agreement is checked where it actually
+    has to hold: the variable each theme declares against the value that theme's
+    figures use. Comparing the strings would have passed while the hero stayed
+    on the light blue in dark mode, which is the state this replaced.
+    """
+    svg = art.hero_svg() + "".join(drawing for _, _, drawing in art.shapes())
+    for name, pair in (
+        ("--series-1", visuals.SERIES[0]),
+        ("--series-2", visuals.SERIES[1]),
+        ("--s-critical", visuals.SPLIT_COLOUR),
+    ):
+        assert f"var({name})" in svg, f"the artwork does not use {name}"
+        for theme, palette, expected in (
+            ("light", LIGHT, pair[0]),
+            ("dark", {**LIGHT, **DARK}, pair[1]),
+        ):
+            assert name in palette, f"{theme} declares no {name}"
+            assert palette[name] == expected, (
+                f"{theme}: {name} is {palette[name]} and the figures draw "
+                f"the same slot in {expected}"
+            )

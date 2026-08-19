@@ -690,6 +690,28 @@ def _comparison_html(comparison: Comparison) -> str:
 _EXAMPLE: Final = Path(__file__).resolve().parents[1] / "examples" / "two-site"
 
 
+def _shapes_html() -> str:
+    """The three shapes, under the hero, for someone who has not run anything.
+
+    The landing page's job is to make one idea land: that a configuration can be
+    correct at rest and still contain a failure. The hero shows one instance of
+    that. These show that it is a family — there are three ways it happens, they
+    look different from each other, and every finding the tool emits is one of
+    the three.
+
+    Each card says it is an illustration by sitting under a caption that
+    describes a kind of defect rather than a device, and by naming no device at
+    all. Nothing here is read from a fact pack, and there is no fact pack to read
+    from on this page.
+    """
+    cards = "".join(
+        f'<div class="shape" style="--i:{index}">{svg}'
+        f"<h3>{html.escape(heading)}</h3><p>{html.escape(caption)}</p></div>"
+        for index, (heading, caption, svg) in enumerate(art.shapes())
+    )
+    return f'<div class="shapes">{cards}</div>'
+
+
 def _example_offer() -> str:
     """A way in for someone who has not got a directory of configs to hand.
 
@@ -801,7 +823,7 @@ def page(
             "back early, the other waits out a delay — and the hatched window "
             "is the stretch where they sit on different devices. Steady-state "
             "analysis never sees it, because at rest the configuration is "
-            "correct.</p>" + _example_offer() + "</div>"
+            "correct.</p>" + _shapes_html() + _example_offer() + "</div>"
         )
     elif not analysis.findings:
         sections.append(

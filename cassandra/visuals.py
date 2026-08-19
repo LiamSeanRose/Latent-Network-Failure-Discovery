@@ -33,7 +33,12 @@ from cassandra.timing.model import Event, EventKind, simulate
 # blindness, and each has to carry a readable label — which is what fixes the
 # light values darker than the dark ones rather than the other way round.
 SERIES: Final = (("#2873cf", "#3987e5"), ("#c94714", "#d95926"), ("#14835c", "#199e70"))
-SPLIT_COLOUR: Final = ("#d03b3b", "#d03b3b")  # status: critical
+# The split band, in the same two values the palette's `--s-critical` carries.
+# It was one value for both themes, which put the light theme's red on the dark
+# theme's surface: legible, but a shade darker than every other status the page
+# paints, and one shade off the artwork that illustrates the same thing. Sharing
+# the pair is what lets the illustration and the timeline stay one language.
+SPLIT_COLOUR: Final = ("#d03b3b", "#d85b5b")
 NO_MASTER: Final = ("#8c8b86", "#6f6e69")
 
 # The two candidates for text drawn on a band.

@@ -25,10 +25,18 @@ _COLOURS: Final = {
 }
 
 
+_SHAPES: Final = art.shapes()
+
+
 @pytest.mark.parametrize(
     "svg",
-    [art.mark_svg(), art.hero_svg(), art.severity_ring({"high": 2}, _COLOURS)],
-    ids=["mark", "hero", "ring"],
+    [
+        art.mark_svg(),
+        art.hero_svg(),
+        art.severity_ring({"high": 2}, _COLOURS),
+        *(svg for _, _, svg in _SHAPES),
+    ],
+    ids=["mark", "hero", "ring", *(heading for heading, _, _ in _SHAPES)],
 )
 def test_every_piece_is_well_formed_svg(svg: str) -> None:
     """It goes straight into a page with no sanitiser between here and there."""
@@ -38,8 +46,13 @@ def test_every_piece_is_well_formed_svg(svg: str) -> None:
 
 @pytest.mark.parametrize(
     "svg",
-    [art.mark_svg(), art.hero_svg(), art.severity_ring({"low": 1}, _COLOURS)],
-    ids=["mark", "hero", "ring"],
+    [
+        art.mark_svg(),
+        art.hero_svg(),
+        art.severity_ring({"low": 1}, _COLOURS),
+        *(svg for _, _, svg in _SHAPES),
+    ],
+    ids=["mark", "hero", "ring", *(heading for heading, _, _ in _SHAPES)],
 )
 def test_nothing_is_fetched(svg: str) -> None:
     for pattern in (r"https?://", r"<image", r"xlink:href", r"@import"):
@@ -124,3 +137,60 @@ def test_ring_labels_each_arc_for_a_pointer() -> None:
 def test_ring_escapes_its_labels() -> None:
     svg = art.severity_ring({"<b>": 1}, {})
     assert "<b>" not in svg.replace("&lt;b&gt;", "")
+
+
+# --------------------------------------------------------------------------
+# The three shapes
+# --------------------------------------------------------------------------
+
+
+def test_each_shape_describes_itself_to_a_screen_reader() -> None:
+    """The caption is the picture's meaning; the label is the picture.
+
+    They are deliberately not the same sentence. The caption says what kind of
+    defect this is and the label says what is drawn, because a reader who cannot
+    see the drawing still needs to know a row changed colour twice before the
+    sentence about oscillation means anything.
+    """
+    for heading, caption, svg in _SHAPES:
+        root = ET.fromstring(svg)
+        assert root.get("role") == "img", heading
+        label = " ".join((root.get("aria-label") or "").split())
+        assert len(label) > 40, f"{heading}: {label!r} does not describe a picture"
+        assert label != caption
+
+
+def test_no_shape_names_a_device() -> None:
+    """They are illustrations, and a hostname in one invites it to be read as a
+    result — which is the single thing this module exists to prevent."""
+    for heading, _, svg in _SHAPES:
+        assert not re.search(r"\b(dist|acc|agg|core|leaf|spine|edge)\d", svg), heading
+
+
+def test_the_shapes_use_the_same_colour_language_as_the_figures() -> None:
+    """An illustration whose blue is one shade off the timeline's blue teaches a
+    reader to distrust the match. Both sides resolve the same variables, which
+    also means both sides follow the theme rather than only one of them."""
+    joined = " ".join(svg for _, _, svg in _SHAPES) + art.hero_svg()
+    assert "var(--series-1)" in joined
+    assert "var(--series-2)" in joined
+    # Any literal hex would be a colour that does not move with the theme.
+    assert not re.search(r"#[0-9a-fA-F]{6}\b", joined)
+
+
+def test_no_shape_references_a_pattern_it_does_not_define() -> None:
+    """A `url(#id)` crossing between two <svg> roots is not resolved everywhere,
+    and when it is not the shape simply loses its hatching — silently, which is
+    the worst way for the part that names the defect to go missing."""
+    for heading, _, svg in _SHAPES:
+        used = set(re.findall(r"url\(#([\w-]+)\)", svg))
+        defined = set(re.findall(r'<pattern id="([\w-]+)"', svg))
+        assert used <= defined, f"{heading} references {used - defined} from elsewhere"
+
+
+def test_the_three_shapes_are_three_different_pictures() -> None:
+    """Three cards that say the same thing three times is worse than one card."""
+    drawings = [svg for _, _, svg in _SHAPES]
+    assert len(set(drawings)) == 3
+    headings = [heading for heading, _, _ in _SHAPES]
+    assert len(set(headings)) == 3
