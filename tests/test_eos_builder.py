@@ -330,3 +330,54 @@ def test_the_corpus_still_produces_no_timers_it_does_not_configure(
     pack, _ = built
     assert pack.timers.bfd == ()
     assert pack.timers.dampening == ()
+
+
+REUSED_GROUP: Final = """hostname {name}
+vlan 10,20
+interface Vlan10
+   ip address 10.10.0.{host}/24
+   vrrp 1 ipv4 10.10.0.1
+   vrrp 1 priority-level {priority}
+   vrrp 1 preempt
+interface Vlan20
+   ip address 10.20.0.{host}/24
+   vrrp 1 ipv4 10.20.0.1
+   vrrp 1 priority-level {priority}
+   vrrp 1 preempt
+"""
+
+
+def test_a_group_number_reused_on_another_subnet_is_a_separate_group(
+    tmp_path: Path,
+) -> None:
+    """Reusing a group number per VLAN is ordinary configuration.
+
+    Keying groups on number alone merged them, which threw away the second
+    subnet's virtual address and doubled the member list. That produced three
+    findings on a config with nothing wrong with it — a virtual address
+    "outside its own subnet" twice, and a bogus priority tie. False positives
+    are the fastest way to make the tool worth ignoring, so this is a
+    regression test rather than a unit test.
+    """
+    for name, host, priority in (("sw-a", 2, 110), ("sw-b", 3, 100)):
+        (tmp_path / f"{name}.cfg").write_text(
+            REUSED_GROUP.format(name=name, host=host, priority=priority)
+        )
+    pack, _ = build_fact_pack(tmp_path)
+
+    assert len(pack.fhrp_groups) == 2, "group 1 on two subnets must stay two groups"
+    by_virtual = {g.virtual_ipv4: g for g in pack.fhrp_groups}
+    assert set(by_virtual) == {"10.10.0.1", "10.20.0.1"}
+    for group in pack.fhrp_groups:
+        assert group.group_number == 1
+        assert len(group.members) == 2, "one member per device, not four"
+        assert {m.device for m in group.members} == {"sw-a", "sw-b"}
+
+    # Ids stay disambiguated so a finding can name which group it means.
+    assert len({g.id for g in pack.fhrp_groups}) == 2
+
+
+def test_an_unreused_group_number_keeps_the_short_id() -> None:
+    """The subnet only appears in an id when it is doing work."""
+    pack, _ = build_fact_pack(CORPUS)
+    assert {g.id for g in pack.fhrp_groups} == {"vrrp-14", "vrrp-24", "vrrp-34"}

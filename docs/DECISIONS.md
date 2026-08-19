@@ -54,6 +54,32 @@ operation, so there is no second route.
 
 ---
 
+## 2026-08-19 — FHRP groups are keyed by subnet, not by number alone
+
+**Context:** found by one of the parallel workers while writing rules, and confirmed by
+reproduction. `build_fact_pack` keyed groups on `(protocol, number)` across the whole
+directory. Reusing a group number per VLAN — ordinary configuration — merged them, discarded
+the second subnet's virtual address and doubled the member list.
+
+On a two-switch config with VRRP 1 on two VLANs, the tool reported three findings and all
+three were wrong: "virtual address outside its own subnet" twice, and a priority tie that did
+not exist. The config was correct.
+
+**Chosen:** key on `(protocol, number, subnet)`. Group ids keep the short `vrrp-14` form where
+a number is unique and become `vrrp-1@10.20.0.0/24` only where the number is reused, because
+the short form is what a person reading a finding expects and the subnet should only appear
+when it is load-bearing.
+
+**Why this one mattered more than its size suggests:** the entire argument against the prior
+art in §1.2 is precision — a tool that cries wolf gets ignored, and every false positive
+spends credibility the real findings need. This was the tool inventing defects in valid
+configuration, which is the worst failure it has.
+
+**Reversal:** the key is one tuple; reverting reintroduces the bug and the regression test
+catches it.
+
+---
+
 ## 2026-08-19 — Build the project in parallel; this should have been the default
 
 **Context:** the owner asked repeatedly why the work was not being done by several specialised

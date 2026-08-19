@@ -9,6 +9,7 @@ the wrong parser, and that is measurable rather than a guess.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
@@ -26,6 +27,7 @@ from cassandra.factpack.schema import (
     FhrpProtocol,
     FhrpTimers,
     IgpHelloTimers,
+    Interface,
     StaticFactPack,
     TimerInventory,
     TrackedObject,
@@ -57,8 +59,14 @@ def build_fact_pack(
     Returns the pack and, per device, the lines no parser accounted for.
     """
     devices: list[Device] = []
-    groups: dict[tuple[FhrpProtocol, int], list[FhrpMember]] = {}
-    virtuals: dict[tuple[FhrpProtocol, int], str | None] = {}
+    # Keyed by subnet as well as number. An FHRP group number is scoped to its
+    # segment: VRRP 1 on 10.10.0.0/24 and VRRP 1 on 10.20.0.0/24 are different
+    # groups, and merging them loses one virtual address and invents members,
+    # which produced false "virtual address outside its own subnet" findings on
+    # entirely valid configuration.
+    GroupKey = tuple[FhrpProtocol, int, str]
+    groups: dict[GroupKey, list[FhrpMember]] = {}
+    virtuals: dict[GroupKey, str | None] = {}
     fhrp_timers: list[FhrpTimers] = []
     # Dialects that parse them attach these; IOS and NX-OS return the base
     # ParsedDevice without them, hence getattr with a default below.
@@ -82,8 +90,13 @@ def build_fact_pack(
         # Tracked objects are defined at top level; join them to the groups that
         # reference them, or a decrement has nothing to watch.
         targets = {tracked.id: tracked.target for tracked in parsed.tracked}
-        for number, protocol, member, _interface, virtual in parsed.fhrp:
-            groups.setdefault((protocol, number), []).append(
+        subnets = {
+            interface.name: _first_network(interface)
+            for interface in parsed.device.interfaces
+        }
+        for number, protocol, member, interface_name, virtual in parsed.fhrp:
+            key: GroupKey = (protocol, number, subnets.get(interface_name) or "")
+            groups.setdefault(key, []).append(
                 FhrpMember(
                     device=member.device,
                     interface=member.interface,
@@ -101,7 +114,7 @@ def build_fact_pack(
                     ),
                 )
             )
-            virtuals.setdefault((protocol, number), virtual)
+            virtuals.setdefault(key, virtual)
 
     pack = StaticFactPack(
         meta=FactPackMeta(
@@ -115,14 +128,16 @@ def build_fact_pack(
         devices=tuple(devices),
         fhrp_groups=tuple(
             FhrpGroup(
-                id=f"{protocol.value}-{number}",
-                protocol=protocol,
-                group_number=number,
+                id=_group_id(key, groups),
+                protocol=key[0],
+                group_number=key[1],
                 members=tuple(members),
-                virtual_ipv4=virtuals[(protocol, number)],
+                virtual_ipv4=virtuals[key],
+                subnet=key[2] or None,
             )
-            for (protocol, number), members in sorted(
-                groups.items(), key=lambda item: (item[0][0].value, item[0][1])
+            for key, members in sorted(
+                groups.items(),
+                key=lambda item: (item[0][0].value, item[0][1], item[0][2]),
             )
         ),
         timers=TimerInventory(
@@ -133,3 +148,28 @@ def build_fact_pack(
         ),
     )
     return pack, unparsed
+
+
+def _first_network(interface: Interface) -> str | None:
+    for assignment in interface.addresses:
+        try:
+            return str(ipaddress.ip_interface(assignment.prefix).network)
+        except ValueError:
+            continue
+    return None
+
+
+def _group_id(
+    key: tuple[FhrpProtocol, int, str],
+    groups: dict[tuple[FhrpProtocol, int, str], list[FhrpMember]],
+) -> str:
+    """`vrrp-14`, or `vrrp-14@10.20.0.0/24` when that number is reused.
+
+    The short form is kept where it is unambiguous because it is what a person
+    reading a finding expects; the subnet is only added when it is load-bearing.
+    """
+    protocol, number, subnet = key
+    reused = sum(1 for other in groups if other[0] is protocol and other[1] == number)
+    if reused > 1 and subnet:
+        return f"{protocol.value}-{number}@{subnet}"
+    return f"{protocol.value}-{number}"
