@@ -1105,9 +1105,13 @@ def page(
     elif not config_dir:
         sections.append(
             '<div class="empty landing">'
-            "<p><strong>Enter a directory of device configs</strong> "
-            "(<code>.cfg</code> files) to analyse. Nothing leaves this machine "
-            "and nothing is written to the directory.</p>"
+            "<p><strong>Enter a directory of device configs.</strong> "
+            "It is walked, not globbed: nested directories are followed, and "
+            "anything that reads like a config is read whether it is called "
+            "<code>.cfg</code>, <code>.conf</code>, <code>.txt</code> or "
+            "nothing at all. Documents, inventories and binaries are skipped. "
+            "Nothing leaves this machine and nothing is written to the "
+            "directory.</p>"
             f"{art.hero_svg()}"
             '<p class="cap">Illustration, not a result. Two gateway groups '
             "follow the same link failure at different speeds — one preempts "
