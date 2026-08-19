@@ -57,6 +57,9 @@ from cassandra.timing.model import (
 )
 
 REGISTER: Final = Path(__file__).resolve().parents[1] / "docs" / "timing-model.md"
+SEQUENCES: Final = (
+    Path(__file__).resolve().parents[1] / "cassandra" / "timing" / "sequences.py"
+)
 MODEL: Final = Path(__file__).resolve().parents[1] / "cassandra" / "timing" / "model.py"
 UPLINK: Final = "Ethernet1"
 
@@ -715,6 +718,22 @@ TEST_FIELD: Final = re.compile(r"^\*\*Test:\*\* (.+)$", re.M)
 CITATION: Final = re.compile(r"(?<![A-Za-z0-9])A(\d+)(?![0-9])")
 
 
+def _defined_tests() -> set[str]:
+    """Every test function name in the suite.
+
+    The register started out pinning claims about `model.py`, whose tests all
+    live in this file. It now also carries claims about the enumeration in
+    `sequences.py`, whose tests do not — so the lookup is over the suite rather
+    than over this module's globals, or an entry would have to name a test in
+    the wrong file to satisfy the check.
+    """
+    return {
+        name
+        for path in Path(__file__).parent.glob("test_*.py")
+        for name in re.findall(r"^def (test_[a-z0-9_]+)", path.read_text(), re.M)
+    }
+
+
 def _entries() -> list[tuple[str, str]]:
     """Each register entry with the body that follows it."""
     text = REGISTER.read_text()
@@ -749,13 +768,22 @@ def test_the_register_and_the_code_agree() -> None:
                 f"{identifier} says it cannot be tested without saying why"
             )
             continue
+        defined_tests = _defined_tests()
         for name in re.findall(r"`([a-z0-9_]+)`", claim):
-            assert name in globals(), f"{identifier} names a test that does not exist"
+            assert name in defined_tests, (
+                f"{identifier} names a test that does not exist: {name}"
+            )
 
     defined = set(identifiers)
-    cited = {f"A{number}" for number in CITATION.findall(MODEL.read_text())}
+    # Both files that carry A-markers: the model states the claims, and the
+    # enumeration states which of them a sequence relies on.
+    cited = {
+        f"A{number}"
+        for source in (MODEL, SEQUENCES)
+        for number in CITATION.findall(source.read_text())
+    }
     assert cited <= defined, (
-        f"the model cites unregistered assumptions: {cited - defined}"
+        f"the code cites unregistered assumptions: {cited - defined}"
     )
 
 

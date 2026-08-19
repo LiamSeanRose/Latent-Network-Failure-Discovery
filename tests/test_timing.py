@@ -11,6 +11,7 @@ configurations that are symmetric, untracked, or otherwise fine.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 from pathlib import Path
 from typing import Final
@@ -355,3 +356,43 @@ def test_a_reload_claims_no_control_it_did_not_run() -> None:
             joined = " ".join(finding.evidence)
             assert "perturbation control does not apply" in joined
             assert "runs at" not in joined
+
+
+def test_the_reload_outlasts_the_longest_delay_it_can_find() -> None:
+    """A fixed five minutes is a claim about the reader's configuration.
+
+    Against a preempt delay longer than that, the device returns while a timer
+    is still running — which is the flap enumeration's job, not this one's, and
+    the sequence would silently be testing something other than what it says.
+    """
+    pack, _ = build_fact_pack(CORPUS)
+    assert sequences._reload_down_ms(pack) == sequences.MIN_RELOAD_DOWN_MS
+
+    stretched = dataclasses.replace(
+        pack,
+        timers=dataclasses.replace(
+            pack.timers,
+            fhrp=tuple(
+                dataclasses.replace(timer, preempt_delay_ms=600_000)
+                for timer in pack.timers.fhrp
+            ),
+        ),
+    )
+    assert sequences._reload_down_ms(stretched) > 600_000
+
+
+def test_a_pack_with_no_delays_still_gets_a_floor() -> None:
+    """The floor is what makes a reload mean 'nothing is racing' on a corpus
+    that configures no delays at all."""
+    pack, _ = build_fact_pack(CORPUS)
+    bare = dataclasses.replace(pack, timers=dataclasses.replace(pack.timers, fhrp=()))
+    assert sequences._reload_down_ms(bare) == sequences.MIN_RELOAD_DOWN_MS
+
+
+def test_the_trigger_states_the_duration_it_actually_used() -> None:
+    """A trigger line naming a number the run did not use is unreproducible."""
+    pack, _ = build_fact_pack(CORPUS)
+    seconds = sequences._reload_down_ms(pack) // 1000
+    for finding in sequences.analyse(pack):
+        if finding.trigger and finding.trigger.startswith("reload"):
+            assert f"({seconds}s down)" in finding.trigger

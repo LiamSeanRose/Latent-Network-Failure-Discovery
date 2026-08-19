@@ -541,6 +541,58 @@ sequence that leaves a group masterless for minutes should not be silent.
 
 ---
 
+### A25 — A reloading device drops every interface at once and returns with all of them
+
+**Model:** the reload sequence in `sequences.py` puts every interface on one device down at
+t=0 and back up together after `_reload_down_ms(pack)`. Nothing comes back before anything
+else, and nothing stays down.
+
+**Believed real behaviour:** interfaces on a rebooting device do go down together and do come
+back within seconds of each other, but not simultaneously — line cards initialise in order,
+SVIs come up when their VLAN has a member port, and a routed uplink may negotiate for several
+seconds after the switch port beneath it is up. The model's simultaneity is the simplification,
+and it is the one that matters here: **A11 records that a preempt delay may be measured from
+the member's own interface recovering or from the tracked uplink recovering, and a reload is
+precisely the case where those two happen at the same instant.** If real firmware brings the
+SVI up before the uplink, the delay starts earlier than modelled and the gateway lands
+somewhere else.
+
+**Confidence:** inferred, and the simultaneity is a *guess* by this document's definition —
+nobody measured the spread.
+
+**Falsified by:** reload one member of an FHRP pair while the other holds the group, with a
+preempt delay configured on the reloading member. Time from the console coming back to the
+group returning, and separately record when the SVI and the tracked uplink each reach `up`. If
+the delay is measured from the SVI and the SVI beats the uplink, the group returns earlier than
+this model predicts, and by the size of that gap.
+
+**Test:** `test_a_reload_is_enumerated_as_well_as_a_flap`, `test_the_reload_finds_a_pair_the_flap_cannot`
+
+---
+
+### A26 — A reload lasts long enough that nothing is still running when the device returns
+
+**Model:** the outage is `max(300s, longest preempt delay in the pack + 30s)`. It is derived
+from the fact pack rather than fixed, so a configuration with a ten-minute delay gets a longer
+reload.
+
+**Believed real behaviour:** a real reload is a minute or two on most platforms, not five, so
+the model overstates it. That is deliberate: the reload exists to show what the configuration
+does with no timer still running, and a device that returns mid-delay is the flap enumeration's
+subject rather than this one's. Overstating the outage makes the sequence test what it claims
+to test.
+
+**Confidence:** the floor is *guessed*; the derivation from the longest configured delay is
+this project's choice and is stated in `_reload_down_ms`.
+
+**Falsified by:** not a claim about firmware, so nothing in a lab falsifies it. What would
+invalidate it is a configuration where a *shorter* outage produces a divergence this one hides
+— check by re-running the enumeration at ninety seconds and comparing the pairs reported.
+
+**Test:** `test_the_reload_outlasts_the_longest_delay_it_can_find`, `test_a_pack_with_no_delays_still_gets_a_floor`
+
+---
+
 ## What the search does to its own results
 
 The entries above are what the model assumes. This is what the enumeration in

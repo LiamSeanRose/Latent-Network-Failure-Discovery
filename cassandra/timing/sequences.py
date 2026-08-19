@@ -103,14 +103,31 @@ def _flap_sequence(
     return events
 
 
-# How long a device is out while it restarts. Long enough that every preempt
-# delay in a plausible configuration has expired before it returns, which is the
-# point: a reload is the event that tells you what the configuration does when
-# nothing is racing.
-RELOAD_DOWN_MS: Final = 300_000
+# How long a device is out while it restarts, when the configuration says
+# nothing that bears on it. A reload is meant to be the event that shows what
+# the configuration does with nothing racing, so it has to outlast every timer
+# that could still be running when the device returns.
+MIN_RELOAD_DOWN_MS: Final = 300_000
 
 
-def _reload_sequence(device: str, interfaces: list[str]) -> list[Event]:
+def _reload_down_ms(pack: StaticFactPack) -> int:
+    """How long to hold a device down, derived rather than assumed.
+
+    A fixed five minutes is a claim about the reader's configuration, not about
+    the model: against a ten-minute preempt delay the sequence silently tests
+    something other than what it says it tests — a device returning while a
+    timer is still running, which is the flap enumeration's job. So the floor is
+    five minutes and the actual figure is whatever outlasts the longest delay in
+    this pack, the same way `_candidate_intervals` takes its up-intervals from
+    the delays it finds rather than from a list. Registered as A26.
+    """
+    longest = max(
+        (timer.preempt_delay_ms or 0 for timer in pack.timers.fhrp), default=0
+    )
+    return max(MIN_RELOAD_DOWN_MS, longest + SETTLE_MS)
+
+
+def _reload_sequence(device: str, interfaces: list[str], down_ms: int) -> list[Event]:
     """Everything on one device down together, then back together.
 
     A reload is the commonest real event after a link flap and the model can
@@ -119,6 +136,8 @@ def _reload_sequence(device: str, interfaces: list[str]) -> list[Event]:
     a preempt delay is measured from a different starting point: the member's
     own FHRP interface comes back at the same instant as the uplink it tracks,
     and which of the two the delay follows decides where the gateway lands.
+    That is A25, and it is the same ambiguity A11 records between the two vendor
+    readings of preempt delay — a reload is where they are hardest to tell apart.
     """
     events: list[Event] = []
     for interface in interfaces:
@@ -133,7 +152,7 @@ def _reload_sequence(device: str, interfaces: list[str]) -> list[Event]:
     for interface in interfaces:
         events.append(
             Event(
-                at_ms=RELOAD_DOWN_MS,
+                at_ms=down_ms,
                 kind=EventKind.LINK_UP,
                 device=device,
                 interface=interface,
@@ -229,6 +248,13 @@ def _divergence(
     either side of the one that produced it, and silent if the same split is
     there with no events at all. Those two controls are what separate a property
     of the configuration from an artifact of the model's sampling grid.
+
+    Two event classes reach this: a link flapping, and a device reloading. The
+    reload is enumerated last and reports only pairs a flap cannot reach — a
+    group that tracks nothing is untouched by a flap and moved by a reload, and
+    only then does a difference in preempt delay between it and its neighbour
+    show. A reload carries no interval, so the perturbation control does not
+    apply to one and its evidence says so.
     """
     return Finding(
         rule="fhrp-divergence",
@@ -481,12 +507,13 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
     for device in sorted(on_device):
         group_ids = on_device[device]
         control = _control_timeline(pack, group_ids)
-        events = tuple(_reload_sequence(device, interfaces_of.get(device, [])))
+        down_ms = _reload_down_ms(pack)
+        events = tuple(_reload_sequence(device, interfaces_of.get(device, []), down_ms))
         if not events:
             continue
-        horizon = RELOAD_DOWN_MS + SETTLE_MS + 120_000
+        horizon = down_ms + SETTLE_MS + 120_000
         timeline = simulate(pack, list(events), until_ms=horizon, only=group_ids)
-        trigger = f"reload {device} ({RELOAD_DOWN_MS // 1000}s down)"
+        trigger = f"reload {device} ({down_ms // 1000}s down)"
         for i, first in enumerate(group_ids):
             for second in group_ids[i + 1 :]:
                 span = _longest_divergence_ms(timeline, first, second)
