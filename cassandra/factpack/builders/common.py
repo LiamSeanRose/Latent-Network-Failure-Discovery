@@ -100,6 +100,56 @@ def stanzas(text: str) -> list[Stanza]:
     return out
 
 
+@dataclass(slots=True)
+class Block:
+    """A config line plus the lines indented beneath it, indentation intact.
+
+    The difference from `Stanza` is that `body` is not stripped, so a block can
+    be split again at the next level down. `line` and `body_lines` number the
+    header and each body line from one exactly as `Stanza` does, and they
+    survive that second split, so a construct four levels into a file still
+    knows which line it was written on.
+    """
+
+    header: str
+    body: list[str] = field(default_factory=list)
+    line: int = 0
+    body_lines: list[int] = field(default_factory=list)
+
+
+def blocks(lines: list[str], numbers: list[int] | None = None) -> list[Block]:
+    """Split `lines` at their shallowest indentation into headers and bodies.
+
+    `Stanza` splits a file once, at column zero, and strips what it finds; that
+    is enough for the dialects whose sub-commands are one-liners. It is not
+    enough for the dialects where indentation is structure — NX-OS nests an
+    `hsrp <n>` block under an interface, and IOS-XR nests `interface` under
+    `router vrrp`, `address-family` under that and the group under that again.
+    Those need a splitter that can be applied to its own output, which is this
+    one: it takes the shallowest indentation present as the header level and
+    hands back each body still indented, ready to be split again.
+
+    `numbers` is where each line sits in the file, and a nested split passes the
+    enclosing block's `body_lines` so line citations survive the descent.
+    Omitted, the lines are numbered from one.
+    """
+    out: list[Block] = []
+    base: int | None = None
+    counted = numbers if numbers is not None else list(range(1, len(lines) + 1))
+    for number, raw in zip(counted, lines, strict=True):
+        if not raw.strip():
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if base is None:
+            base = indent
+        if indent > base and out:
+            out[-1].body.append(raw)
+            out[-1].body_lines.append(number)
+            continue
+        out.append(Block(header=raw.strip(), line=number))
+    return out
+
+
 # 802.1Q: 1 to 4094. Zero is the priority-tag id and 4095 is reserved, so
 # neither can be a VLAN a port belongs to, and nothing exists above 4094.
 MIN_VLAN_ID: Final = 1

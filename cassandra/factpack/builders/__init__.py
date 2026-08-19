@@ -27,7 +27,7 @@ from typing import Final
 # the banner stripper, so binding names here would make the two modules'
 # import order load-bearing.
 from cassandra.factpack import discovery, topology
-from cassandra.factpack.builders import eos, ios, nxos
+from cassandra.factpack.builders import eos, ios, iosxr, nxos
 from cassandra.factpack.builders.common import ParsedDevice, assemble_fhrp_groups
 from cassandra.factpack.schema import (
     BfdTimers,
@@ -48,7 +48,7 @@ from cassandra.factpack.schema import (
 )
 
 SCHEMA_VERSION: Final = 1
-DIALECTS: Final[tuple[ModuleType, ...]] = (ios, eos, nxos)
+DIALECTS: Final[tuple[ModuleType, ...]] = (ios, eos, nxos, iosxr)
 
 # A parsed file with no hostname of its own and fewer than two interfaces has
 # told us nothing: it names no device and forms no adjacency, so it can only
@@ -62,14 +62,25 @@ MIN_INTERFACES_WITHOUT_HOSTNAME: Final = 2
 
 def parse(text: str, *, device_id: str | None = None) -> ParsedDevice:
     """Parse with the best-fitting dialect."""
-    # NX-OS is checked first: its `hsrp <n>` block is distinctive, whereas an
+    # IOS-XR is checked first, ahead of the marker it would otherwise lose to.
+    # NX-OS is recognised by an indented `hsrp <n>` header, and IOS-XR writes one
+    # of those too — four levels inside `router hsrp` rather than inside an
+    # interface, which a search for the line cannot tell apart. Its own markers
+    # are words no other dialect writes at all (`router vrrp` at column zero,
+    # `ipv4 address`, `Bundle-Ether`), so testing them first costs the other
+    # three nothing.
+    if iosxr.looks_like_iosxr(text):
+        return iosxr.parse_device(text, device_id=device_id)
+    # NX-OS is checked next: its `hsrp <n>` block is distinctive, whereas an
     # NX-OS config could otherwise be mistaken for EOS on addressing alone.
     if nxos.looks_like_nxos(text):
         return nxos.parse_device(text, device_id=device_id)
     if ios.looks_like_ios(text):
         return ios.parse_device(text, device_id=device_id)
 
-    # No decisive marker: run both and keep whichever explains more of the file.
+    # No decisive marker: run them all and keep whichever explains more of the
+    # file. `DIALECTS` is ordered oldest first and `min` keeps the first of a
+    # tie, so a dialect added later only wins where it is strictly better.
     candidates = [module.parse_device(text, device_id=device_id) for module in DIALECTS]
     return min(candidates, key=lambda parsed: len(parsed.unparsed_lines))
 
