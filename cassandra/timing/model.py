@@ -26,6 +26,7 @@ behaves the way the register says.
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
@@ -197,9 +198,36 @@ def _preempt_delays(pack: StaticFactPack) -> dict[tuple[str, str, FhrpProtocol],
     }
 
 
+# The two whole-pack lookups below are rebuilt for every group of every
+# simulation, and the sequence enumeration runs one simulation per device. That
+# made analysing a site quadratic in the size of the collection it happened to be
+# filed in — an eight-device site cost eight times more inside a fifty-site
+# directory than on its own.
+#
+# Keyed on identity, not on the fact pack id: that id is content-addressed only
+# when `build_fact_pack` produced it, and a hand-built pack can carry any string
+# at all. The pack is held in the value and compared with `is`, so a recycled id
+# cannot produce a wrong answer. Bounded to two entries, which is also the bound
+# on how many packs this keeps alive.
+type _Delays = dict[tuple[str, str, FhrpProtocol], int]
+type _Addresses = dict[tuple[str, str], int]
+
+_LOOKUPS: dict[int, tuple[StaticFactPack, _Delays, _Addresses]] = {}
+
+
+def _cached_lookups(pack: StaticFactPack) -> tuple[_Delays, _Addresses]:
+    cached = _LOOKUPS.get(id(pack))
+    if cached is not None and cached[0] is pack:
+        return cached[1], cached[2]
+    if len(_LOOKUPS) >= 2:
+        _LOOKUPS.clear()
+    delays, addresses = _preempt_delays(pack), _primary_ipv4s(pack)
+    _LOOKUPS[id(pack)] = (pack, delays, addresses)
+    return delays, addresses
+
+
 def _members(group: FhrpGroup, pack: StaticFactPack) -> list[_MemberState]:
-    delays = _preempt_delays(pack)
-    addresses = _primary_ipv4s(pack)
+    delays, addresses = _cached_lookups(pack)
     return [
         _MemberState(
             device=member.device,
@@ -224,7 +252,11 @@ def _members(group: FhrpGroup, pack: StaticFactPack) -> list[_MemberState]:
 
 
 def simulate(
-    pack: StaticFactPack, events: list[Event], *, until_ms: int
+    pack: StaticFactPack,
+    events: list[Event],
+    *,
+    until_ms: int,
+    only: Collection[str] | None = None,
 ) -> list[Placement]:
     """Advance every FHRP group through the events and sample the placement.
 
@@ -236,10 +268,17 @@ def simulate(
     A20: groups are advanced independently. Two groups on the same pair share
     fate only through the interfaces their members track; nothing else couples
     them — not a shared virtual MAC, not a common VLAN, not the peer link.
+
+    `only` narrows the simulation to the named groups. A20 is what makes that
+    safe: the result for a named group is identical either way, and the rest
+    contribute nothing but time. Asking about one site's groups on a fifty-site
+    pack should not cost the other forty-nine.
     """
+    wanted = None if only is None else set(only)
     states = {
         group.id: _GroupState(members=_members(group, pack))
         for group in pack.fhrp_groups
+        if wanted is None or group.id in wanted
     }
 
     # A14: settle the initial election before anything happens. No preempt delay

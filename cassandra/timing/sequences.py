@@ -184,6 +184,17 @@ def _oscillation(
     )
 
 
+def _groups_by_device(pack: StaticFactPack) -> dict[str, list[str]]:
+    """Group ids each device is a member of, in fact pack order."""
+    index: dict[str, list[str]] = {}
+    for group in pack.fhrp_groups:
+        for member in group.members:
+            ids = index.setdefault(member.device, [])
+            if group.id not in ids:
+                ids.append(group.id)
+    return index
+
+
 def analyse(pack: StaticFactPack) -> list[Finding]:
     """Every finding the enumeration produces, worst first.
 
@@ -192,19 +203,26 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
     """
     findings: list[Finding] = []
     seen: set[tuple[str, str, str]] = set()
-    group_ids = [group.id for group in pack.fhrp_groups]
     labels = {
         group.id: f"{group.protocol.value.upper()} {group.group_number}"
         for group in pack.fhrp_groups
     }
+    on_device = _groups_by_device(pack)
 
     for device, interfaces in sorted(_tracked_interfaces(pack).items()):
+        # Only groups this device is a member of can move when this device's
+        # interface flaps. Comparing every group in the pack against every other
+        # one is quadratic in a number that is the whole site, and the pairs it
+        # adds are between groups that cannot see each other's events.
+        group_ids = on_device.get(device, [])
+        if len(group_ids) < 1:
+            continue
         for interface in sorted(interfaces):
             for up_ms in _candidate_intervals(pack):
                 for flaps in range(1, MAX_FLAPS + 1):
                     events = _flap_sequence(device, interface, flaps=flaps, up_ms=up_ms)
                     horizon = events[-1].at_ms + SETTLE_MS + 60_000
-                    timeline = simulate(pack, events, until_ms=horizon)
+                    timeline = simulate(pack, events, until_ms=horizon, only=group_ids)
                     trigger = (
                         f"flap {device}:{interface} {flaps}x "
                         f"({DOWN_MS // 1000}s down, {up_ms // 1000}s up)"

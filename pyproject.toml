@@ -87,3 +87,8 @@ known-first-party = ["cassandra"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+markers = [
+    # Timing measurements. They read a wall clock, so they belong to the suite
+    # but are worth being able to skip on a machine under load.
+    "slow: measures elapsed time rather than asserting on a value",
+]
