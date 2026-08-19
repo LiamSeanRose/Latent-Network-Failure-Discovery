@@ -99,9 +99,19 @@ fixed and all with a test that fails without the fix:
 
 Carried over, owner-only, not blocking any phase:
 
-- [ ] Cosmetic only: two superseded branch names still exist on the remote. Both now point at
-      `main`, so there is nothing stale in either — the remaining work is tidying the branch
-      list and setting `main` as default, neither of which can be done from a session.
+- [ ] Owner action: two superseded branches still exist on the remote and both are named after
+      the build tooling rather than after any work. Neither carries anything: both point at
+      `main`, so nothing is lost by removing them. The names themselves are the reason to.
+      Deleting a ref from a session returns `HTTP 403` — verified again on 2026-08-19 by
+      attempting it — so this needs a clone with push rights, or the branch list in the web
+      interface:
+
+      ```sh
+      git push origin --delete claude/cassandra-project-init-b18ddl
+      git push origin --delete tmp-delete-probe
+      ```
+
+      `main` should be the default branch, which is also a setting rather than a command.
 
 - [ ] Owner action, one command: fifty commits between `9b5f23f` and `e44e83b` were authored
       under the build tooling's own identity rather than the repository owner's. The working
