@@ -74,7 +74,7 @@ def test_timing_findings_carry_their_caveat(base_url: str) -> None:
 def test_json_endpoint_matches_the_page(base_url: str) -> None:
     status, body = get(f"{base_url}/findings.json?dir={quote(str(CORPUS))}")
     assert status == 200
-    payload = json.loads(body)
+    payload = json.loads(body)["findings"]
     assert payload
     assert {f["rule"] for f in payload} >= {"fhrp-divergence"}
     for finding in payload:
@@ -154,7 +154,7 @@ def view(base_url: str, config_dir: Path, query: str = "", path: str = "/") -> s
 def test_the_mixed_fixture_spans_both_tiers(base_url: str, mixed: Path) -> None:
     """Guards the fixture itself: the filter tests below are meaningless if it
     ever stops containing both tiers."""
-    payload = json.loads(view(base_url, mixed, path="/findings.json"))
+    payload = json.loads(view(base_url, mixed, path="/findings.json"))["findings"]
     assert {f["tier"] for f in payload} == {"facts", "timing"}
     assert {f["device"] for f in payload} == {"agg-a", "edge1"}
 
@@ -217,11 +217,15 @@ def test_filters_survive_in_the_json_link_and_the_form(
 
 
 def test_json_endpoint_honours_the_same_filters(base_url: str, mixed: Path) -> None:
-    high = json.loads(view(base_url, mixed, "severity=high", "/findings.json"))
+    high = json.loads(view(base_url, mixed, "severity=high", "/findings.json"))[
+        "findings"
+    ]
     assert high
     assert {f["severity"] for f in high} == {"high"}
 
-    facts = json.loads(view(base_url, mixed, "tier=facts", "/findings.json"))
+    facts = json.loads(view(base_url, mixed, "tier=facts", "/findings.json"))[
+        "findings"
+    ]
     assert {f["tier"] for f in facts} == {"facts"}
     # Containment, not equality: this test is about filtering, and pinning the
     # exact rule set would break every time the FACTS registry grows.
@@ -229,7 +233,7 @@ def test_json_endpoint_honours_the_same_filters(base_url: str, mixed: Path) -> N
 
     both = json.loads(
         view(base_url, mixed, "severity=high&tier=facts", "/findings.json")
-    )
+    )["findings"]
     assert [f["rule"] for f in both] == []
 
 
@@ -253,7 +257,7 @@ def test_a_filter_matching_nothing_says_so_and_links_back(
     # Find a severity+tier combination that genuinely has no findings, rather
     # than assuming one exists. Every severity may be populated as rules grow,
     # but a full cross-product rarely is.
-    findings = json.loads(view(base_url, mixed, path="/findings.json"))
+    findings = json.loads(view(base_url, mixed, path="/findings.json"))["findings"]
     assert findings, "fixture must produce findings for this test to mean anything"
     present = {(f["severity"], f["tier"]) for f in findings}
     severity, tier = next(
@@ -623,3 +627,23 @@ def test_no_baseline_means_no_comparison_on_the_page(
     body = view(base_url, mixed)
     assert "Compared with a baseline" not in body
     assert 'class="tag state' not in body
+
+
+def test_the_endpoint_and_the_command_line_answer_in_one_shape(
+    base_url: str, mixed: Path
+) -> None:
+    """Two shapes for one question is how a consumer ends up handling one."""
+    document = json.loads(view(base_url, mixed, path="/findings.json"))
+    assert sorted(document) == ["config_digest", "counts", "fact_pack_id", "findings"]
+    assert document["config_digest"] == analyse(mixed).digest
+    assert document["counts"]
+
+
+def test_the_endpoint_reports_the_digest_of_what_it_read(
+    base_url: str, mixed: Path
+) -> None:
+    """A result that cannot be tied to the configs that produced it is a result
+    nobody can act on later."""
+    document = json.loads(view(base_url, mixed, "severity=high", "/findings.json"))
+    assert document["config_digest"], "filtered output still describes a real pack"
+    assert document["fact_pack_id"]

@@ -162,6 +162,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     app = sub.add_parser("serve", help="open the local web view")
+    app.add_argument(
+        "config_dir",
+        type=Path,
+        nargs="?",
+        help="open on this directory instead of an empty page",
+    )
     app.add_argument("--port", type=int, default=8765)
     app.add_argument("--host", default="127.0.0.1")
 
@@ -274,7 +280,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "serve":
-        serve(host=args.host, port=args.port)
+        if args.config_dir is not None and not args.config_dir.is_dir():
+            print(f"not a directory: {args.config_dir}", file=sys.stderr)
+            return 2
+        serve(host=args.host, port=args.port, config_dir=args.config_dir)
         return 0
 
     return 2

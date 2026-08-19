@@ -218,3 +218,29 @@ def test_report_since_refuses_a_baseline_it_cannot_read(
     assert main(["report", str(CORPUS), "-o", str(out), "--since", "/nope.json"]) == 2
     assert "nope.json" in capsys.readouterr().err
     assert not out.exists(), "a report nobody asked for should not be written"
+
+
+def test_serve_refuses_a_directory_that_is_not_there(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Failing at the point of the mistake beats binding a socket and waiting for
+    someone to notice the page is empty."""
+    assert main(["serve", "/definitely/not/here"]) == 2
+    assert "not a directory" in capsys.readouterr().err
+
+
+def test_serve_prints_a_link_that_already_has_the_directory_in_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The directory is a query string like any other, so the running server
+    needs to know nothing about it — the link carries it."""
+    started: dict[str, object] = {}
+
+    def fake_serve(**kwargs: object) -> None:
+        started.update(kwargs)
+        print(f"cassandra: http://127.0.0.1:8765/?dir={kwargs['config_dir']}")
+
+    monkeypatch.setattr("cassandra.cli.serve", fake_serve)
+    assert main(["serve", str(CORPUS)]) == 0
+    assert started["config_dir"] == CORPUS
+    assert str(CORPUS) in capsys.readouterr().out

@@ -209,7 +209,11 @@ def timeline_svg(pack: StaticFactPack, finding: Finding) -> str:
     return "".join(parts)
 
 
-def topology_svg(pack: StaticFactPack, link: Callable[[str], str] | None = None) -> str:
+def topology_svg(
+    pack: StaticFactPack,
+    link: Callable[[str], str] | None = None,
+    marks: dict[str, str] | None = None,
+) -> str:
     """Devices, and the subnets they share.
 
     Uses derived L3 adjacency when the fact pack has it and falls back to
@@ -219,6 +223,10 @@ def topology_svg(pack: StaticFactPack, link: Callable[[str], str] | None = None)
     device. The map is the only place on the page that shows a device someone
     has no finding for, so being able to click one is the difference between a
     picture and a control.
+
+    `marks` maps a device to the severity of its worst finding, drawn as a dot
+    on its node. It turns the map from a diagram of the network into a summary
+    of the result — where the trouble is, before reading a word of it.
     """
     edges = _edges(pack)
     devices = sorted({d.id for d in pack.devices})
@@ -292,9 +300,16 @@ def topology_svg(pack: StaticFactPack, link: Callable[[str], str] | None = None)
             )
             + "</title>"
         )
+        severity = (marks or {}).get(device, "")
+        badge = (
+            ""
+            if not severity
+            else f'<circle class="mark {html.escape(severity)}" '
+            f'cx="{x + 8:.1f}" cy="{y - 8:.1f}" r="4.5"/>'
+        )
         node = (
             f'<g class="node{isolated}" style="--i:{index}">'
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="9"/>{title}'
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="9"/>{title}{badge}'
             f'<text x="{x:.1f}" y="{y - 16:.1f}" text-anchor="middle">'
             f"{html.escape(device)}</text>"
             + (

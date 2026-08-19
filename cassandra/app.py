@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from cassandra import art, baseline, visuals
+from cassandra import art, baseline, report, visuals
 from cassandra.catalogue import RuleDoc, catalogue
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
@@ -321,6 +321,13 @@ svg.topology .node circle { fill: var(--surface-1); stroke: var(--accent);
   animation-delay: calc(.35s + var(--i) * .08s); }
 svg.topology .node text { fill: var(--ink-1); font-weight: 640; font-size: 11px; }
 svg.topology .node.l2only circle { stroke: var(--ink-3); stroke-dasharray: 3 3; }
+svg.topology .node circle.mark { stroke: var(--surface-1); stroke-width: 1.5;
+  animation: pop .4s cubic-bezier(.2,1.3,.4,1) both;
+  animation-delay: calc(.55s + var(--i) * .08s); }
+svg.topology .node circle.mark.high { fill: var(--s-critical); }
+svg.topology .node circle.mark.medium { fill: var(--s-serious); }
+svg.topology .node circle.mark.low { fill: var(--s-warning); }
+svg.topology .node circle.mark.info { fill: var(--series-1); }
 svg.topology .node .hint { fill: var(--ink-3); font-weight: 500; font-size: 9px; }
 @keyframes pop { from { transform: scale(0); } to { transform: scale(1); } }
 svg.topology .node { transform-box: fill-box; transform-origin: center; }
@@ -1186,6 +1193,11 @@ def page(
     topology = ""
     if analysis.pack is not None:
         with_findings = {f.device for f in analysis.findings}
+        # Findings arrive ranked, so the first one seen for a device is its
+        # worst: a device with one high and three lows is marked high.
+        worst_by_device: dict[str, str] = {}
+        for finding in analysis.findings:
+            worst_by_device.setdefault(finding.device, finding.severity.value)
         drawn = visuals.topology_svg(
             analysis.pack,
             lambda device: (
@@ -1197,12 +1209,14 @@ def page(
                 if device in with_findings
                 else ""
             ),
+            worst_by_device,
         )
         if drawn:
             topology = (
                 '<div class="figure"><h2>adjacency</h2>'
-                '<p class="cap">Devices, and the subnets they share. A device '
-                "with findings is a link to them.</p>"
+                '<p class="cap">Devices, and the subnets they share. A marked '
+                "device has findings, coloured by the worst of them, and is a "
+                "link to them.</p>"
                 f"{drawn}</div>"
             )
 
@@ -1291,23 +1305,32 @@ def _shell(body: str, *, pulse: str = "pulse") -> str:
 
 
 def as_json(findings: list[Finding]) -> str:
-    return json.dumps(
-        [
-            {
-                "rule": finding.rule,
-                "tier": finding.tier.value,
-                "severity": finding.severity.value,
-                "device": finding.device,
-                "title": finding.title,
-                "detail": finding.detail,
-                "trigger": finding.trigger,
-                "remedy": finding.remedy,
-                "evidence": list(finding.evidence),
-            }
-            for finding in findings
-        ],
-        indent=2,
-    )
+    """The findings alone, without the pack identity.
+
+    Kept because it is the shape callers already read. `/findings.json` sends
+    the full document from `report.as_json`, which carries the digest of the
+    configs the findings came from — the same answer the CLI's `--json` gives,
+    because two shapes for one question is how a consumer ends up handling only
+    one of them.
+    """
+    return json.dumps(_finding_dicts(findings), indent=2)
+
+
+def _finding_dicts(findings: list[Finding]) -> list[dict[str, object]]:
+    return [
+        {
+            "rule": finding.rule,
+            "tier": finding.tier.value,
+            "severity": finding.severity.value,
+            "device": finding.device,
+            "title": finding.title,
+            "detail": finding.detail,
+            "trigger": finding.trigger,
+            "remedy": finding.remedy,
+            "evidence": list(finding.evidence),
+        }
+        for finding in findings
+    ]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1353,7 +1376,14 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/findings.json":
             visible = [f for f in analysis.findings if filters.matches(f)]
-            self._respond(as_json(visible), "application/json")
+            self._respond(
+                report.as_json(
+                    visible,
+                    pack_id=analysis.fact_pack_id,
+                    digest=analysis.digest,
+                ),
+                "application/json",
+            )
             return
 
         if parsed.path != "/":
@@ -1388,9 +1418,15 @@ class Handler(BaseHTTPRequestHandler):
         """Quiet by default; a local tool should not narrate every request."""
 
 
-def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(
+    host: str = "127.0.0.1", port: int = 8765, config_dir: Path | None = None
+) -> None:
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"cassandra: http://{host}:{port}  (ctrl-c to stop)")
+    # A directory given on the command line becomes the link that is printed,
+    # rather than something to paste into the page. It is a query string like
+    # any other, so the running server needs to know nothing about it.
+    query = f"/?{urlencode({'dir': str(config_dir)})}" if config_dir else ""
+    print(f"cassandra: http://{host}:{port}{query}  (ctrl-c to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

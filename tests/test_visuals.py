@@ -116,3 +116,27 @@ def test_sparkbar_widths_sum_to_a_hundred_percent() -> None:
 
 def test_sparkbar_is_empty_with_no_findings() -> None:
     assert visuals.sparkbar({"high": 0}, {"high": "red"}) == ""
+
+
+def test_the_map_marks_devices_by_their_worst_finding() -> None:
+    """A diagram of the network is less useful than a summary of the result.
+
+    The mark is what makes the map answer 'where is the trouble' before anyone
+    reads a finding.
+    """
+    pack = corpus_pack()
+    svg = visuals.topology_svg(pack, marks={"agg-a": "high", "core1": "low"})
+    assert 'class="mark high"' in svg
+    assert 'class="mark low"' in svg
+    assert svg.count('class="mark') == 2, "unmarked devices must stay unmarked"
+
+
+def test_an_unmarked_map_draws_no_marks() -> None:
+    pack = corpus_pack()
+    assert 'class="mark' not in visuals.topology_svg(pack)
+
+
+def test_marks_are_escaped_like_everything_else() -> None:
+    pack = corpus_pack()
+    svg = visuals.topology_svg(pack, marks={"agg-a": '"><script>'})
+    assert "<script>" not in svg
