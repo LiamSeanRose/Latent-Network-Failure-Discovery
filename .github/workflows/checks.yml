@@ -55,8 +55,43 @@ jobs:
           uv run cassandra check scenarios/hsrp_preempt_split/configs --explain \
             | tee /tmp/hsrp.txt || true
           grep -q "fhrp-divergence" /tmp/hsrp.txt
+      - name: the fourth dialect is read completely
+        # IOS-XR nests a first-hop redundancy group four levels down in a
+        # top-level block rather than inside the interface, so this is the
+        # corpus that would break first if the shared stanza reader lost the
+        # ability to split its own output.
+        run: |
+          set -o pipefail
+          uv run cassandra check examples/xr-metro --explain \
+            2>/tmp/xr-err.txt | tee /tmp/xr.txt || true
+          grep -q "fhrp-oscillation" /tmp/xr.txt
+          if grep -q "not understood" /tmp/xr-err.txt; then cat /tmp/xr-err.txt; exit 1; fi
       - name: every rule explains itself
         run: uv run cassandra rules
+      - name: the machine formats are documents a machine can read
+        # Both are for a pipeline that never sees a person, so a malformed one
+        # fails silently where it is used. Parsing them here is the only place
+        # anything would notice.
+        run: |
+          uv run cassandra check examples/two-site --format sarif > /tmp/out.sarif || true
+          python -c "import json,sys; d=json.load(open('/tmp/out.sarif')); \
+            assert d['version'] == '2.1.0'; \
+            assert d['runs'][0]['tool']['driver']['rules']; \
+            assert d['runs'][0]['results']"
+          uv run cassandra check examples/two-site --format junit > /tmp/out.xml || true
+          python -c "import xml.etree.ElementTree as ET; \
+            r=ET.parse('/tmp/out.xml').getroot(); \
+            assert r.tag == 'testsuites'; \
+            assert int(r.get('tests')) > 0; \
+            assert int(r.get('skipped')) > 0"
+      - name: the same run twice is the same bytes
+        # A diffable artifact is worth more than a precise one, and a timestamp
+        # or a run id slipping into either format would be invisible until
+        # somebody tried to diff two of them.
+        run: |
+          uv run cassandra check examples/two-site --format sarif > /tmp/a.sarif || true
+          uv run cassandra check examples/two-site --format sarif > /tmp/b.sarif || true
+          diff /tmp/a.sarif /tmp/b.sarif
       - name: coverage reports on both corpora
         run: |
           uv run cassandra check examples/two-site --coverage || true
