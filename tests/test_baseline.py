@@ -446,3 +446,26 @@ def test_an_unwritable_baseline_path_is_an_error_not_a_traceback(
     with pytest.raises(BaselineError) as raised:
         save([BFD_ONE], pack_of("agg-a"), blocked / "baseline.json")
     assert "cannot write baseline" in str(raised.value)
+
+
+def test_a_diff_cites_the_same_source_a_check_does(tmp_path: Path) -> None:
+    """A diff and a check describing one finding differently is a difference
+    someone will read as meaning something."""
+    from cassandra.app import analyse
+
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    result = analyse(examples)
+    cited = [f for f in result.findings if f.source and f.source.line]
+    assert cited, "the example corpus should place at least one finding"
+
+    diff = Diff(
+        new=cited[:1],
+        fixed=[],
+        unchanged=[],
+        baseline_digest="a",
+        current_digest="b",
+        baseline_taken_at=datetime.now(UTC),
+    )
+    rendered = render_diff(diff, explain=True)
+    assert f"source: {cited[0].source}" in rendered
+    assert "source:" not in render_diff(diff), "not in the default view"

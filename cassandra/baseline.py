@@ -452,6 +452,11 @@ def _lines_for(finding: Finding, *, explain: bool) -> list[str]:
     if finding.trigger:
         lines.append(f"        trigger: {finding.trigger}")
     if explain:
+        # Same shape as `report._lines_for`. A diff and a check that describe the
+        # same finding differently is a difference someone will read as meaning
+        # something.
+        if finding.source:
+            lines.append(f"        source: {finding.source}")
         lines.extend(f"        evidence: {item}" for item in finding.evidence)
         if finding.remedy:
             lines.append(f"        fix: {finding.remedy}")
