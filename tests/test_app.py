@@ -23,6 +23,7 @@ import pytest
 from cassandra import baseline
 from cassandra.app import Handler, analyse, analyse_directory
 from cassandra.factpack.builders import build_fact_pack
+from cassandra.findings import Severity
 
 CORPUS: Final = (
     Path(__file__).resolve().parents[1]
@@ -164,7 +165,12 @@ def test_severity_filter_narrows_the_page(base_url: str, mixed: Path) -> None:
     assert "fhrp-divergence" in body
     assert "fhrp-oscillation" not in body
     assert "svi-vlan-not-trunked" not in body
-    assert "Showing 2 of" in body
+    # Counted rather than pinned: the number moves whenever the enumeration
+    # reaches another pair, and a literal here would fail for the right reason
+    # at the wrong place.
+    findings = analyse(mixed).findings
+    high = sum(1 for f in findings if f.severity is Severity.HIGH)
+    assert f"Showing {high} of {len(findings)}" in body
 
 
 def test_tier_filter_narrows_the_page(base_url: str, mixed: Path) -> None:
@@ -787,7 +793,7 @@ def test_free_text_narrows_to_what_was_typed(base_url: str, mixed: Path) -> None
     it does not: an interface, a VLAN, an address someone is chasing."""
     body = view(base_url, mixed, "q=Vlan99")
     assert "svi-vlan-not-trunked" in body
-    assert "fhrp-divergence" not in body
+    assert "fhrp-oscillation" not in body
 
 
 def test_free_text_reaches_the_evidence(base_url: str) -> None:
@@ -820,7 +826,13 @@ def test_free_text_survives_the_form_and_the_chips(base_url: str, mixed: Path) -
 
 def test_free_text_reaches_the_json_endpoint(base_url: str, mixed: Path) -> None:
     document = json.loads(view(base_url, mixed, "q=Vlan99", "/findings.json"))
-    assert {f["rule"] for f in document["findings"]} == {"svi-vlan-not-trunked"}
+    rules_matched = {f["rule"] for f in document["findings"]}
+    assert "svi-vlan-not-trunked" in rules_matched
+    for finding in document["findings"]:
+        haystack = " ".join(
+            [finding["title"], finding["detail"], *finding["evidence"]]
+        ).lower()
+        assert "vlan99" in haystack
 
 
 def test_identical_configs_with_different_findings_say_which_changed(

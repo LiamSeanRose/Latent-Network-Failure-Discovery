@@ -103,6 +103,53 @@ def _flap_sequence(
     return events
 
 
+# How long a device is out while it restarts. Long enough that every preempt
+# delay in a plausible configuration has expired before it returns, which is the
+# point: a reload is the event that tells you what the configuration does when
+# nothing is racing.
+RELOAD_DOWN_MS: Final = 300_000
+
+
+def _reload_sequence(device: str, interfaces: list[str]) -> list[Event]:
+    """Everything on one device down together, then back together.
+
+    A reload is the commonest real event after a link flap and the model can
+    express it exactly — every interface on the device drops at once, which a
+    sequence of single-interface flaps never produces. It is also the case where
+    a preempt delay is measured from a different starting point: the member's
+    own FHRP interface comes back at the same instant as the uplink it tracks,
+    and which of the two the delay follows decides where the gateway lands.
+    """
+    events: list[Event] = []
+    for interface in interfaces:
+        events.append(
+            Event(
+                at_ms=0,
+                kind=EventKind.LINK_DOWN,
+                device=device,
+                interface=interface,
+            )
+        )
+    for interface in interfaces:
+        events.append(
+            Event(
+                at_ms=RELOAD_DOWN_MS,
+                kind=EventKind.LINK_UP,
+                device=device,
+                interface=interface,
+            )
+        )
+    return events
+
+
+def _device_interfaces(pack: StaticFactPack) -> dict[str, list[str]]:
+    """Every interface name per device, in fact pack order."""
+    return {
+        device.id: [interface.name for interface in device.interfaces]
+        for device in pack.devices
+    }
+
+
 def _longest_divergence_ms(timeline: list[Placement], a: str, b: str) -> int:
     longest = 0
     start: int | None = None
@@ -132,8 +179,22 @@ def _transitions(timeline: list[Placement], group_id: str) -> int:
     return count
 
 
-def _control_note(held: int) -> str:
-    """What the controls established, in the evidence where it can be weighed."""
+def _control_note(held: int | None) -> str:
+    """What the controls established, in the evidence where it can be weighed.
+
+    `None` for a sequence with no interval to perturb. A reload has a duration,
+    not a rhythm — the device is either back or it is not — so claiming it
+    survived a twenty percent change would be claiming a control that was never
+    run, which is the one thing §2.4 is most insistent about.
+    """
+    if held is None:
+        # Phrased as not applicable rather than not passed. A reload has a
+        # duration, not a rhythm: the device is either back or it is not, and
+        # varying how long it was away tests nothing about the configuration.
+        return (
+            "absent with no events; a reload has no interval, so the "
+            "perturbation control does not apply"
+        )
     return (
         f"held in {held} of {PERTURBED_RUNS} runs at "
         f"±{int(PERTURBATION * 100)}% of the interval; absent with no events"
@@ -149,7 +210,7 @@ def _divergence(
     span_ms: int,
     trigger: str,
     events: tuple[Event, ...],
-    held: int = PERTURBED_RUNS,
+    held: int | None = PERTURBED_RUNS,
 ) -> Finding:
     """Two FHRP groups on the same device pair that stop agreeing who is master.
 
@@ -325,6 +386,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
     }
     on_device = _groups_by_device(pack)
     delays = _preempt_delays(pack)
+    interfaces_of = _device_interfaces(pack)
 
     for device, interfaces in sorted(_tracked_interfaces(pack).items()):
         # Only groups this device is a member of can move when this device's
@@ -413,4 +475,42 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                                 delay_ms=delays.get(group_id, 0),
                             )
                         )
+    # A reload is its own event class: every interface on the device drops
+    # together, which no sequence of single-interface flaps produces. It runs
+    # last on purpose. Where both sequences expose the same pair, the flap is
+    # the more instructive trigger — one link, one interval, an argument a
+    # reader can follow — so the reload is here to reach the pairs a flap
+    # cannot, not to restate the ones it can.
+    for device in sorted(on_device):
+        group_ids = on_device[device]
+        control = _control_timeline(pack, group_ids)
+        events = tuple(_reload_sequence(device, interfaces_of.get(device, [])))
+        if not events:
+            continue
+        horizon = RELOAD_DOWN_MS + SETTLE_MS + 120_000
+        timeline = simulate(pack, list(events), until_ms=horizon, only=group_ids)
+        trigger = f"reload {device} ({RELOAD_DOWN_MS // 1000}s down)"
+        for i, first in enumerate(group_ids):
+            for second in group_ids[i + 1 :]:
+                span = _longest_divergence_ms(timeline, first, second)
+                if span < MIN_DIVERGENCE_MS:
+                    continue
+                key = ("divergence", first, second)
+                if key in seen:
+                    continue
+                if _longest_divergence_ms(control, first, second) >= MIN_DIVERGENCE_MS:
+                    continue
+                seen.add(key)
+                findings.append(
+                    _divergence(
+                        device=device,
+                        first=first,
+                        second=second,
+                        labels=labels,
+                        span_ms=span,
+                        trigger=trigger,
+                        events=events,
+                        held=None,
+                    )
+                )
     return findings

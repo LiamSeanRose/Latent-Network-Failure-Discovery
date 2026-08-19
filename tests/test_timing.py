@@ -80,10 +80,16 @@ def test_rediscovers_the_site14_divergence() -> None:
     pairs = {f.title for f in divergences}
     assert any("VRRP 14" in title and "VRRP 24" in title for title in pairs), pairs
 
-    worst = max(divergences, key=lambda f: f.severity == Severity.HIGH)
-    assert worst.tier is Tier.TIMING
-    assert worst.trigger and "flap" in worst.trigger
-    assert worst.evidence, "a timing finding must carry the sequence that produced it"
+    # The pair the scenario was built around, and the sequence that reaches it.
+    # Named rather than taken as "the first high one": a reload reaches other
+    # pairs and would satisfy a looser assertion without proving this.
+    lockstep = next(
+        f for f in divergences if "VRRP 14" in f.title and "VRRP 24" in f.title
+    )
+    assert lockstep.severity is Severity.HIGH
+    assert lockstep.tier is Tier.TIMING
+    assert lockstep.trigger and "flap" in lockstep.trigger
+    assert lockstep.evidence, "a timing finding must carry the sequence that made it"
 
 
 def test_symmetric_groups_produce_no_divergence(tmp_path: Path) -> None:
@@ -261,9 +267,14 @@ def test_the_controls_are_recorded_in_the_evidence() -> None:
     findings = sequences.analyse(pack)
     assert findings
     for finding in findings:
-        notes = [line for line in finding.evidence if "runs at" in line]
+        notes = [line for line in finding.evidence if "no events" in line]
         assert notes, f"{finding.rule} carries no record of its controls"
-        assert "absent with no events" in notes[0]
+        if finding.trigger and finding.trigger.startswith("reload"):
+            # A reload has a duration, not a rhythm. Claiming it survived a
+            # twenty percent change would claim a control that was never run.
+            assert "perturbation control does not apply" in notes[0]
+        else:
+            assert "runs at" in notes[0]
 
 
 def test_a_knife_edge_result_does_not_survive_perturbation() -> None:
@@ -276,10 +287,12 @@ def test_a_knife_edge_result_does_not_survive_perturbation() -> None:
         if f.rule == "fhrp-divergence"
     }
     assert reported, "the corpus divergence must survive its own controls"
-    # And it survives all three runs, which is what the evidence claims.
+    # And every flap-driven one survives all three runs, which is what its
+    # evidence claims.
     for finding in sequences.analyse(pack):
-        if finding.rule == "fhrp-divergence":
-            assert "held in 3 of 3" in " ".join(finding.evidence)
+        if finding.rule == "fhrp-divergence" and finding.trigger:
+            if finding.trigger.startswith("flap"):
+                assert "held in 3 of 3" in " ".join(finding.evidence)
 
 
 def test_two_groups_chasing_say_why_their_triggers_differ() -> None:
@@ -307,3 +320,38 @@ def test_the_fix_does_not_tell_you_to_add_what_you_have() -> None:
             assert "raise the preempt delay" in (finding.remedy or "")
         else:
             assert "add a preempt delay" in (finding.remedy or "")
+
+
+def test_a_reload_is_enumerated_as_well_as_a_flap() -> None:
+    """Every interface on a device dropping together is its own event class.
+
+    No sequence of single-interface flaps produces it, and a group that does not
+    track the uplink is untouched by a flap and moved by a reload — which is why
+    the corpus's third pair only diverges under one of the two.
+    """
+    pack, _ = build_fact_pack(CORPUS)
+    triggers = {f.trigger for f in sequences.analyse(pack) if f.trigger}
+    assert any(t.startswith("reload ") for t in triggers)
+    assert any(t.startswith("flap ") for t in triggers)
+
+
+def test_the_reload_finds_a_pair_the_flap_cannot() -> None:
+    """VRRP 34 does not track the uplink, so no flap moves it. A reload takes
+    its own interface down, and then the difference in preempt delay shows."""
+    pack, _ = build_fact_pack(CORPUS)
+    reload_only = {
+        f.title
+        for f in sequences.analyse(pack)
+        if f.rule == "fhrp-divergence" and f.trigger and f.trigger.startswith("reload")
+    }
+    assert reload_only, "the reload should reach at least one pair on its own"
+    assert any("VRRP 34" in title for title in reload_only)
+
+
+def test_a_reload_claims_no_control_it_did_not_run() -> None:
+    pack, _ = build_fact_pack(CORPUS)
+    for finding in sequences.analyse(pack):
+        if finding.trigger and finding.trigger.startswith("reload"):
+            joined = " ".join(finding.evidence)
+            assert "perturbation control does not apply" in joined
+            assert "runs at" not in joined
