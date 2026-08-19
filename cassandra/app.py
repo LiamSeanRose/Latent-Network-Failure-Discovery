@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import html
 import json
+import traceback
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
@@ -1348,6 +1349,19 @@ class Handler(BaseHTTPRequestHandler):
                 analysis = analyse(Path(config_dir).expanduser())
             except OSError as exc:
                 analysis = Analysis(error=f"could not read {config_dir}: {exc}")
+            except Exception as exc:
+                # A rule or a parser raised. That is a bug in this tool, not in
+                # the configs, and the page has to say so rather than returning
+                # a blank 500 that looks like the configs are unreadable. The
+                # traceback still goes to stderr, where a bug report can find it.
+                traceback.print_exc()
+                analysis = Analysis(
+                    error=(
+                        f"{type(exc).__name__} while analysing {config_dir}. "
+                        "This is a defect in the tool, not in your configs — the "
+                        "traceback is on the terminal running `cassandra serve`."
+                    )
+                )
 
         comparison = compare_with(analysis, filters.since)
 
@@ -1421,7 +1435,15 @@ class Handler(BaseHTTPRequestHandler):
 def serve(
     host: str = "127.0.0.1", port: int = 8765, config_dir: Path | None = None
 ) -> None:
-    server = ThreadingHTTPServer((host, port), Handler)
+    try:
+        server = ThreadingHTTPServer((host, port), Handler)
+    except OSError as exc:
+        # Almost always a second copy already running. Saying which port, and
+        # what to do about it, beats a traceback for a condition this ordinary.
+        raise SystemExit(
+            f"cannot listen on {host}:{port}: {exc}\n"
+            f"another copy may already be running — try --port {port + 1}"
+        ) from exc
     # A directory given on the command line becomes the link that is printed,
     # rather than something to paste into the page. It is a query string like
     # any other, so the running server needs to know nothing about it.

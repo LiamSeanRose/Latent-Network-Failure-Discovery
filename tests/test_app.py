@@ -647,3 +647,41 @@ def test_the_endpoint_reports_the_digest_of_what_it_read(
     document = json.loads(view(base_url, mixed, "severity=high", "/findings.json"))
     assert document["config_digest"], "filtered output still describes a real pack"
     assert document["fact_pack_id"]
+
+
+def test_a_defect_in_a_rule_is_reported_as_a_defect_in_the_tool(
+    base_url: str, mixed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blank 500 reads as 'your configs are unreadable', which is a lie.
+
+    A rule that raises is this tool's bug, and the page has to name it as one so
+    nobody spends an afternoon on a config that was never the problem.
+    """
+    import cassandra.app as app
+
+    def explode(_: object) -> None:
+        raise ZeroDivisionError("a rule divided by a VLAN")
+
+    monkeypatch.setattr(app, "analyse", explode)
+    status, body = get(f"{base_url}/?dir={quote(str(mixed))}")
+    assert status == 200
+    assert "ZeroDivisionError" in body
+    assert "defect in the tool" in body
+
+
+def test_serve_says_what_to_do_when_the_port_is_taken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Almost always a second copy already running — an ordinary condition that
+    should not produce a traceback."""
+    import cassandra.app as app
+
+    def refuse(*_: object, **__: object) -> None:
+        raise OSError(98, "Address already in use")
+
+    monkeypatch.setattr(app, "ThreadingHTTPServer", refuse)
+    with pytest.raises(SystemExit) as exit_info:
+        app.serve(port=9999)
+    message = str(exit_info.value)
+    assert "9999" in message
+    assert "--port 10000" in message
