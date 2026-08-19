@@ -444,3 +444,36 @@ def test_device_filter_survives_the_form_and_the_json_link(
     body = view(base_url, mixed, "device=edge1")
     assert '<input type="hidden" name="device" value="edge1">' in body
     assert "device=edge1" in body
+
+
+def test_the_full_catalogue_has_its_own_page(base_url: str) -> None:
+    """The panel under a result explains the rules that fired. This answers the
+    question that comes first: what does the tool look for at all."""
+    status, body = get(f"{base_url}/rules")
+    assert status == 200
+    from cassandra.catalogue import catalogue
+
+    for doc in catalogue():
+        assert f'id="rule-{doc.id}"' in body, f"{doc.id} missing from /rules"
+    assert "facts tier" in body
+    assert "timing tier" in body
+
+
+def test_the_catalogue_page_states_its_own_documentation_debt(base_url: str) -> None:
+    """Both counts are measures of this tool's own gaps. Hiding them would be the
+    one dishonest thing a page about honesty could do."""
+    _, body = get(f"{base_url}/rules")
+    assert "carry no explanation of themselves" in body
+    assert "no test asserting they stay quiet" in body
+
+
+def test_the_catalogue_page_is_reachable_from_a_result(
+    base_url: str, mixed: Path
+) -> None:
+    assert 'href="/rules"' in view(base_url, mixed)
+
+
+def test_the_catalogue_page_fetches_nothing_either(base_url: str) -> None:
+    _, body = get(f"{base_url}/rules")
+    for pattern in (r"<script", r"https?://", r"<link[^>]+href", r"@import", r"<img"):
+        assert not re.search(pattern, body), f"external reference: {pattern}"

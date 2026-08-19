@@ -183,6 +183,10 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   padding-top: 1.2rem; }
 .rulebook > h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .07em;
   color: var(--ink-3); margin: 0 0 .15rem; font-weight: 640; }
+.rulebook .tier-head { font-size: .78rem; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--ink-3); font-weight: 640;
+  margin: 1.5rem 0 .5rem; }
+.rulebook .tier-head .n { color: var(--ink-3); opacity: .7; font-weight: 500; }
 .rule {
   background: var(--surface-1); border: 1px solid var(--line); border-radius: 10px;
   padding: .85rem 1rem; margin-bottom: .6rem; scroll-margin-top: 1rem;
@@ -874,8 +878,8 @@ def _rulebook_html(findings: list[Finding]) -> str:
         '<section class="rulebook"><h2>The rule{}</h2>'
         '<p class="cap">Each identifier above links here. Generated from the '
         "rules themselves, so it cannot describe a check the tool no longer "
-        "makes.</p>{}</section>"
-    ).format(plural, "".join(_rule_entry(doc) for doc in seen))
+        'makes. <a href="/rules">See all {} checks</a>.</p>{}</section>'
+    ).format(plural, len(book), "".join(_rule_entry(doc) for doc in seen))
 
 
 def _hidden_filters(filters: Filters) -> str:
@@ -1005,6 +1009,66 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
                 f"{drawn}</div>"
             )
 
+    finder = f"""<form class="finder" method="get" action="/">
+  <input type="text" name="dir" placeholder="/path/to/configs"
+         value="{html.escape(config_dir)}" autofocus accesskey="d"
+         aria-label="directory of device configs to analyse"
+         spellcheck="false" autocapitalize="off" autocorrect="off">
+  {_hidden_filters(filters)}
+  <button class="go" type="submit">Analyse</button>
+</form>"""
+    return _shell(finder + topology + "".join(sections), pulse=pulse)
+
+
+def rules_page() -> str:
+    """The whole catalogue, not just the rules something tripped.
+
+    The panel under a result answers "what does this finding mean". This answers
+    the question that comes before running anything at all: what does this tool
+    look for, and — the half that decides whether a clean run means anything —
+    what does it decline to look at.
+    """
+    docs = catalogue()
+    undocumented = sum(1 for doc in docs if not doc.documented)
+    untested = sum(1 for doc in docs if not doc.silence)
+    by_tier: list[str] = []
+    for tier in _TIER_ORDER:
+        entries = [doc for doc in docs if doc.tier is tier]
+        if not entries:
+            continue
+        by_tier.append(
+            f'<h2 class="tier-head">{html.escape(tier.value)} tier '
+            f'<span class="n">{len(entries)}</span></h2>'
+            + "".join(_rule_entry(doc) for doc in entries)
+        )
+
+    # Stated rather than left for someone to count. Both numbers measure this
+    # tool's own documentation debt, and hiding them would be the one dishonest
+    # thing a page about honesty could do.
+    health = (
+        f'<p class="cap">{len(docs)} rules. '
+        f"{undocumented} carry no explanation of themselves. "
+        f"{untested} have no test asserting they stay quiet, so their silence "
+        "is not evidence of anything.</p>"
+    )
+    return _shell(
+        '<section class="rulebook">'
+        "<h2>Every check this tool makes</h2>"
+        '<p class="cap">Generated from the rules themselves, so it cannot '
+        "describe a check the tool no longer makes, and cannot omit one it "
+        'does. <a href="/">Back to findings</a>.</p>'
+        + health
+        + "".join(by_tier)
+        + "</section>"
+    )
+
+
+def _shell(body: str, *, pulse: str = "pulse") -> str:
+    """The page around the content: head, masthead, theme control.
+
+    One shell for every page, so the findings view, the catalogue and the
+    standalone report cannot drift into looking like three different tools.
+    """
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1021,16 +1085,7 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
   <p class="tagline">Latent failure modes in network configuration &mdash; the ones
   that only exist between events.</p>
 </header>
-<form class="finder" method="get" action="/">
-  <input type="text" name="dir" placeholder="/path/to/configs"
-         value="{html.escape(config_dir)}" autofocus accesskey="d"
-         aria-label="directory of device configs to analyse"
-         spellcheck="false" autocapitalize="off" autocorrect="off">
-  {_hidden_filters(filters)}
-  <button class="go" type="submit">Analyse</button>
-</form>
-{topology}
-{"".join(sections)}
+{body}
 </main></body></html>"""
 
 
@@ -1069,6 +1124,10 @@ class Handler(BaseHTTPRequestHandler):
                 analysis = analyse(Path(config_dir).expanduser())
             except OSError as exc:
                 analysis = Analysis(error=f"could not read {config_dir}: {exc}")
+
+        if parsed.path == "/rules":
+            self._respond(rules_page(), "text/html; charset=utf-8")
+            return
 
         if parsed.path == "/rules.json":
             self._respond(
