@@ -321,11 +321,11 @@ def test_the_page_is_theme_aware_and_responsive(base_url: str, mixed: Path) -> N
 
 def _root_blocks() -> list[str]:
     """The bodies of every rule whose selector is the root element."""
-    from cassandra.app import _STYLE
+    from cassandra.style import STYLE
 
     return [
         body
-        for selector, body in re.findall(r"(:root[^{]*)\{([^{}]*)\}", _STYLE)
+        for selector, body in re.findall(r"(:root[^{]*)\{([^{}]*)\}", STYLE)
         if "svg" not in selector and " " not in selector.strip().rstrip("{")
     ]
 

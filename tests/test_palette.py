@@ -18,7 +18,7 @@ from typing import Final
 import pytest
 
 from cassandra import art, visuals
-from cassandra.app import _DARK, _LIGHT
+from cassandra.style import DARK, LIGHT
 
 BODY_MIN: Final = 4.5
 LARGE_MIN: Final = 3.0
@@ -33,8 +33,8 @@ def _palette(block: str) -> dict[str, str]:
     }
 
 
-LIGHT: Final = _palette(_LIGHT)
-DARK: Final = _palette(_DARK)
+LIGHT: Final = _palette(LIGHT)
+DARK: Final = _palette(DARK)
 
 
 def _rgb(colour: str) -> tuple[float, float, float]:
