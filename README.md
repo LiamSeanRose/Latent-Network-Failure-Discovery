@@ -11,8 +11,8 @@ no account, no network access.
 ## What it looks for
 
 Most config checkers answer questions about the steady state: is this address duplicated, is
-this VLAN declared, do these two ends agree. Those checks are here — thirty of them — and they
-are worth having.
+this VLAN declared, do these two ends agree. Those checks are here — thirty-nine of them — and
+they are worth having.
 
 The interesting findings are the other kind: failures that no steady state contains, because
 they are properties of a configuration *plus* a sequence of events *plus* the timers governing
@@ -114,6 +114,9 @@ and dispatching `validate-timing-model.yml` is what closes it.
 
 **[PROJECT.md](PROJECT.md) is the spec and the source of truth.** Read it first.
 
+- [docs/TUTORIAL.md](docs/TUTORIAL.md) — a worked example: a two-site network with four
+  planted defects, from the first run to a clean one
+- [docs/INSTALL.md](docs/INSTALL.md) — what is required, what is not, and how to run it in CI
 - [docs/RULES.md](docs/RULES.md) — every check, generated from the rules themselves, including
   what each one deliberately does not fire on
 - [docs/timing-model.md](docs/timing-model.md) — the assumption register for the TIMING tier

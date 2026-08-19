@@ -1,138 +1,146 @@
 # Installing Cassandra
 
-Cassandra is a single command with no runtime dependencies — standard library only, by
-design (PROJECT.md §0). Installing it is installing one Python package. There is no lab,
-no container, no account, and nothing to configure afterwards.
+## What you need
 
-## Requirements
-
-- **Python 3.12.** The package declares `>=3.12,<3.13`; an installer running under a
-  different interpreter will refuse rather than half-work, so pass the interpreter
-  explicitly if 3.12 is not your default.
-- Git, for the install-from-repository commands below.
-
-The distribution is not on PyPI, so every command below names the repository directly.
-`pip install cassandra` would fetch an unrelated project of the same name.
-
-## pipx — recommended
-
-`pipx` keeps the tool in its own environment and puts `cassandra` on your PATH.
+[uv](https://docs.astral.sh/uv/). That is the list. Python 3.12 is pinned in `.python-version`
+and uv fetches it; the tool itself is standard library only and has no dependencies.
 
 ```sh
-pipx install --python python3.12 \
-  git+https://github.com/LiamSeanRose/Latent-Network-Failure-Discovery
+git clone https://github.com/LiamSeanRose/Latent-Network-Failure-Discovery
+cd Latent-Network-Failure-Discovery
+uv sync
+uv run cassandra check examples/two-site
 ```
 
-`uv` does the same job without a separate installer:
+If you would rather have `cassandra` on your PATH than type `uv run`:
 
 ```sh
 uv tool install --python 3.12 \
   git+https://github.com/LiamSeanRose/Latent-Network-Failure-Discovery
 ```
 
-Upgrade with `pipx upgrade cassandra` or `uv tool upgrade cassandra`; remove with
-`pipx uninstall cassandra` or `uv tool uninstall cassandra`.
+`pipx install --python python3.12 git+https://…` does the same job. Upgrade with
+`uv tool upgrade cassandra` or `pipx upgrade cassandra`. The distribution is not on PyPI, so
+every one of these commands names the repository: `pip install cassandra` fetches an unrelated
+project of the same name.
 
-## pip
+## What you do not need
 
-Into a virtual environment, so the tool does not land in your system interpreter:
+No Docker. No container runtime, no lab, no emulator, no images to obtain or license. No account,
+no API key, no service to sign up for. No network access at run time — the tool reads local files
+and writes local files, and the web view fetches no font, script, stylesheet or image.
+
+Emulation exists in this repository, but it runs in *this project's* CI to check the timing model
+against real protocol implementations (PROJECT.md §2.3). It is never something you set up.
+
+## Getting configs into a directory
+
+Point `check` at a directory. It walks the tree; it does not glob one level.
 
 ```sh
-python3.12 -m venv ~/.venvs/cassandra
-~/.venvs/cassandra/bin/pip install \
-  git+https://github.com/LiamSeanRose/Latent-Network-Failure-Discovery
-~/.venvs/cassandra/bin/cassandra check ./configs
-```
-
-## From source
-
-```sh
-git clone https://github.com/LiamSeanRose/Latent-Network-Failure-Discovery
-cd Latent-Network-Failure-Discovery
-uv sync                    # dev environment, including pytest and ruff
 uv run cassandra check ./configs
 ```
 
-To build the distribution artifacts and install the wheel:
+**What it opens.** `.cfg` and `.conf` are taken as configs on the strength of the name. `.txt`,
+files with no extension, and files whose extension is not on the ignore list — a backup written
+as `agg-a.example.internal` has an extension only by accident — are opened and sniffed: the first
+16 KiB is read, and at least half the lines at column zero have to parse as IOS-style commands.
+Prose fails that test, because a sentence is not a command.
 
-```sh
-uv build                                   # dist/*.whl and dist/*.tar.gz
-uv tool install ./dist/cassandra-0.0.0-py3-none-any.whl
-```
+**What it never opens.** Documents and markup, structured data, source and build files, images,
+archives, binaries, captures, logs and keys, by extension. Extensionless files conventionally
+named `README`, `LICENSE`, `Makefile`, `Dockerfile` and the like. Hidden files and directories, so
+a `.git` alongside your configs costs nothing. Files over 8 MiB, and anything with a NUL byte in
+the first 16 KiB.
 
-`tests/test_packaging.py` reads `dist/` when a wheel is present and checks that every
-package directory made it in; run `uv build && uv run pytest tests/test_packaging.py`
-after changing anything about the build. `dist/` is untracked and unignored, so
-`uv build --out-dir /somewhere/else` with `CASSANDRA_WHEEL_DIR=/somewhere/else` set for
-the test run does the same job without leaving artifacts in the working tree.
-
-## Verify the install
-
-The repository ships a synthetic corpus that exercises the interesting tier. Point the
-tool at it — this is the four-device site14 scenario under
-`scenarios/site14_vrrp_lockstep/configs`:
+**What it says out loud.** Skipping a `README.md` is not news and is not reported. Skipping a file
+*you* named `.cfg`, or a file that reads as configuration but yields no device, is:
 
 ```
-$ cassandra check scenarios/site14_vrrp_lockstep/configs
-HIGH  agg-a  VRRP 14 and VRRP 24 can end up on different devices
-        they share a device pair but respond to the same event differently, leaving the gateways split for about 90s
-        trigger: flap agg-a:Ethernet1 1x (10s down, 20s up)
-
-HIGH  agg-a  VRRP 24 and VRRP 34 can end up on different devices
-        they share a device pair but respond to the same event differently, leaving the gateways split for about 100s
-        trigger: flap agg-a:Ethernet1 1x (10s down, 20s up)
-
-MED   agg-a  VRRP 14 changes master 5 times under a single flap sequence
-        each transition is a forwarding interruption for everything using that gateway
-        trigger: flap agg-a:Ethernet1 3x (10s down, 20s up)
-
-MED   agg-a  VRRP 24 changes master 5 times under a single flap sequence
-        each transition is a forwarding interruption for everything using that gateway
-        trigger: flap agg-a:Ethernet1 3x (10s down, 120s up)
-
-high=2  medium=2   (timing=4)
-run with --explain for evidence, fixes and rule ids
-```
-
-If you installed from pipx or pip rather than a clone, download the four `.cfg` files
-from `scenarios/site14_vrrp_lockstep/configs/` in the repository into any directory and
-pass that directory instead.
-
-`--explain` adds the event sequence, the suggested fix and the rule id behind each
-finding:
-
-```
-$ cassandra check scenarios/site14_vrrp_lockstep/configs --explain
-HIGH  agg-a  VRRP 14 and VRRP 24 can end up on different devices
-        they share a device pair but respond to the same event differently, leaving the gateways split for about 90s
-        trigger: flap agg-a:Ethernet1 1x (10s down, 20s up)
-        evidence: t=0s agg-a:Ethernet1 down
-        evidence: t=10s agg-a:Ethernet1 up
-        fix: make tracking and preempt delay consistent across groups on the same pair
-        rule: fhrp-divergence (timing)
+$ cassandra check /tmp/configs
+… ConfigDiscoveryWarning: skipped /tmp/configs/site-a/rack-notes.cfg: not-config
+HIGH  north-acc1  Ethernet4 is in VLAN 20, which leaves north-acc1 on no trunk
 ...
 ```
 
-## The rest of the commands
+Trimmed twice: after the first finding, and at the start of the warning, where Python's warning
+machinery prepends the installed path of `cli.py` and a line number and appends an echo of the
+line that raised it. The message itself is the part after `ConfigDiscoveryWarning:`. It goes to
+stderr, so a piped run keeps it out of the findings.
 
-```sh
-cassandra facts ./configs    # the materialised fact pack the findings are derived from
-cassandra serve              # local web view on http://127.0.0.1:8765
-cassandra --help
+**Device names.** A config's `hostname` line names its device. A config without one is named by
+its path relative to the directory you pointed at, minus the config extension — `site-a/agg-a.cfg`
+becomes `site-a/agg-a`. Two files called `agg-a` under different site folders are two devices.
+
+**Dialects.** Arista EOS, Cisco IOS and NX-OS, chosen per file: by a decisive marker where there
+is one, otherwise by whichever parser leaves less of the file unexplained. You do not tell it
+which.
+
+So a working copy, a backup target or a directory of files pulled off devices with `scp` all work
+as they are. Nesting one directory per site or per role is fine and is the shape the walk was
+written for.
+
+## What it does with those files
+
+It reads them. Nothing else: no file is written in the directory you name, nothing is uploaded,
+no device is contacted, and the tool needs no credentials because it never logs in anywhere.
+
+From the text it materialises a fact pack — interfaces, addressing, VLANs, trunks, FHRP groups,
+tracked objects, BGP peerings and a timer inventory (PROJECT.md §3) — and runs the checks over
+that. `cassandra facts <dir>` prints the pack, including an `unparsed` section listing every line
+no parser accounted for. That list is worth reading once on a new corpus: a rule cannot reason
+about a line nobody read, and a group whose priority line was missed still produces findings that
+are confident and wrong.
+
+What it does *not* do: compute a RIB or a FIB, resolve routing policy, evaluate ACLs, or answer
+reachability questions. Those are steady-state questions and other tools answer them well
+(PROJECT.md §1.3). This one answers the questions with a time quantity, a repetition count or an
+ordering claim in them.
+
+## Check it works
+
+```
+$ uv run cassandra check examples/two-site
 ```
 
-Exit status is the verdict, so `check` drops straight into a pre-commit hook or a CI job
-without anything parsing its output:
+The shipped example corpus has four deliberate defects; the run prints seven findings and exits
+1. [TUTORIAL.md](TUTORIAL.md) walks through what each of them means and how to fix it.
+
+## Running it in CI
+
+The exit status is the verdict, so nothing has to parse the output:
 
 | Status | Meaning |
 |---|---|
-| 0 | no findings |
-| 1 | at least one finding |
-| 2 | the argument was not a directory, or held no `.cfg` files |
+| 0 | no findings, or none at or above `--fail-on`, or nothing new since `--since` |
+| 1 | at least one finding that counts |
+| 2 | the argument was not a directory, no configs were found in it, or a baseline file could not be read |
 
-## Caveat worth reading once
+A job that fails on anything:
 
-Timing findings come from a model of timer interaction, not from real firmware. The
-honest phrasing is "your configs permit this sequence", not "your network will break"
-(PROJECT.md §5.3). Validation of that model against real protocol implementations runs in
-this project's CI, never on your machine.
+```yaml
+- uses: astral-sh/setup-uv@v5
+- run: uv sync
+- run: uv run cassandra check ./configs --explain
+```
+
+Two flags matter for a repository that is not clean yet. `--fail-on high` prints every finding
+and blocks only on the severe ones. `--since baseline.json` prints only what is new relative to a
+recorded run and fails only on that, so an accepted backlog does not keep the build red — which
+is how a check gets switched off. Record the baseline with
+`cassandra check ./configs --save-baseline baseline.json` and commit it beside the configs;
+regenerate it deliberately when you accept a finding. The baseline stores a digest of the configs,
+so a run can tell you whether a difference came from the network or from the rules changing.
+
+`--json` gives a pipeline the same findings with their rule ids, tiers, severities, devices,
+evidence and remedies, plus the fact pack id and config digest.
+
+## One caveat worth reading once
+
+FACTS findings are decidable from the configuration. If one is wrong, it is a bug.
+
+TIMING findings are not. They come from a model of timer interaction, not from running the
+protocols, so the honest phrasing is "your configs permit this sequence", not "your network will
+break" (PROJECT.md §5.3). Each one carries the sequence that triggers it so you can judge it, and
+[timing-model.md](timing-model.md) records every assumption the model makes and what would
+falsify it.

@@ -13,6 +13,7 @@ breaks the build.
 | Rule | Tier | Severity | Summary |
 | --- | --- | --- | --- |
 | [`access-vlan-not-trunked`](#access-vlan-not-trunked) | facts | high | An access port in a VLAN that cannot leave the switch it is on. |
+| [`bfd-multiplier-of-one`](#bfd-multiplier-of-one) | facts | high | A detect multiplier of 1 makes one lost packet a routing event. |
 | [`bgp-peer-behind-shutdown`](#bgp-peer-behind-shutdown) | facts | high | A peering that can only run over an interface that is shut down. |
 | [`bgp-remote-as-mismatch`](#bgp-remote-as-mismatch) | facts | high | One end expects an AS the other does not use. |
 | [`bgp-router-id-duplicate`](#bgp-router-id-duplicate) | facts | high | One BGP router-id claimed by two devices. |
@@ -21,25 +22,33 @@ breaks the build.
 | [`device-isolated-by-shutdown`](#device-isolated-by-shutdown) | facts | high | A device whose every link into these configs is administratively down. |
 | [`duplicate-address`](#duplicate-address) | facts | high | One IPv4 address configured on two interfaces in the collection. |
 | [`fhrp-duplicate-member`](#fhrp-duplicate-member) | facts | high | One device holding two memberships of the same group on one subnet. |
+| [`fhrp-hold-under-peer-hello`](#fhrp-hold-under-peer-hello) | facts | high | A member that gives up before its peer is next due to speak is not a standby, it is a second active gateway. |
 | [`fhrp-members-on-different-subnets`](#fhrp-members-on-different-subnets) | facts | high | A redundancy group whose two halves are not on the same subnet. |
 | [`fhrp-track-target-shutdown`](#fhrp-track-target-shutdown) | facts | high | A track whose target is administratively down. |
 | [`fhrp-track-undefined`](#fhrp-track-undefined) | facts | high | A group that decrements its priority for a track nobody defined. |
 | [`fhrp-virtual-collides`](#fhrp-virtual-collides) | facts | high | A virtual address a real interface on the same pair already owns. |
 | [`fhrp-virtual-not-a-host-address`](#fhrp-virtual-not-a-host-address) | facts | high | A virtual address that is not a host address at all. |
+| [`fhrp-virtual-not-an-address`](#fhrp-virtual-not-an-address) | facts | high | A virtual address that is not an IP address at all. |
 | [`fhrp-virtual-outside-subnet`](#fhrp-virtual-outside-subnet) | facts | high | A virtual address outside every subnet the member interface is on. |
 | [`fhrp-virtual-shared`](#fhrp-virtual-shared) | facts | high | Two groups on one interface answering for the same virtual address. |
 | [`mtu-mismatch`](#mtu-mismatch) | facts | high | Neighbours that disagree about how large a frame may be. |
+| [`ospf-timers-disagree`](#ospf-timers-disagree) | facts | high | OSPF refuses an adjacency whose hello and dead intervals do not match. |
 | [`subnet-mask-disagreement`](#subnet-mask-disagreement) | facts | high | Two devices on one wire that disagree about how wide the wire is. |
 | [`vlan-not-declared`](#vlan-not-declared) | facts | high | A port assigned to a VLAN the device never creates. |
+| [`bfd-detection-below-floor`](#bfd-detection-below-floor) | facts | medium | A BFD session too fast to survive a control-plane pause takes the IGP down. |
 | [`bfd-no-clients`](#bfd-no-clients) | facts | medium | A session nothing registered against comes up, runs, and is never asked. |
 | [`bfd-no-faster-than-igp`](#bfd-no-faster-than-igp) | facts | medium | BFD exists to detect faster than the IGP. One that does not is decoration. |
 | [`bgp-peer-off-subnet`](#bgp-peer-off-subnet) | facts | medium | A directly-connected peer address that is on none of this device's subnets. |
+| [`dampening-never-suppresses`](#dampening-never-suppresses) | facts | medium | A dampening profile whose suppress threshold is above its own penalty ceiling never suppresses anything. |
+| [`fhrp-hold-under-three-hellos`](#fhrp-hold-under-three-hellos) | facts | medium | An FHRP hold time worth fewer than three hellos fails the gateway over on one lost advertisement. |
 | [`fhrp-no-redundancy`](#fhrp-no-redundancy) | facts | medium | A redundancy group with fewer than two members in the collection. |
 | [`fhrp-priority-tie`](#fhrp-priority-tie) | facts | medium | Members sharing the top priority, so nothing decides the master. |
 | [`fhrp-track-ineffective`](#fhrp-track-ineffective) | facts | medium | A decrement too small to lose the election is tracking that does nothing. |
+| [`igp-dead-under-three-hellos`](#igp-dead-under-three-hellos) | facts | medium | A dead interval worth fewer than three hellos drops healthy adjacencies. |
 | [`svi-vlan-not-trunked`](#svi-vlan-not-trunked) | facts | medium | An addressed SVI for a VLAN no trunk on the device carries. |
 | [`trunk-native-vlan-not-allowed`](#trunk-native-vlan-not-allowed) | facts | medium | A trunk whose native VLAN is missing from its own allowed list. |
 | [`fhrp-no-preempt-on-preferred`](#fhrp-no-preempt-on-preferred) | facts | low | The highest-priority member has preempt off, so it never takes back. |
+| [`igp-dead-not-a-multiple-of-hello`](#igp-dead-not-a-multiple-of-hello) | facts | low | A dead interval that is not a whole number of hellos wastes its remainder. |
 | [`trunk-vlan-dead`](#trunk-vlan-dead) | facts | low | A VLAN permitted on a trunk that no device in the topology terminates. |
 | [`l3-interface-isolated`](#l3-interface-isolated) | facts | info | An addressed interface on a subnet no other device shares. |
 | [`fhrp-divergence`](#fhrp-divergence) | timing | high | Two FHRP groups on the same device pair that stop agreeing who is master. |
@@ -71,6 +80,29 @@ Silent when a trunk on the device permits the VLAN, when the device has an SVI f
   `test_facts_rules.py::test_access_vlan_the_uplink_carries_is_silent`
 - Spare ports parked in a VLAN nothing else terminates are deliberate, and indistinguishable from this rule's defect except by that fact.  
   `test_facts_rules.py::test_a_vlan_used_nowhere_else_is_a_parking_vlan_not_a_defect`
+
+### `bfd-multiplier-of-one`
+
+**high** · `cassandra.timing.timer_rules.bfd_multiplier_leaves_no_margin`
+
+A detect multiplier of 1 makes one lost packet a routing event.
+
+The multiplier is the whole tolerance a BFD session has: it is how many control packets may go missing before the neighbour is declared down. At 1 there is none. A single frame lost to a CRC error, a microburst drop or a queue overrun tears down the session and every client protocol registered against it, and does it again the next time — which on a link with any loss at all is a permanently flapping adjacency whose interface counters look clean.
+
+Silent when no multiplier is configured, since the platform default is not a number this tool invents.
+
+**Reports:** BFD on {…} has a detect multiplier of 1
+
+**Detail:** control packets are sent{…} and exactly one may not arrive before the session is declared down, so a single dropped frame is a routing event. Packet loss that would otherwise be invisible becomes a reconvergence, repeatedly.
+
+**Remedy:** set the detect multiplier to 3, the value every platform defaults to, and shorten the interval instead if the detection time has to stay where it is
+
+**Stays silent when:**
+
+- The rule is about the absence of tolerance, not about how thin it is. A multiplier of two is aggressive, and it still survives the single lost packet that a multiplier of one turns into a reconvergence.  
+  `test_timer_rules.py::test_a_multiplier_of_two_still_has_a_margin`
+- The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
+  `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
 
 ### `bgp-peer-behind-shutdown`
 
@@ -254,6 +286,31 @@ Group numbers are legitimately reused across unrelated subnets — group 1 on ev
 - Group 14 on two unrelated subnets is ordinary practice, not a defect.  
   `test_facts_rules.py::test_group_number_reused_on_another_subnet_is_not_a_duplicate`
 
+### `fhrp-hold-under-peer-hello`
+
+**high** · `cassandra.timing.timer_rules.fhrp_hold_time_is_shorter_than_a_peer_hello`
+
+A member that gives up before its peer is next due to speak is not a standby, it is a second active gateway.
+
+FHRP timers have to match across a group, and the way a mismatch bites is arithmetical: if one member's hold time is no longer than another member's advertisement interval, the on-time advertisement arrives after the timer it was meant to reset has already expired. The member takes the virtual address while the peer still holds it, both answer for the same IP and MAC, and the segment gets duplicate replies until something flaps. Each device on its own is configured with a hold longer than its own hello, so the defect is invisible one config at a time.
+
+Silent when only one member of the group is in the collection, and silent for timers that merely differ — mismatched values whose arithmetic still works are untidy, not broken.
+
+**Reports:** {…}: {…} holds for {…} while {…} advertises every {…}
+
+**Detail:** {…} declares the group's active gone after {…}, which is no later than {…}'s next advertisement is due. When {…} is holding the group, every advertisement it sends arrives after {…} has already timed it out, so both answer for {…} at once.
+
+**Remedy:** configure the same hello and hold time on every member of {…}
+
+**Stays silent when:**
+
+- Members of one group ought to share their timers, and untidy is not the same as broken. A hold of 4s against a peer advertising every 3s still resets on every advertisement that arrives on time, so no member ever declares a live gateway dead.  
+  `test_timer_rules.py::test_mismatched_timers_whose_arithmetic_still_works_are_silent`
+- A hold time is only short relative to somebody else's hello. With one member of the group in the collection the comparison has no second term, and the missing device is a gap in the capture rather than evidence about it.  
+  `test_timer_rules.py::test_one_member_of_a_group_says_nothing_about_its_peer`
+- The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
+  `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
+
 ### `fhrp-members-on-different-subnets`
 
 **high** · `cassandra.facts.rules.fhrp_members_addressed_on_different_subnets`
@@ -357,6 +414,25 @@ Distinct from `fhrp-virtual-outside-subnet`: this address *is* inside the subnet
 - Host virtual address is not flagged  
   `test_facts_rules.py::test_host_virtual_address_is_not_flagged`
 
+### `fhrp-virtual-not-an-address`
+
+**high** · `cassandra.facts.rules.virtual_address_is_not_an_address`
+
+A virtual address that is not an IP address at all.
+
+A mistyped octet — `10.14.0.300` — is the commonest malformation a config has, and the parsers accept whatever token follows the keyword rather than guessing at what was meant. Every other rule about the virtual address skips a group it cannot read, so without this one the group would be checked by nothing and reported as healthy.
+
+**Reports:** {…} {…} virtual address is not an address
+
+**Detail:** {…} does not name an IP address, so the group has no gateway to answer for and every other check on it was skipped
+
+**Remedy:** correct the address
+
+**Stays silent when:**
+
+- The rule exists for a string that names no address, not for one that names an address someone dislikes.  
+  `test_facts_rules.py::test_a_readable_virtual_address_is_not_reported_as_unreadable`
+
 ### `fhrp-virtual-outside-subnet`
 
 **high** · `cassandra.facts.rules.virtual_address_outside_subnet`
@@ -418,6 +494,37 @@ Only explicitly configured values are compared. An unset MTU is a platform defau
 - An unset MTU is a platform default the tool does not claim to know.  
   `test_facts_rules.py::test_one_configured_mtu_is_not_a_mismatch`
 
+### `ospf-timers-disagree`
+
+**high** · `cassandra.timing.timer_rules.ospf_timers_disagree_across_a_subnet`
+
+OSPF refuses an adjacency whose hello and dead intervals do not match.
+
+Both values ride in every hello packet and both are checked on receipt, so a disagreement is not a slower adjacency, it is no adjacency. Each device reads perfectly well on its own — the defect exists only in the pair — and nothing alarms about a neighbour it never had, so this survives change windows that look successful from either console.
+
+IS-IS is deliberately excluded. It advertises its own hold time inside each hello and the receiver honours what it is told, so two IS-IS routers on one wire need not agree on anything here, and reporting the difference would be reporting the protocol working as designed.
+
+Silent unless both ends state the same interval and state it differently. One end configured and the other left on its platform default is a comparison against a number this tool does not have.
+
+**Reports:** {…} timers on {…} and {…} disagree across {…}
+
+**Detail:** {…}. Both values are carried in every hello and checked by the receiver, so the two never reach a full adjacency and neither device reports losing a neighbour it never had. Whatever routes over {…} is reaching its destination another way, or not at all.
+
+**Remedy:** make the hello and dead intervals identical on both ends of {…}
+
+**Stays silent when:**
+
+- The rule reports a disagreement, not the presence of tuned timers. Two routers running the same non-default hello and dead form an adjacency exactly as a pair on the defaults would.  
+  `test_timer_rules.py::test_two_ends_that_agree_are_silent`
+- A device that states no hello interval is running its platform default, which this tool has not read. The pair may well be misconfigured, but saying so would mean comparing the configured value against an invented one.  
+  `test_timer_rules.py::test_one_end_tuned_and_the_other_silent_is_not_a_disagreement`
+- IS-IS carries its hold time inside every hello and the receiver honours what it is told, so two IS-IS routers on one wire are under no obligation to use the same interval. Reporting the difference would be reporting a correctly configured link.  
+  `test_timer_rules.py::test_isis_hellos_that_differ_are_the_protocol_working`
+- Half a link is an incomplete capture, not a defect. One router with tuned OSPF timers and nothing else in the directory says nothing about whether the device at the far end agrees with it.  
+  `test_timer_rules.py::test_a_neighbour_missing_from_the_collection_reports_nothing`
+- The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
+  `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
+
 ### `subnet-mask-disagreement`
 
 **high** · `cassandra.facts.rules.prefix_length_disagreement`
@@ -461,6 +568,33 @@ On most platforms the port stays down or blackholes rather than erroring, so the
   `test_facts_rules.py::test_declared_access_vlan_is_silent`
 - A pure L3 device declares no VLANs and is doing nothing wrong.  
   `test_facts_rules.py::test_a_router_declaring_no_vlans_is_not_flagged`
+
+### `bfd-detection-below-floor`
+
+**medium** · `cassandra.timing.timer_rules.bfd_detection_is_below_the_safe_floor`
+
+A BFD session too fast to survive a control-plane pause takes the IGP down.
+
+BFD failing over in tens of milliseconds is only useful if nothing else on the box ever stops for that long. A supervisor switchover, a software upgrade, a route-processor spike or a large table churn all pause packet handling for longer than a handful of milliseconds, and the session that notices drops every client protocol registered against it. The outage is manufactured by the detection rather than found by it, and it recurs on exactly the maintenance events that were supposed to be non-disruptive.
+
+The floor is `Limits.bfd_min_detection_ms`, so a site whose platform genuinely maintains the session in forwarding hardware can lower it.
+
+Silent when either the interval or the multiplier is unconfigured — the detection time is then a platform default this tool refuses to guess.
+
+**Reports:** BFD on {…} declares the neighbour down after {…}
+
+**Detail:** {…}ms x {…} = {…}, under the {…} a session is expected to survive an ordinary control-plane pause at. Anything that stops packet handling for longer than that — a supervisor switchover, an upgrade, a CPU spike — drops the session and every protocol registered against it, on a link that never failed.
+
+**Remedy:** raise the interval or the multiplier so detection is at least {…}
+
+**Stays silent when:**
+
+- Three 50ms intervals is the fastest session platforms document as survivable, and the finding claims the session is below what a control-plane pause allows. At the floor that claim is not yet true.  
+  `test_timer_rules.py::test_detection_landing_exactly_on_the_floor_is_silent`
+- A platform that genuinely maintains the session in forwarding hardware survives what a software implementation cannot, and the same 60ms session is then a deliberate choice rather than a fragile one.  
+  `test_timer_rules.py::test_the_floor_is_the_operators_number`
+- The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
+  `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
 
 ### `bfd-no-clients`
 
@@ -520,6 +654,60 @@ Skipped when the peering is explicitly not directly connected — an update-sour
 
 - update-source or ebgp-multihop says the operator meant it.  
   `test_facts_rules.py::test_multihop_peer_off_subnet_is_intentional`
+
+### `dampening-never-suppresses`
+
+**medium** · `cassandra.timing.timer_rules.dampening_can_never_suppress`
+
+A dampening profile whose suppress threshold is above its own penalty ceiling never suppresses anything.
+
+The four values are not independent. A penalty halves every half-life and is abandoned altogether after max-suppress, so the most a prefix can ever accumulate is `reuse x 2 ^ (max-suppress / half-life)`. Set the suppress threshold above that and no amount of flapping reaches it: the profile is configured, shows up in review, is believed to be protecting the RIB, and does nothing at all.
+
+This is the opposite failure to `dampening-exceeds-sla` and they cannot both be true of one profile. That one reports dampening that holds a prefix down too long; this one reports dampening that was never going to hold anything.
+
+Silent when any of the four values is absent, since the ceiling is a product of all of them.
+
+**Reports:** {…} dampening on {…} can never reach its suppress threshold
+
+**Detail:** a penalty cannot exceed {…} x 2 ^ ({…}s / {…}s) = {…}, and suppression begins at {…}. No sequence of flaps reaches that number, so no prefix is ever dampened and the protection the profile appears to provide does not exist.
+
+**Remedy:** lower the suppress threshold below {…}, or raise max-suppress-time or the reuse threshold until the ceiling clears it
+
+**Stays silent when:**
+
+- The rule reports dampening that cannot act, not dampening that is set high. With the same thresholds and a shorter half-life the penalty climbs to 12000, so a prefix that keeps flapping is suppressed as intended.  
+  `test_timer_rules.py::test_a_threshold_the_penalty_can_reach_is_silent`
+- A bare `bgp dampening` inherits values that work: an hour of suppression against a fifteen-minute half-life puts the ceiling at sixteen times the reuse limit, far above the threshold. The inherited profile has a different problem, and `dampening-exceeds-sla` is the rule that reports it.  
+  `test_timer_rules.py::test_the_platform_defaults_are_coherent`
+- The ceiling is a product of the reuse limit, the half-life and the max-suppress time. Any one of them absent makes it unknowable, and a rule that filled in the gap would be reporting its own default.  
+  `test_timer_rules.py::test_a_profile_missing_a_term_of_the_product_is_silent`
+- The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
+  `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
+
+### `fhrp-hold-under-three-hellos`
+
+**medium** · `cassandra.timing.timer_rules.fhrp_hold_time_leaves_too_few_hellos`
+
+An FHRP hold time worth fewer than three hellos fails the gateway over on one lost advertisement.
+
+A standby that gives up after two advertisements is one dropped frame away from taking the virtual address, and on a group with preempt configured it hands it straight back — so the cost is not one failover but a pair of them, plus whatever the ARP caches on the segment do in between. HSRP's own default holds for 3.3 hellos and VRRP fixes its master-down interval at three advertisements, for exactly this reason.
+
+Silent when the hold time is not in the fact pack: VRRP on some platforms states only the advertisement interval and derives the rest, and a hold time this tool did not read is not a hold time it can measure.
+
+**Reports:** {…} on {…} holds for only {…} hellos
+
+**Detail:** advertisements are sent every {…} and the group declares the active gone after {…}, so fewer than {…} may be lost before the standby claims the virtual address. Every default in this space allows at least {…}, because a gateway that moves on one dropped frame moves for no reason.
+
+**Remedy:** raise the hold time to at least {…}, or lower the hello interval to keep the failover time and regain the margin
+
+**Stays silent when:**
+
+- Three advertisements is what VRRP fixes its master-down interval at and what HSRP's own default exceeds. A group holding for exactly that long has the margin the rule asks for.  
+  `test_timer_rules.py::test_a_hold_time_of_exactly_three_hellos_is_silent`
+- VRRP as this dialect writes it states an advertisement interval and derives the rest, so there is no configured hold time to measure. The ratio would have to be assumed, and an assumed ratio is not a finding.  
+  `test_timer_rules.py::test_a_group_with_no_hold_time_in_the_pack_is_silent`
+- The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
+  `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
 
 ### `fhrp-no-redundancy`
 
@@ -581,6 +769,31 @@ This is the quiet one: the config looks correct, the intent is visible, and the 
 
 - Sufficient decrement does not fire  
   `test_facts_rules.py::test_sufficient_decrement_does_not_fire`
+
+### `igp-dead-under-three-hellos`
+
+**medium** · `cassandra.timing.timer_rules.igp_dead_interval_leaves_too_few_hellos`
+
+A dead interval worth fewer than three hellos drops healthy adjacencies.
+
+The ratio, not the interval, is what buys tolerance: every default in the business — four hellos for OSPF, three for IS-IS — exists so that a lost packet costs a retransmission rather than a reconvergence. Below three, one dropped hello and ordinary jitter are enough to tear down an adjacency that was never broken, and the SPF run, the route churn and the traffic loss that follow are all caused by the timer rather than by any fault.
+
+Silent when only one of the two numbers is configured, because the ratio cannot be computed from a value nobody wrote down.
+
+**Reports:** {…} on {…} gives up after {…} hellos
+
+**Detail:** the adjacency drops after {…} of silence while hellos are sent every {…}, so fewer than {…} may be lost before the neighbour is declared dead. Every default in this space allows at least {…} for the reason that transient loss is normal and reconvergence is expensive.
+
+**Remedy:** raise the dead interval to at least {…}, or lower the hello interval to keep the detection time and regain the margin
+
+**Stays silent when:**
+
+- Three is the floor every default in this space sits on or above, so a dead interval landing exactly on it is inside the margin the rule asks for, not one short of it.  
+  `test_timer_rules.py::test_a_dead_interval_of_exactly_three_hellos_is_silent`
+- An aggressively tuned IGP is a design decision, and the rule does not have an opinion about it. Hellos every 250ms with a dead interval of a second still tolerate four losses, which is what the check is about.  
+  `test_timer_rules.py::test_sub_second_hellos_are_judged_on_the_ratio_not_the_interval`
+- The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
+  `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
 
 ### `svi-vlan-not-trunked`
 
@@ -651,6 +864,33 @@ Silent when the top priority is shared. There is then no preferred master to fai
 - With every member at the same priority there is no preferred master to fail to return to — whoever wins the address comparison is entitled to keep the group. The tie is worth reporting, and `fhrp-priority-tie` is what reports it.  
   `test_facts_rules.py::test_every_member_sharing_one_priority_has_no_master_to_reclaim`
 
+### `igp-dead-not-a-multiple-of-hello`
+
+**low** · `cassandra.timing.timer_rules.igp_dead_interval_is_not_a_multiple_of_the_hello`
+
+A dead interval that is not a whole number of hellos wastes its remainder.
+
+Adjacency loss is only ever detected on a hello that does not arrive, so the part of the dead interval past the last whole hello is time in which nothing can be learned. A router configured `hello 10` and `dead 35` tolerates three lost hellos, exactly as `dead 30` would, and then waits five more seconds before acting on it.
+
+Reported as low because nothing fails: the adjacency works and the detection time is merely not the one the ratio implies. It is almost always a typo in one of the two numbers, which is worth seeing before someone tunes the other one to match it.
+
+Silent below three hellos, where the ratio itself is the defect and `igp-dead-under-three-hellos` says so instead.
+
+**Reports:** {…} on {…} waits {…} for hellos sent every {…}
+
+**Detail:** that is {…} whole hellos and {…} in which no further hello is due, so the adjacency tolerates the same {…} losses a dead interval of {…} would and detects the failure {…} later. One of the two numbers is not the one that was meant.
+
+**Remedy:** set the dead interval to a whole multiple of the hello — {…} keeps the current tolerance, {…} keeps the current detection time
+
+**Stays silent when:**
+
+- `hello 10` with `dead 40` is the OSPF default written out. Every second of the dead interval is one in which a hello was due, so nothing is wasted.  
+  `test_timer_rules.py::test_the_conventional_four_hellos_is_silent`
+- `hello 10` with `dead 25` is both a fraction of a hello and too few hellos, and the second is the finding worth acting on. Reporting the remainder as well would be two findings about one pair of numbers.  
+  `test_timer_rules.py::test_an_aggressive_ratio_is_left_to_the_rule_about_ratios`
+- The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
+  `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
+
 ### `trunk-vlan-dead`
 
 **low** · `cassandra.facts.rules.trunk_carries_a_vlan_nothing_terminates`
@@ -711,6 +951,8 @@ Both groups see one event. They answer it at different speeds — a different tr
 
 Reported only past MIN_DIVERGENCE_MS. A brief divergence *during* an event is expected behaviour; one that persists long after recovery is the defect.
 
+Silent unless the split survives the flap interval being twenty percent either side of the one that produced it, and silent if the same split is there with no events at all. Those two controls are what separate a property of the configuration from an artifact of the model's sampling grid.
+
 **Reports:** {…} and {…} can end up on different devices
 
 **Detail:** they share a device pair but respond to the same event differently, leaving the gateways split for about {…}s
@@ -733,6 +975,8 @@ A group that changes master repeatedly while one interface flaps.
 A group with preempt and no preempt delay follows its tracked interface exactly: every flap hands mastership back and forth. Each handover is a short forwarding interruption for every host using that gateway, so a link that flaps five times does not cost one outage, it costs five — and the configuration looks correct at rest, because at rest it is.
 
 Reported past MIN_TRANSITIONS, which is high enough that the one handover a genuine failure causes does not count as chasing.
+
+Silent unless the chasing survives the flap interval being twenty percent either side, and silent if the group moves that often with no events at all.
 
 **Reports:** {…} changes master {…} times under a single flap sequence
 
