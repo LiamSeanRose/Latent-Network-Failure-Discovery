@@ -17,12 +17,15 @@ from typing import Final
 from cassandra.factpack.builders import eos, ios, nxos
 from cassandra.factpack.builders.common import ParsedDevice
 from cassandra.factpack.schema import (
+    BfdTimers,
+    DampeningProfile,
     Device,
     FactPackMeta,
     FhrpGroup,
     FhrpMember,
     FhrpProtocol,
     FhrpTimers,
+    IgpHelloTimers,
     StaticFactPack,
     TimerInventory,
     TrackedObject,
@@ -57,6 +60,11 @@ def build_fact_pack(
     groups: dict[tuple[FhrpProtocol, int], list[FhrpMember]] = {}
     virtuals: dict[tuple[FhrpProtocol, int], str | None] = {}
     fhrp_timers: list[FhrpTimers] = []
+    # Dialects that parse them attach these; IOS and NX-OS return the base
+    # ParsedDevice without them, hence getattr with a default below.
+    bfd_timers: list[BfdTimers] = []
+    igp_timers: list[IgpHelloTimers] = []
+    dampening: list[DampeningProfile] = []
     unparsed: dict[str, tuple[str, ...]] = {}
     digest = hashlib.sha256()
 
@@ -66,6 +74,9 @@ def build_fact_pack(
         parsed = parse(text, device_id=path.stem)
         devices.append(parsed.device)
         fhrp_timers.extend(parsed.timers)
+        bfd_timers.extend(getattr(parsed, "bfd", ()))
+        igp_timers.extend(getattr(parsed, "igp_hello", ()))
+        dampening.extend(getattr(parsed, "dampening", ()))
         unparsed[parsed.device.id] = parsed.unparsed_lines
 
         # Tracked objects are defined at top level; join them to the groups that
@@ -114,6 +125,11 @@ def build_fact_pack(
                 groups.items(), key=lambda item: (item[0][0].value, item[0][1])
             )
         ),
-        timers=TimerInventory(fhrp=tuple(fhrp_timers)),
+        timers=TimerInventory(
+            fhrp=tuple(fhrp_timers),
+            bfd=tuple(bfd_timers),
+            igp_hello=tuple(igp_timers),
+            dampening=tuple(dampening),
+        ),
     )
     return pack, unparsed

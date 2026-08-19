@@ -248,6 +248,19 @@ def test_point_to_point_link_off_the_corpus_is_not_isolated(tmp_path: Path) -> N
     assert "l3-interface-isolated" not in rules_fired(pack)
 
 
+def test_a_device_sharing_no_subnet_at_all_is_not_reported_interface_by_interface(
+    tmp_path: Path,
+) -> None:
+    """Configs from a second site in the same directory share nothing with the
+    first. Reporting every one of their interfaces says nothing about any of them."""
+    a = GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110)
+    b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100)
+    elsewhere = "hostname far1\ninterface Vlan70\n   ip address 10.70.0.1/24\n"
+    pack = pack_from(tmp_path, **{"agg-a": a, "agg-b": b, "far1": elsewhere})
+    isolated = [f for f in evaluate(pack) if f.rule == "l3-interface-isolated"]
+    assert isolated == []
+
+
 def test_loopback_is_not_isolated(tmp_path: Path) -> None:
     pack = pair(tmp_path, a_extra="interface Loopback0\n   ip address 10.255.1.1/32\n")
     assert "l3-interface-isolated" not in rules_fired(pack)

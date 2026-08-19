@@ -425,13 +425,26 @@ def isolated_l3_interface(pack: StaticFactPack) -> Iterator[Finding]:
     if len(pack.devices) < 2:
         # One device is isolated from nothing; every subnet would qualify.
         return
-    for (_vrf, net), members in _ordered_subnets(pack):
+
+    subnets = _ordered_subnets(pack)
+    # Isolation is only meaningful relative to a topology the device belongs to.
+    # A device that shares no subnet at all with any other — configs from a
+    # second site dropped into the same directory, say — would otherwise have
+    # every one of its interfaces reported, which says nothing about any of them.
+    attached = {
+        interface.device
+        for _key, members in subnets
+        if len({i.device for i in members}) > 1
+        for interface in members
+    }
+
+    for (_vrf, net), members in subnets:
         if net.prefixlen >= POINT_TO_POINT_PREFIXLEN:
             continue
         if len({i.device for i in members}) > 1:
             continue
         for interface in members:
-            if interface.kind in OFF_THE_WIRE:
+            if interface.kind in OFF_THE_WIRE or interface.device not in attached:
                 continue
             yield Finding(
                 rule="l3-interface-isolated",

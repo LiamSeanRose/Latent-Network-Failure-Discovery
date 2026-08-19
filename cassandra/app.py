@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.facts import rules
 from cassandra.findings import Finding, Severity, Tier, rank
-from cassandra.timing import sequences
+from cassandra.timing import sequences, timer_rules
 
 _SEVERITY_ORDER: Final = (
     Severity.HIGH,
@@ -202,7 +202,9 @@ def analyse(config_dir: Path) -> Analysis:
     pack, _ = build_fact_pack(config_dir)
     if not pack.devices:
         return Analysis(error=f"no .cfg files in {config_dir}")
-    findings = rank(rules.evaluate(pack) + sequences.analyse(pack))
+    findings = rank(
+        rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack)
+    )
     return Analysis(
         findings=tuple(findings),
         fact_pack_id=pack.meta.fact_pack_id,
