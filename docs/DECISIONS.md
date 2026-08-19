@@ -26,9 +26,11 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
       and compares — but only when someone supplies a cEOS image, which cannot be
       redistributed. **The timing model is currently unvalidated, and the workflow says so
       rather than passing quietly.**
-- [x] **Phase 5 — The app.** Done 2026-08-18. `cassandra serve` — local web view over the
-      same engine, standard library only, loopback only, light and dark. Also a
-      `/findings.json` endpoint for scripting.
+- [x] **Phase 5 — The app.** Done 2026-08-18, widened since. `cassandra serve` — local web
+      view over the same engine, standard library only, loopback only, no script tag at all.
+      Filters by severity, tier and device, all of them in the query string so any view is a
+      link. Serves `/findings.json`, `/rules`, `/rules.json` and `/report.html`, takes a
+      baseline for comparison, and says how much of the input it could not read.
 
 - [x] **Cisco IOS dialect + HSRP.** Done 2026-08-18. Dialect detected automatically; the FACTS
       and TIMING tiers needed no changes, which is the evidence that the parser is the only
@@ -37,6 +39,20 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
 **All phases complete except Phase 4's validation, which needs a cEOS image (see above).**
 The next substantive work is either supplying that image, or widening the timing model
 beyond FHRP (PROJECT.md §5.1) — which should not happen until validation exists.
+
+Work since the phases closed, none of it widening the model:
+
+- The rule set is generated into `docs/RULES.md` from the rules themselves, and an
+  undocumented rule fails the build. Every rule now carries both an explanation and at least
+  one test asserting when it stays quiet.
+- Config discovery walks a tree and decides by reading, rather than globbing one level for
+  `.cfg`.
+- Every claim the timing model makes is registered in `docs/timing-model.md` with the lab
+  observation that would falsify it. Writing that register found six defects in the model.
+- Analysis is linear in the size of the collection rather than quadratic; a site's findings no
+  longer depend on what else is filed beside it.
+- The palette is measured rather than asserted, in both themes and under simulated red-green
+  colour blindness.
 
 Carried over, owner-only, not blocking any phase:
 
