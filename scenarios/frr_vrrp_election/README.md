@@ -1,5 +1,11 @@
 # frr_vrrp_election — partial validation of the TIMING model
 
+> **Status: not working yet.** Two CI runs have failed during lab setup rather
+> than during the comparison. FRR's vrrpd needs a macvlan device with the RFC
+> virtual MAC on the parent interface, and it is not coming up inside a
+> containerlab node the way FRR's documentation implies. The validator itself has
+> therefore never run. Workflow is manual-dispatch only until it does.
+
 PROJECT.md §4.2 Phase 4 asks whether the timing model agrees with real protocol
 implementations. The full answer needs Arista cEOS, which cannot be redistributed
 in a public workflow. This is the part that can be answered with free images.

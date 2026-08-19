@@ -5,10 +5,12 @@
 # unvalidated surface rather than closing it. See the scenario README.
 name: validate-election
 
+# Manual only until the lab itself works. Two runs have failed during setup, not
+# during the comparison — FRR's VRRP needs a macvlan device that is not coming up
+# the way the documentation implies inside a containerlab node. A workflow that is
+# always red teaches people to ignore CI, so this stays off the push path until it
+# can pass. Progress notes: docs/DECISIONS.md.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 jobs:

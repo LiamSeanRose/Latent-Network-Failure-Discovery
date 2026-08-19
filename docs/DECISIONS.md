@@ -54,6 +54,39 @@ operation, so there is no second route.
 
 ---
 
+## 2026-08-19 — Partial validation against FRR: attempted, not yet working
+
+**Context:** Phase 4 needs a cEOS image nobody can redistribute, leaving the timing model
+entirely unchecked. FRR is public and CI runners have working bridge networking, so the
+election and preemption half could in principle be validated for free.
+
+**Built:** a two-node FRR lab, a validator that observes who holds the group as the master's
+interface drops and returns, and a workflow that fails when observed behaviour disagrees with
+the model.
+
+**Status: it does not work yet.** Run 1 failed with no macvlan device present and zero
+advertisements sent — containerlab `exec` had swallowed the setup failure. Run 2 moved that
+setup into explicit workflow steps and failed during setup again, in under twenty seconds.
+FRR's vrrpd requires a macvlan carrying the RFC virtual MAC on the parent interface, and it is
+not coming up inside a containerlab node the way FRR's documentation implies.
+
+**Chosen:** leave the work in place, switch the workflow to manual dispatch, and say plainly
+that the validator has never run. A permanently red workflow on the push path teaches people to
+ignore CI, and claiming partial validation on the strength of a job that fails during setup
+would be worse than claiming none.
+
+**Next step for whoever picks this up:** get the macvlan up by hand in a local containerlab FRR
+node first — `ip link add vrrp4-14 link eth1 type macvlan mode bridge`, MAC
+`00:00:5e:00:01:0e`, then restart frr — and find out what the container is actually refusing
+before spending more CI round trips on it. This environment cannot run containerlab at all
+(no IPv6 stack, so Docker's bridge driver will not create networks), which is why the loop was
+CI-only and slow.
+
+**Unchanged by any of this:** the timing model remains unvalidated, exactly as it was before
+the attempt. Nothing regressed; a gap simply stayed open.
+
+---
+
 ## 2026-08-18 — Detect the config dialect rather than asking for it
 
 **Context:** the tool only parsed Arista EOS, and the configs a user is most likely to have are
