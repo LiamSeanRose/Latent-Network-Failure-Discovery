@@ -21,7 +21,7 @@ from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import NosFamily, StaticFactPack
 from cassandra.findings import Severity, Tier
 from cassandra.timing import sequences
-from cassandra.timing.model import Event, EventKind, simulate
+from cassandra.timing.model import Event, EventKind, Placement, simulate
 from cassandra.timing.sequences import analyse
 
 CORPUS: Final = (
@@ -597,34 +597,67 @@ def test_two_groups_on_different_device_pairs_are_not_a_divergence(
         assert divergences == [], (tracked, [f.title for f in divergences])
 
 
-def test_a_group_is_paired_only_with_one_on_exactly_its_own_devices() -> None:
-    """Sharing two devices with a three-member group is not sharing a pair.
+def test_a_group_is_paired_only_with_one_it_shares_a_pair_with() -> None:
+    """Sharing a device pair is what the finding's own sentence claims.
 
-    Pinning the choice rather than the code path: equality of the member device
-    sets, not a non-empty overlap and not an overlap of two. A group with a
-    third member can be served by a device its neighbour has no member on, so a
-    split the timeline shows may be between that device and a shared one —
-    which no consistency between the two groups' timers would prevent, making
-    the finding's remedy wrong rather than merely unhelpful.
+    Pinning the choice rather than the code path. Equality of the whole member
+    set was the first attempt and is wrong in one direction: a third router
+    joining only the wider group, at a priority that can never win, silenced a
+    split occurring strictly between the two devices both groups do share — and
+    for that split the sentence and the remedy were both true.
+
+    Sharing a pair is necessary and not sufficient, which is why it is only the
+    enumeration filter. Whether the split the timeline actually shows falls on
+    the shared pair is a question about where each group sat, and it is asked of
+    the timeline by `_split_within` rather than guessed at here.
     """
     devices_of = {
         "pair-a": frozenset({"agg1", "agg2"}),
         "pair-b": frozenset({"agg1", "agg2"}),
         "trio": frozenset({"agg1", "agg2", "agg3"}),
         "elsewhere": frozenset({"agg1", "agg3"}),
+        "alone": frozenset({"agg1"}),
     }
-    assert sequences._divergence_pairs(list(devices_of), devices_of) == [
-        ("pair-a", "pair-b")
+    paired = sequences._divergence_pairs(list(devices_of), devices_of)
+
+    assert ("pair-a", "pair-b") in paired
+    assert ("pair-a", "trio") in paired, "two shared devices is a shared pair"
+    # One device in common is not a pair, whichever way round it is read.
+    assert ("pair-a", "elsewhere") not in paired
+    assert ("elsewhere", "alone") not in paired
+    assert all(
+        len(devices_of[first] & devices_of[second]) >= 2 for first, second in paired
+    )
+
+
+def test_a_split_outside_the_shared_pair_is_not_reported() -> None:
+    """A wider group can land on a device the narrower one has no member on.
+
+    That divergence is real and it is not a disagreement between the two
+    configurations: nothing consistent the operator could write about the pair
+    they share would prevent it, so the remedy would be pointing at the wrong
+    thing. The filter above cannot see it — it knows which devices exist, not
+    which one held the group — so the timeline is asked.
+    """
+    shared = frozenset({"agg1", "agg2"})
+    outside = [
+        Placement(at_ms=0, masters={"a": "agg1", "b": "agg1"}),
+        Placement(at_ms=1000, masters={"a": "agg1", "b": "agg3"}),
     ]
+    within = [
+        Placement(at_ms=0, masters={"a": "agg1", "b": "agg1"}),
+        Placement(at_ms=1000, masters={"a": "agg1", "b": "agg2"}),
+    ]
+    assert not sequences._split_within(outside, "a", "b", shared)
+    assert sequences._split_within(within, "a", "b", shared)
+    # A sample where the two agree says nothing about the split, even when the
+    # device they agree on is outside the pair.
+    agreeing = [
+        Placement(at_ms=0, masters={"a": "agg3", "b": "agg3"}),
+        Placement(at_ms=1000, masters={"a": "agg1", "b": "agg2"}),
+    ]
+    assert sequences._split_within(agreeing, "a", "b", shared)
 
-
-# ---------------------------------------------------------------------------
-# What the perturbation control has to count
-#
-# PROJECT.md §2.4: a result that appears only at exact timings is a knife-edge
-# artifact. The run that produced the result cannot be one of the runs that
-# corroborate it.
-# ---------------------------------------------------------------------------
 
 KNIFE_EDGE_MASTER: Final = """hostname agg-a
 vlan 10

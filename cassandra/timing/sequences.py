@@ -255,13 +255,20 @@ def _change_for(
     return dialect.fhrp_change(pack, group, device, f"preempt delay minimum {seconds}")
 
 
-def _control_note(held: int | None) -> str:
+def _control_note(held: int | None, of: int = PERTURBED_RUNS) -> str:
     """What the controls established, in the evidence where it can be weighed.
 
     `None` for a sequence with no interval to perturb. A reload has a duration,
     not a rhythm — the device is either back or it is not — so claiming it
     survived a twenty percent change would be claiming a control that was never
     run, which is the one thing §2.4 is most insistent about.
+
+    `of` is how many perturbed runs there actually were, which is not always
+    two: below one second the lower perturbation is finer than the model's own
+    sampling grid, so it is not run at all rather than run as a copy of the
+    unperturbed interval. Saying so is the same obligation as the clause below —
+    a control with one side is weaker than a control with two, and a reader
+    weighing the finding is entitled to know which one it got.
     """
     if held is None:
         # Phrased as not applicable rather than not passed. A reload has a
@@ -276,9 +283,14 @@ def _control_note(held: int | None) -> str:
     # perturbed, so a reader weighing the finding was told the control had a
     # margin it did not have — and the run that produced the observation was
     # being offered as evidence that the observation survives being perturbed.
+    sides = (
+        f"±{int(PERTURBATION * 100)}% of the interval"
+        if of >= PERTURBED_RUNS
+        else f"+{int(PERTURBATION * 100)}% of the interval, the only "
+        f"perturbation of it the model samples finely enough to run"
+    )
     return (
-        f"held in {held} of {PERTURBED_RUNS} runs at "
-        f"±{int(PERTURBATION * 100)}% of the interval, not counting the "
+        f"held in {held} of {of} runs at {sides}, not counting the "
         f"unperturbed one; absent with no events"
     )
 
@@ -293,6 +305,7 @@ def _divergence(
     trigger: str,
     events: tuple[Event, ...],
     held: int | None = PERTURBED_RUNS,
+    of: int = PERTURBED_RUNS,
 ) -> Finding:
     """Two FHRP groups on the same device pair that stop agreeing who is master.
 
@@ -334,7 +347,7 @@ def _divergence(
         detail=f"they share a device pair but respond to the same event "
         f"differently, leaving the gateways split for about {span_ms // 1000}s",
         trigger=trigger,
-        evidence=(*(e.describe() for e in events), _control_note(held)),
+        evidence=(*(e.describe() for e in events), _control_note(held, of)),
         remedy="make tracking and preempt delay consistent across groups on "
         "the same pair",
     )
@@ -349,6 +362,7 @@ def _oscillation(
     trigger: str,
     events: tuple[Event, ...],
     held: int = PERTURBED_RUNS,
+    of: int = PERTURBED_RUNS,
     delay_ms: int = 0,
     change: tuple[str, ...] = (),
 ) -> Finding:
@@ -391,7 +405,7 @@ def _oscillation(
             "interface immediately"
         ),
         trigger=trigger,
-        evidence=(*(e.describe() for e in events), _control_note(held)),
+        evidence=(*(e.describe() for e in events), _control_note(held, of)),
         change=change,
         remedy=(
             f"raise the preempt delay past {delay_ms // 1000}s, or damp the "
@@ -411,15 +425,25 @@ def _intervals_around(up_ms: int) -> tuple[int, ...]:
     nominal run, which would turn the control into three copies of the same
     thing agreeing with itself.
 
-    The first element is the nominal interval and the other two are the
+    The first element is the nominal interval and the rest are the
     perturbations — an order callers depend on, because the run that produces an
     observation cannot also be evidence that the observation survives being
-    perturbed. There are `PERTURBED_RUNS` of the latter, which is why that
-    constant is two and not three.
+    perturbed.
+
+    Usually there are two. At the shortest interval the enumerator offers there
+    is one: twenty percent below a one-second interval is eight hundred
+    milliseconds, which is finer than the model samples, so it clamps back onto
+    the nominal interval and the "perturbed" run is a byte-for-byte copy of the
+    unperturbed one. Counting that copy as a control is exactly what this
+    ordering exists to prevent, so a perturbation that lands on the nominal
+    interval is dropped rather than run — and the caller reports the denominator
+    it was actually given rather than a constant.
     """
-    low = max(DEFAULT_ADVERT_MS, round(up_ms * (1 - PERTURBATION)))
-    high = round(up_ms * (1 + PERTURBATION))
-    return (up_ms, low, high)
+    perturbations = {
+        max(DEFAULT_ADVERT_MS, round(up_ms * (1 - PERTURBATION))),
+        round(up_ms * (1 + PERTURBATION)),
+    }
+    return (up_ms, *sorted(perturbations - {up_ms}))
 
 
 def _preempt_delays(pack: StaticFactPack) -> dict[str, int]:
@@ -505,26 +529,52 @@ def _divergence_pairs(
     reload takes that device's whole group set down at once, so the unfiltered
     pairing reported it as HIGH on any collection shaped that way.
 
-    The test is that the member device sets are equal, which is stronger than
-    "these two groups have a pair in common". A three-member group and a
-    two-member group overlapping on two devices do share a pair, and this skips
-    them deliberately: the wider group can also be served by a device the
-    narrower one has no member on, so a split the timeline shows may be between
-    a shared device and that third one — a placement no amount of consistency
-    between the two groups' timers can prevent, and the remedy would be wrong.
-    Deciding which of the two cases a given timeline is in means looking at
-    where each group actually sat sample by sample, which is a different
-    question from which pairs are worth enumerating. Until something asks it,
-    the conservative filter loses a finding that would be reported anyway on any
-    pair whose groups are configured alike, and the alternative ships a sentence
-    that is not true. Registered as A27.
+    The test is that the two groups have at least two devices in common, which
+    is what "share a device pair" means. It was equality of the whole member
+    set, which is stronger and wrong in one direction: a third router joining
+    only the wider group — at a priority that can never win — silenced a split
+    occurring strictly between the two devices both groups do share, and the
+    sentence and the remedy were both true of it.
+
+    Sharing a pair is necessary and not sufficient, because the wider group can
+    also be served by a device the narrower one has no member on, and a split
+    between that device and a shared one is a placement no consistency between
+    the two groups' timers could prevent. That is a question about where each
+    group actually sat rather than about which pairs are worth enumerating, so
+    it is asked once the timeline exists — see `_split_within`. Registered as
+    A27.
     """
     return [
         (first, second)
         for index, first in enumerate(group_ids)
         for second in group_ids[index + 1 :]
-        if devices_of.get(first, frozenset()) == devices_of.get(second, frozenset())
+        if len(devices_of.get(first, frozenset()) & devices_of.get(second, frozenset()))
+        >= 2
     ]
+
+
+def _split_within(
+    timeline: list[Placement], a: str, b: str, shared: frozenset[str]
+) -> bool:
+    """Is every master seen while these two groups are apart one they both have?
+
+    The pairing filter establishes that the two groups have a pair in common;
+    this establishes that the divergence the timeline shows is on that pair. A
+    split where one of the groups has landed on a device the other has no member
+    on is real, but it is not a disagreement between the two configurations —
+    nothing consistent the operator could write about the pair would prevent it —
+    and the finding's remedy would be pointing at the wrong thing.
+
+    Only the diverged samples are examined. Where the groups agree, one of them
+    sitting outside the shared devices says nothing about the split.
+    """
+    for sample in timeline:
+        first, second = sample.masters.get(a), sample.masters.get(b)
+        if first is None or second is None or first == second:
+            continue
+        if first not in shared or second not in shared:
+            return False
+    return True
 
 
 def analyse(pack: StaticFactPack) -> list[Finding]:
@@ -562,6 +612,9 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                     # perturbations, and they are the only runs the control
                     # counts.
                     (events, timeline), perturbed = runs[0], runs[1:]
+                    # Not always two: below one second the lower perturbation is
+                    # finer than the model's own sampling grid and is not run.
+                    of = len(perturbed)
                     trigger = (
                         f"flap {device}:{interface} {flaps}x "
                         f"({DOWN_MS // 1000}s down, {up_ms // 1000}s up)"
@@ -574,12 +627,18 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                         key = ("divergence", first, second)
                         if key in seen:
                             continue
+                        shared = devices_of[first] & devices_of[second]
+                        if not _split_within(timeline, first, second, shared):
+                            # The groups do share a pair, and this split is not
+                            # on it. Nothing consistent about the pair would
+                            # prevent it, so the remedy would point elsewhere.
+                            continue
                         held = sum(
                             _longest_divergence_ms(t, first, second)
                             >= MIN_DIVERGENCE_MS
                             for _, t in perturbed
                         )
-                        if held < PERTURBED_RUNS:
+                        if held < of:
                             continue
                         if (
                             _longest_divergence_ms(control, first, second)
@@ -600,6 +659,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                                 trigger=trigger,
                                 events=events,
                                 held=held,
+                                of=of,
                             )
                         )
 
@@ -614,7 +674,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                             _transitions(t, group_id) >= MIN_TRANSITIONS
                             for _, t in perturbed
                         )
-                        if held < PERTURBED_RUNS:
+                        if held < of:
                             continue
                         if _transitions(control, group_id) >= MIN_TRANSITIONS:
                             continue
@@ -632,6 +692,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                                 trigger=trigger,
                                 events=events,
                                 held=held,
+                                of=of,
                                 delay_ms=delays.get(group_id, 0),
                                 change=_change_for(pack, group_id, device, suggested),
                             )
@@ -658,6 +719,9 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                 continue
             key = ("divergence", first, second)
             if key in seen:
+                continue
+            shared = devices_of[first] & devices_of[second]
+            if not _split_within(timeline, first, second, shared):
                 continue
             if _longest_divergence_ms(control, first, second) >= MIN_DIVERGENCE_MS:
                 continue

@@ -605,48 +605,65 @@ invalidate it is a configuration where a *shorter* outage produces a divergence 
 
 ---
 
-### A27 — Two groups are a divergence candidate only when their members sit on the same devices
+### A27 — A divergence is reported only between two groups that share a device pair, and only where the split falls on it
 
-**Model:** `_divergence_pairs` compares the set of devices each group has a member on and
-skips any pair whose sets differ. Sharing one device still decides which groups an event can
-move — that is what `_groups_by_device` is for — but it no longer decides which pairs may be
-reported.
+**Model:** two things, asked at two different points. `_divergence_pairs` enumerates a pair of
+groups only when their member device sets intersect in two or more devices. Then, once a
+timeline exists, `_split_within` checks every sample where the two groups disagree and requires
+both masters to be devices the two groups share.
 
 **Believed real behaviour:** not a claim about firmware. It is a claim about what the finding
 says: `fhrp-divergence` tells the reader the two groups "share a device pair" and offers a
 remedy — consistent tracking and preempt delay across the groups on that pair — which exists
-only if there is such a pair. Equality is stronger than "these two have a pair in common", and
-deliberately so: a three-member group overlapping a two-member group on two devices can also
-be served by a device the narrower group has no member on, so a split the timeline shows may
-be between that third device and a shared one, which no consistency between the two groups'
-timers would prevent.
+only if there is such a pair, and which fixes the split only if the split is on it.
 
-**Confidence:** this project's choice, argued in `_divergence_pairs`. The conservative half of
-it — skipping the three-against-two overlap — is the part most likely to be revisited, and the
-thing that would justify revisiting it is a timeline check of *where* each group sat, which the
-pairing loop does not do today.
+Sharing a pair is necessary and not sufficient, which is why it is only the enumeration filter.
+A three-member group overlapping a two-member group on two devices does share a pair, and can
+also be served by a device the narrower group has no member on; a split between that device and
+a shared one is a placement no consistency between the two groups' timers could prevent. That
+is a question about where each group actually sat, so it is asked of the timeline rather than
+guessed at from the membership.
 
-**Correction:** both pairing loops previously enumerated every two groups sharing a single
-device, and this register said nothing about it. One device belonging to two groups with
-different partners is ordinary — an aggregation switch paired with a different neighbour per
-VLAN — and a reload takes that device's whole group set down at once, so any such collection
-produced a HIGH finding whose own detail text asserted a shared device pair that did not exist
-and whose remedy could not be applied.
+**Confidence:** this project's choice, argued in `_divergence_pairs` and `_split_within`.
+
+**Correction, twice.** Both pairing loops originally enumerated every two groups sharing a
+*single* device, and this register said nothing about it. One device belonging to two groups
+with different partners is ordinary — an aggregation switch paired with a different neighbour
+per VLAN — and a reload takes that device's whole group set down at once, so any such
+collection produced a HIGH finding whose own detail text asserted a shared device pair that did
+not exist and whose remedy could not be applied.
+
+The first fix was equality of the whole member set, and this register recorded it as the
+deliberate conservative choice. It was wrong in the other direction: a third router joining
+only the wider group, at a priority that can never win, silenced a split occurring strictly
+between the two devices both groups do share — a finding for which the sentence and the remedy
+were both true. The register's own note said the thing that would justify revisiting it was a
+timeline check of where each group sat. That check now exists, so the filter is the honest one
+and the timeline decides the rest.
 
 **Falsified by:** a configuration where two groups on different device pairs diverge in a way
 consistent timers on either pair would fix. That would mean the pairing, not the sentence, was
 the right thing to keep.
 
-**Test:** `test_two_groups_on_different_device_pairs_are_not_a_divergence`, `test_a_group_is_paired_only_with_one_on_exactly_its_own_devices`
+**Test:** `test_two_groups_on_different_device_pairs_are_not_a_divergence`, `test_a_group_is_paired_only_with_one_it_shares_a_pair_with`, `test_a_split_outside_the_shared_pair_is_not_reported`
 
 ---
 
 ### A28 — The perturbation control counts only the perturbed runs, and requires both of them
 
-**Model:** `_intervals_around` returns the nominal interval first and the two perturbations
-after it. `analyse` reads every observation off the nominal run and counts only the other two,
-requiring the observable in both — `PERTURBED_RUNS` is therefore two, and it means the number
-of runs at ±20%, not the number of runs.
+**Model:** `_intervals_around` returns the nominal interval first and the perturbations after
+it. `analyse` reads every observation off the nominal run and counts only the rest, requiring
+the observable in all of them — `PERTURBED_RUNS` is therefore two, and it means the number of
+runs at ±20%, not the number of runs.
+
+Usually two, and at the shortest interval the enumerator offers, one. Twenty percent below a
+one-second interval is 800 ms, which is finer than the model samples (A2), so it clamps back
+onto the nominal interval and that run is a byte-for-byte copy of the unperturbed one. Counting
+a copy as a control is the whole thing this entry exists to prevent, so a perturbation landing
+on the nominal interval is dropped rather than run, and the evidence line reports the
+denominator it was actually given: `held in 1 of 1 runs at +20% of the interval, the only
+perturbation of it the model samples finely enough to run`. A one-sided control is weaker than
+a two-sided one, and a reader weighing the finding is entitled to know which one it got.
 
 **Believed real behaviour:** not a claim about firmware, and not one about this model either.
 It is what §2.4's second control means: the run that produced an observation cannot also be
@@ -655,13 +672,18 @@ evidence that the observation survives being perturbed.
 **Confidence:** this project's reading of §2.4, which specifies the ±20% perturbation and the
 three-run repetition majority as separate controls. Collapsing them was the error.
 
-**Correction:** this register said the observation "must survive in at least two of the three
-runs", and quoted the evidence line as `held in 3 of 3 runs at ±20% of the interval`. Both
+**Correction, and a second one under it.** This register said the observation "must survive in
+at least two of the three runs", and quoted the evidence line as `held in 3 of 3 runs at ±20%
+of the interval`. Both
 counted the unperturbed run as a perturbation. With the threshold at two of three, a finding
 shipped when the nominal run and one perturbation showed the observable and the other
 perturbation showed **nothing at all** — the knife-edge artifact the control exists to reject,
 reported with an evidence line a reader would take as a control that passed. The threshold is
-now both perturbed runs, and the evidence says which runs it counted.
+now every perturbed run, and the evidence says which runs it counted.
+
+The fix as first written then had a smaller version of the same fault: at a one-second interval
+the lower perturbation clamps onto the nominal one, so "both perturbed runs held" was satisfied
+in part by a copy of the run being tested. The clamped run is no longer offered.
 
 **Falsified by:** an observable that is genuinely absent at one perturbation and genuinely
 present in the real network at the nominal interval — which would mean ±20% is too wide a
@@ -693,8 +715,8 @@ at exactly ninety seconds and nowhere near it is an artifact of that grid rather
 of the configuration. Reporting one spends the reader's trust on a number the model invented.
 
 **Which pairs are eligible at all.** A divergence is reported only between two groups whose
-members sit on the same devices (A27). Two groups that share one device can be moved by one
-event and do not share a device pair, and the finding's own text and remedy are about a pair.
+share a device pair and the split falls on it (A27). Two groups sharing one device can be moved
+by one event and do not share a pair, and the finding's own text and remedy are about a pair.
 
 **Repetition does not apply.** §2.4's third control asks for three runs and a two-of-three
 majority, to separate deterministic behaviour from flaky. This model is deterministic by
