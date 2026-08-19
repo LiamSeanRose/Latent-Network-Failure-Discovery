@@ -648,3 +648,55 @@ is not neutral. A group whose priority line was missed still gets checked, and t
 wrong in a way nothing else on the page would suggest.
 
 **Reversal:** trivial, and would be a regression in honesty rather than in function.
+
+---
+
+## 2026-08-19 — Enumerate a device reload as well as a link flap
+
+**Context:** the TIMING tier flapped one tracked interface at a time. A group that does not
+track the uplink is untouched by that, so a pair whose only asymmetry is a preempt delay was
+invisible unless one of the two also tracked something.
+
+**Chosen:** a second event class — every interface on one device down together, then back. It
+finds a pair on the shipped corpus that the flap enumeration cannot reach.
+
+**Ordering:** the reload runs *last*, and a pair already reported under a flap keeps its flap
+trigger. Where both sequences expose the same divergence the flap is the more instructive one —
+one link, one interval, an argument a reader can follow — and running the reload first meant it
+was claiming pairs the flap would have explained better. That was an accident of ordering, not
+a decision, until it was made one.
+
+**Controls:** a reload carries the no-trigger control and not the perturbation control, and its
+evidence says which. A reload has a duration, not a rhythm: the device is either back or it is
+not, and varying how long it was away tests nothing about the configuration. The line reads
+"the perturbation control does not apply" rather than "no interval to perturb", because the
+second made a different result look like a weaker one.
+
+**Reversal:** cheap; it is one block in `sequences.analyse`.
+
+---
+
+## 2026-08-19 — Address family is part of an FHRP group's identity
+
+**Context:** IPv6 was entirely unparsed. Adding it exposed a design question the IPv4-only
+schema had never had to answer.
+
+**Chosen:** a group is identified by protocol, number, address family and subnet. VRRPv3 runs a
+separate virtual router per family: VRRP 14 for IPv4 and VRRP 14 for IPv6 on one interface
+elect separately, hold different virtual addresses, and can sit on different devices. Keying
+without family made each device a member of one group twice and reported it as duplicate
+membership on correct configuration.
+
+**Consequence:** ten FACTS rules were wrong about IPv6 rather than silent about it — most
+seriously, an IPv6 prefix has no broadcast address, so the rule objecting to a virtual address
+being one condemned working gateways. The virtual address and the label became properties of
+the group record rather than helpers in the rules module, because the timing tier, the figures
+and the CLI all needed them and none of them should import from the rules to get one. Three of
+those were reading the IPv4 field regardless of family.
+
+**Also chosen:** an interface's link-local address is read and not recorded. Every IPv6
+interface has one whether anyone wrote it or not, so recording them puts every device in the
+collection on one subnet — inventing an adjacency between every pair. A group's *virtual*
+link-local address is recorded, because RFC 5798 makes it the group's identity.
+
+**Reversal:** expensive. Family is now in the group key, the timer scope and the label.

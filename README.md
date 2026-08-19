@@ -3,8 +3,8 @@
 **Point it at a directory of network configs. Get back a ranked list of latent failure modes,
 each with the evidence that produced it.**
 
-Arista EOS, Cisco IOS and NX-OS, detected automatically. VRRP and HSRP. No lab, no containers,
-no account, no network access.
+Arista EOS, Cisco IOS and NX-OS, detected automatically. VRRP and HSRP, IPv4 and IPv6. No lab,
+no containers, no account, no network access.
 
 ![The web view: an adjacency map, a severity ring and findings grouped by device](docs/images/screenshot.png)
 
@@ -18,6 +18,11 @@ The interesting findings are the other kind: failures that no steady state conta
 they are properties of a configuration *plus* a sequence of events *plus* the timers governing
 the reaction. A pair of gateways that are correctly configured at rest and spend ninety seconds
 on different devices after a link flaps is not visible to any tool that only looks at rest.
+
+Two event classes are enumerated: a link flapping, and a device reloading. The second finds
+what the first cannot — a group that does not track the uplink is untouched by a flap and moved
+by a reload, and only then does a difference in preempt delay between it and its neighbour
+show.
 
 ![Two gateway groups following the same link failure at different speeds, leaving a window where they disagree](docs/images/landing.png)
 
