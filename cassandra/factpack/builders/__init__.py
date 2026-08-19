@@ -71,8 +71,8 @@ def build_fact_pack(
     groups: dict[GroupKey, list[FhrpMember]] = {}
     virtuals: dict[GroupKey, str | None] = {}
     fhrp_timers: list[FhrpTimers] = []
-    # Dialects that parse them attach these; IOS and NX-OS return the base
-    # ParsedDevice without them, hence getattr with a default below.
+    # Dialects attach these on their own record type; getattr keeps the
+    # collector working for any dialect that does not carry a given family.
     bfd_timers: list[BfdTimers] = []
     igp_timers: list[IgpHelloTimers] = []
     dampening: list[DampeningProfile] = []

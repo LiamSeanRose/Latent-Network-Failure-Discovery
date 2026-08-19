@@ -27,3 +27,8 @@ clab-*/
 # Local environment
 .env
 .envrc
+
+# Build artefacts
+dist/
+build/
+*.whl

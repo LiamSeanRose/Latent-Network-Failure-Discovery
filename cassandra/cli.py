@@ -10,6 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from cassandra import baseline
 from cassandra.app import serve
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
@@ -93,6 +94,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="show evidence, suggested fixes and rule ids",
     )
+    check.add_argument(
+        "--save-baseline",
+        type=Path,
+        metavar="FILE",
+        help="record this run so a later one can be compared against it",
+    )
+    check.add_argument(
+        "--since",
+        type=Path,
+        metavar="FILE",
+        help="report only what changed since a saved baseline",
+    )
 
     app = sub.add_parser("serve", help="open the local web view")
     app.add_argument("--port", type=int, default=8765)
@@ -115,6 +128,25 @@ def main(argv: list[str] | None = None) -> int:
         findings = (
             rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack)
         )
+
+        if args.save_baseline:
+            baseline.save(findings, pack, args.save_baseline)
+            print(f"baseline written to {args.save_baseline}", file=sys.stderr)
+
+        if args.since:
+            try:
+                previous = baseline.load(args.since)
+                diff = baseline.compare(previous, baseline.snapshot(findings, pack))
+            except baseline.BaselineError as error:
+                print(error, file=sys.stderr)
+                return 2
+            print(baseline.render_diff(diff, explain=args.explain))
+            # Only NEW findings fail a regression check. The pre-existing ones
+            # were known and accepted when the baseline was taken, and failing on
+            # them would make every run red until the backlog is cleared, which
+            # is how a check gets switched off.
+            return 1 if diff.new else 0
+
         print(render(findings, explain=args.explain))
         # Exit status is the verdict: non-zero when something needs attention, so
         # this is usable in a pre-commit hook or CI without parsing the output.
