@@ -92,7 +92,7 @@ def test_empty_directory_reports_instead_of_crashing(
     base_url: str, tmp_path: Path
 ) -> None:
     _, body = get(f"{base_url}/?dir={quote(str(tmp_path))}")
-    assert "no .cfg files" in body
+    assert "reads like a device config" in body
 
 
 def test_unknown_path_is_404(base_url: str) -> None:
@@ -727,7 +727,7 @@ def test_a_large_result_is_capped_and_says_so(base_url: str, crowded: Path) -> N
     """A thousand findings is a real answer on a real archive. Rendering all of
     them is a seven-megabyte page; rendering some of them without saying so is
     worse than either."""
-    from cassandra.app import PAGE_LIMIT
+    from cassandra.view import PAGE_LIMIT
 
     configs = crowded
     result = analyse(configs)
@@ -741,7 +741,7 @@ def test_a_large_result_is_capped_and_says_so(base_url: str, crowded: Path) -> N
 
 def test_nothing_is_capped_out_of_the_json(base_url: str, crowded: Path) -> None:
     """The cap is on the page, not on the analysis."""
-    from cassandra.app import PAGE_LIMIT
+    from cassandra.view import PAGE_LIMIT
 
     configs = crowded
     document = json.loads(view(base_url, configs, path="/findings.json"))
@@ -767,7 +767,7 @@ def test_timelines_are_limited_and_the_page_says_where(
     base_url: str, busy: Path
 ) -> None:
     """They repeat the same shape and dominate the weight of the page."""
-    from cassandra.app import FIGURE_LIMIT
+    from cassandra.view import FIGURE_LIMIT
 
     configs = busy
     body = view(base_url, configs)
@@ -924,7 +924,7 @@ def test_the_offer_is_absent_when_the_examples_are_not_installed(
 ) -> None:
     """An installed copy ships no examples directory, and a link to one that is
     not there is worse than no link."""
-    import cassandra.app as app
+    import cassandra.view as view
 
-    monkeypatch.setattr(app, "_EXAMPLE", Path("/definitely/not/here"))
-    assert app._example_offer() == ""
+    monkeypatch.setattr(view, "_EXAMPLE", Path("/definitely/not/here"))
+    assert view._example_offer() == ""
