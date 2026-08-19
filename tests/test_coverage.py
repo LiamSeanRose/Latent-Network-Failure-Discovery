@@ -616,21 +616,38 @@ def whole_corpus(corpus: StaticFactPack) -> coverage.Assessment:
 
 
 def test_a_fact_in_the_pack_that_no_rule_reads_is_named(
-    corpus: StaticFactPack, whole_corpus: coverage.Assessment
+    whole_corpus: coverage.Assessment,
 ) -> None:
     """The rule side of the report answers "did this check have an input". This
     is the same question from the other end, and the two are not the same.
 
     A pack can hand every rule something to look at and still carry a field that
-    was parsed, tested, documented, and consulted by nothing — which is a check
-    nobody has written rather than a check that ran. The L2 segments are the
-    standing example: `factpack/topology.py` computes them on every build and no
-    rule in either tier has ever opened one.
+    was parsed, tested, documented, and consulted by nothing. The standing
+    example used to be the L2 segments — computed on every build by the topology
+    builder and opened by no rule in either tier — and it stopped being one when
+    the checks that read them were written, which is the report doing its job.
+    So the assertion is about the shape of the answer rather than any particular
+    entry: something is on the list, and everything on it is a fact this
+    collection actually states.
     """
-    assert corpus.l2_segments, "the fixture no longer exercises the case"
-    unread = {fact.path for fact in whole_corpus.unread}
-    assert "l2_segments" in unread
+    assert whole_corpus.unread
     assert all(fact.records > 0 for fact in whole_corpus.unread)
+    assert all(fact.path and fact.label for fact in whole_corpus.unread)
+
+
+def test_the_segments_stopped_being_unread_when_something_read_them(
+    whole_corpus: coverage.Assessment,
+) -> None:
+    """The one entry this report can be checked against is the one it removed.
+
+    `l2_segments` was the headline of the list for as long as nothing consulted
+    a broadcast domain. Three rules do now, so the whole collection is off it,
+    and the report saying otherwise would mean it measures something other than
+    what the rules read.
+    """
+    unread = {fact.path for fact in whole_corpus.unread}
+    assert "l2_segments" not in unread
+    assert "l2_adjacencies" not in unread
 
 
 def test_a_fact_a_rule_does_read_is_not_named(
@@ -646,13 +663,30 @@ def test_a_fact_a_rule_does_read_is_not_named(
 
 
 def test_a_field_of_an_unopened_collection_is_not_a_second_finding(
-    whole_corpus: coverage.Assessment,
+    corpus: StaticFactPack,
 ) -> None:
     """Listing a collection nothing reads and then each of its fields says one
-    fact six times and pushes the other findings off the end of the report."""
-    unread = {fact.path for fact in whole_corpus.unread}
-    assert "l2_segments" in unread
-    assert not [path for path in unread if path.startswith("l2_segments[]")]
+    fact six times and pushes the other findings off the end of the report.
+
+    Asked of `unread` directly with a chosen set of consulted paths rather than
+    of a real run, because which collections a run leaves wholly unopened moves
+    every time a rule is written — and the pruning rule does not.
+    """
+    everything = set(coverage._populated(corpus))
+    assert "l2_segments" in everything
+    assert any(path.startswith("l2_segments[]") for path in everything)
+
+    # Nothing consulted at all: the whole pack is unread, and the report is
+    # still one line per collection rather than one per field inside it.
+    reported = {fact.path for fact in coverage.unread(corpus, consulted=())}
+    assert "l2_segments" in reported
+    assert not [path for path in reported if path.startswith("l2_segments[]")]
+
+    # The collection itself consulted: its fields are now reportable, because
+    # something opened the container and did not look at what was in it.
+    opened = {fact.path for fact in coverage.unread(corpus, consulted={"l2_segments"})}
+    assert "l2_segments" not in opened
+    assert any(path.startswith("l2_segments[]") for path in opened)
 
 
 def test_nothing_absent_is_reported_as_unread(

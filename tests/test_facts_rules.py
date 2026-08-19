@@ -8,6 +8,7 @@ that never fires and a rule set that always fires are equally useless.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Final
 
@@ -16,7 +17,7 @@ import pytest
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts.rules import evaluate
-from cassandra.findings import Finding, Severity, Tier
+from cassandra.findings import Finding, Severity, Tier, locate
 from cassandra.timing.model import Event, EventKind, simulate
 
 CORPUS: Final = (
@@ -1468,3 +1469,379 @@ def test_the_two_ways_of_not_preempting_read_differently(tmp_path: Path) -> None
     # much as for one that never turned it on. Only the sentence moves.
     assert deliberate.change == inherited.change
     assert inherited.change[-1].strip().endswith("preempt")
+
+
+# ---------------------------------------------------------------------------
+# Broadcast domains — what `l2_segments` and `l2_adjacencies` decide
+# ---------------------------------------------------------------------------
+
+REPO: Final = Path(__file__).resolve().parents[1]
+
+# Every corpus this repository ships, all of which are meant to be free of
+# layer-2 partitions. RFC 5737 documentation space throughout, like the fixtures.
+SHIPPED: Final = (
+    REPO / "examples" / "two-site",
+    REPO / "examples" / "xr-metro",
+    REPO / "scenarios" / "site14_vrrp_lockstep" / "configs",
+    REPO / "scenarios" / "hsrp_preempt_split" / "configs",
+)
+
+BROADCAST_AGG: Final = """hostname {name}
+vlan 10,20
+interface Ethernet1
+   description uplink
+   switchport mode trunk
+   switchport trunk allowed vlan {allowed}
+interface Vlan20
+   ip address 192.0.2.{host}/24
+{extra}"""
+
+GROUP_MEMBER: Final = """   vrrp 20 ipv4 192.0.2.1
+   vrrp 20 priority-level {priority}
+   vrrp 20 preempt
+"""
+
+
+def broadcast_pair(
+    tmp_path: Path,
+    *,
+    a_allowed: str = "10,20",
+    b_allowed: str = "10,20",
+    a_extra: str = "",
+    b_extra: str = "",
+) -> StaticFactPack:
+    """Two gateways with an SVI in VLAN 20, each trunking what it is told to.
+
+    Both are addressed in 192.0.2.0/24, so the pack holds them as one subnet
+    whatever their trunks say — which is the disagreement these rules read.
+    """
+    return pack_from(
+        tmp_path,
+        **{
+            "agg-a": BROADCAST_AGG.format(
+                name="agg-a", allowed=a_allowed, host=2, extra=a_extra
+            ),
+            "agg-b": BROADCAST_AGG.format(
+                name="agg-b", allowed=b_allowed, host=3, extra=b_extra
+            ),
+        },
+    )
+
+
+def test_a_subnet_whose_two_halves_cannot_reach_each_other(tmp_path: Path) -> None:
+    pack = broadcast_pair(tmp_path, b_allowed="10")
+    finding = _found(pack, "vlan-segment-split")
+    assert finding.severity is Severity.HIGH
+    # The half that provably cannot carry the VLAN is the one named, because it
+    # is the one whose trunk has to change.
+    assert finding.device == "agg-b"
+    assert "192.0.2.0/24" in finding.title
+    assert "agg-b:Vlan20" in finding.title
+    assert finding.change == (
+        "interface Ethernet1",
+        "   switchport trunk allowed vlan add 20",
+    )
+
+
+def test_a_split_subnet_is_cited_at_the_svi_that_is_stranded(tmp_path: Path) -> None:
+    """The finding has to send a reader to a line (PROJECT.md §5.4), and the SVI
+    is the one stanza that is unambiguously about this VLAN on this device."""
+    pack = broadcast_pair(tmp_path, b_allowed="10")
+    finding = next(
+        f for f in locate(evaluate(pack), pack) if f.rule == "vlan-segment-split"
+    )
+    assert finding.source is not None
+    assert finding.source.file == "agg-b.cfg"
+    assert finding.source.line is not None
+
+
+def test_a_vlan_both_uplinks_permit_is_one_broadcast_domain(tmp_path: Path) -> None:
+    """The ordinary configuration: both ends trunk the VLAN, so the co-membership
+    graph joins them and there is one broadcast domain to be in."""
+    assert "vlan-segment-split" not in rules_fired(broadcast_pair(tmp_path))
+
+
+def test_a_switch_missing_from_the_directory_does_not_split_its_neighbours(
+    tmp_path: Path,
+) -> None:
+    """The failure mode that would make these rules useless: a real directory is
+    almost never the whole network, and the switch between two gateways is the
+    device most often left out of one. Both gateways permit VLAN 20 on a trunk,
+    so they are joined whether or not what is between them was collected."""
+    pack = broadcast_pair(tmp_path)
+    assert [d.id for d in pack.devices] == ["agg-a", "agg-b"]
+    assert "vlan-segment-split" not in rules_fired(pack)
+
+
+def test_a_trunk_that_states_no_allowed_list_is_not_a_split(tmp_path: Path) -> None:
+    """A trunk with no allowed list permits every VLAN on real hardware, and an
+    empty `allowed_vlans` in the pack is equally consistent with a construct no
+    parser read. Either way the device may well be carrying VLAN 20."""
+    bare = """hostname agg-b
+vlan 10,20
+interface Ethernet1
+   switchport mode trunk
+interface Vlan20
+   ip address 192.0.2.3/24
+"""
+    pack = pack_from(
+        tmp_path,
+        **{
+            "agg-a": BROADCAST_AGG.format(
+                name="agg-a", allowed="10,20", host=2, extra=""
+            ),
+            "agg-b": bare,
+        },
+    )
+    assert "vlan-segment-split" not in rules_fired(pack)
+
+
+def test_a_device_with_no_trunk_at_all_is_not_half_a_segment(tmp_path: Path) -> None:
+    """A router terminating a VLAN it does not bridge has no trunk to omit it
+    from — the same reading `svi-vlan-not-trunked` gives that shape — and a
+    switch whose uplink nothing parsed looks exactly like one."""
+    router = """hostname rtr1
+vlan 20
+interface Vlan20
+   ip address 192.0.2.3/24
+"""
+    pack = pack_from(
+        tmp_path,
+        **{
+            "agg-a": BROADCAST_AGG.format(
+                name="agg-a", allowed="10,20", host=2, extra=""
+            ),
+            "rtr1": router,
+        },
+    )
+    assert "vlan-segment-split" not in rules_fired(pack)
+
+
+def test_the_only_gateway_in_a_subnet_is_not_a_half_of_one(tmp_path: Path) -> None:
+    """One device addressed in the subnet is `l3-interface-isolated`'s subject:
+    there is no second half for it to be cut off from, and the far end being
+    outside the directory is the commonest reason for it."""
+    pack = pack_from(
+        tmp_path,
+        **{"agg-b": BROADCAST_AGG.format(name="agg-b", allowed="10", host=3, extra="")},
+    )
+    assert "vlan-segment-split" not in rules_fired(pack)
+
+
+def test_a_shut_svi_is_not_a_stranded_half(tmp_path: Path) -> None:
+    """An SVI that is administratively down is in no broadcast domain, so it is
+    not in one that has been divided. Reporting it would tell the operator to
+    edit a trunk to repair an interface they turned off."""
+    pack = broadcast_pair(tmp_path, b_allowed="10", b_extra="   shutdown\n")
+    assert "vlan-segment-split" not in rules_fired(pack)
+
+
+def test_an_unaddressed_svi_is_not_a_stranded_half(tmp_path: Path) -> None:
+    """The finding is about a subnet with gateways on both sides of a divide. An
+    SVI with no address is on neither side of anything."""
+    bare = """hostname agg-b
+vlan 10,20
+interface Ethernet1
+   switchport mode trunk
+   switchport trunk allowed vlan 10
+interface Vlan20
+   description held for a future tenant
+"""
+    pack = pack_from(
+        tmp_path,
+        **{
+            "agg-a": BROADCAST_AGG.format(
+                name="agg-a", allowed="10,20", host=2, extra=""
+            ),
+            "agg-b": bare,
+        },
+    )
+    assert "vlan-segment-split" not in rules_fired(pack)
+
+
+def test_a_subinterface_tagging_the_vlan_off_the_box_is_not_a_split(
+    tmp_path: Path,
+) -> None:
+    """A dot1q subinterface puts a VLAN on the wire with no switchport involved,
+    so the trunk lists do not describe every way the VLAN can leave. Written by
+    editing the fact pack because the dialect that populates `dot1q_vlan` names
+    its SVIs `BVI<n>`, which is placed in no segment — the guard is nonetheless
+    the one thing standing between this rule and a false positive on any parser
+    that learns subinterfaces."""
+    pack = broadcast_pair(tmp_path, b_allowed="10")
+    assert "vlan-segment-split" in rules_fired(pack)
+    tagged = replace(
+        pack,
+        devices=tuple(
+            device
+            if device.id != "agg-b"
+            else replace(
+                device,
+                interfaces=tuple(
+                    interface
+                    if interface.name != "Ethernet1"
+                    else replace(interface, dot1q_vlan=20)
+                    for interface in device.interfaces
+                ),
+            )
+            for device in pack.devices
+        ),
+    )
+    assert "vlan-segment-split" not in rules_fired(tagged)
+
+
+def test_a_group_whose_members_cannot_hear_each_other(tmp_path: Path) -> None:
+    pack = broadcast_pair(
+        tmp_path,
+        b_allowed="10",
+        a_extra=GROUP_MEMBER.format(priority=110),
+        b_extra=GROUP_MEMBER.format(priority=100),
+    )
+    finding = _found(pack, "fhrp-members-in-different-segments")
+    assert finding.severity is Severity.HIGH
+    assert finding.device == "agg-b"
+    assert "VRRP 20" in finding.title
+    assert "192.0.2.1" in finding.detail
+    assert finding.change[0] == "interface Ethernet1"
+
+
+def test_members_on_one_segment_are_not_split(tmp_path: Path) -> None:
+    """Both ends trunk the VLAN their SVIs are in, which is the whole of what the
+    rule asks: the advertisements have a path between the two members."""
+    pack = broadcast_pair(
+        tmp_path,
+        a_extra=GROUP_MEMBER.format(priority=110),
+        b_extra=GROUP_MEMBER.format(priority=100),
+    )
+    assert "fhrp-members-in-different-segments" not in rules_fired(pack)
+
+
+def test_a_group_on_interfaces_the_pack_cannot_place(tmp_path: Path) -> None:
+    """IOS-XR names its SVIs `BVI14`, so the VLAN a member is in cannot be read
+    off the interface name and the pack places it in no broadcast domain. The
+    rule has nothing to compare and says nothing, rather than reading "not in a
+    segment" as "not in the same segment"."""
+    pack, _ = build_fact_pack(REPO / "examples" / "xr-metro")
+    assert [group.label for group in pack.fhrp_groups]
+    assert "fhrp-members-in-different-segments" not in rules_fired(pack)
+
+
+def test_a_group_split_across_two_vlan_ids_is_the_other_rule(tmp_path: Path) -> None:
+    """Members on Vlan20 and Vlan30 sharing a subnet are in different broadcast
+    domains because the numbers differ, not because a trunk prunes one, and the
+    remedy is a renumbering rather than a trunk edit. `subnet-spans-two-vlans`
+    is the finding for that, and it fires here."""
+    a = BROADCAST_AGG.format(
+        name="agg-a",
+        allowed="10,20,30",
+        host=2,
+        extra=GROUP_MEMBER.format(priority=110),
+    )
+    b = BROADCAST_AGG.format(
+        name="agg-b",
+        allowed="10,20,30",
+        host=3,
+        extra=GROUP_MEMBER.format(priority=100),
+    ).replace("interface Vlan20", "interface Vlan30")
+    pack = pack_from(tmp_path, **{"agg-a": a, "agg-b": b})
+    fired = rules_fired(pack)
+    assert "fhrp-members-in-different-segments" not in fired
+    assert "subnet-spans-two-vlans" in fired
+
+
+def test_a_one_member_group_is_not_a_split_one(tmp_path: Path) -> None:
+    """A group with one member has nothing to be separated from, and
+    `fhrp-no-redundancy` is what reports it."""
+    pack = pack_from(
+        tmp_path,
+        **{
+            "agg-a": BROADCAST_AGG.format(
+                name="agg-a",
+                allowed="10",
+                host=2,
+                extra=GROUP_MEMBER.format(priority=110),
+            )
+        },
+    )
+    assert "fhrp-members-in-different-segments" not in rules_fired(pack)
+
+
+def two_vlan_subnet(
+    tmp_path: Path, *, native: str = "", far: str = ""
+) -> StaticFactPack:
+    """One subnet, an SVI at each end, and the far end numbered VLAN 30."""
+    a = BROADCAST_AGG.format(
+        name="agg-a", allowed="10,20,30", host=2, extra=""
+    ).replace(
+        "   switchport trunk allowed vlan 10,20,30\n",
+        f"   switchport trunk allowed vlan 10,20,30\n{native}",
+    )
+    b = BROADCAST_AGG.format(
+        name="agg-b", allowed="10,20,30", host=3, extra=""
+    ).replace("interface Vlan20", "interface Vlan30")
+    return pack_from(tmp_path, **{"agg-a": a, "agg-b": b + far})
+
+
+def test_one_subnet_terminated_on_two_different_vlans(tmp_path: Path) -> None:
+    pack = two_vlan_subnet(tmp_path)
+    finding = _found(pack, "subnet-spans-two-vlans")
+    assert finding.severity is Severity.HIGH
+    assert "192.0.2.0/24" in finding.title
+    assert "VLAN 30" in finding.detail
+    # No change: which of the two numbers was meant is a VLAN plan the
+    # configuration does not contain.
+    assert finding.change == ()
+
+
+def test_a_subnet_whose_gateways_share_a_vlan_is_silent(tmp_path: Path) -> None:
+    """Both SVIs in VLAN 20 is the ordinary case, and the one the derived
+    `over_l2_segment` names: the subnet rides a broadcast domain both are in."""
+    assert "subnet-spans-two-vlans" not in rules_fired(broadcast_pair(tmp_path))
+
+
+def test_a_native_vlan_can_join_two_ids_so_nothing_is_claimed(tmp_path: Path) -> None:
+    """Untagged frames leave a trunk with no id at all and land in whatever the
+    far end calls native, so a VLAN that is native somewhere can genuinely be one
+    broadcast domain with a differently numbered one. The configuration does not
+    say whether it is, so the rule does not either."""
+    pack = two_vlan_subnet(tmp_path, native="   switchport trunk native vlan 20\n")
+    assert "subnet-spans-two-vlans" not in rules_fired(pack)
+
+
+def test_a_routed_interface_in_the_subnet_leaves_the_tagging_unknown(
+    tmp_path: Path,
+) -> None:
+    """A routed port carries no VLAN id in its name, so a subnet with one in it
+    is a subnet whose tagging the pack does not know — not one it knows to be
+    inconsistent."""
+    router = """hostname rtr1
+interface Ethernet5
+   no switchport
+   ip address 192.0.2.9/24
+"""
+    pack = pack_from(
+        tmp_path,
+        **{
+            "agg-a": BROADCAST_AGG.format(
+                name="agg-a", allowed="10,20", host=2, extra=""
+            ),
+            "rtr1": router,
+        },
+    )
+    assert "subnet-spans-two-vlans" not in rules_fired(pack)
+
+
+@pytest.mark.parametrize("corpus", SHIPPED, ids=lambda path: path.parent.name)
+def test_the_shipped_corpora_hold_no_broadcast_domain_defects(corpus: Path) -> None:
+    """Every corpus in this repository is a connected layer 2 by construction, so
+    each of these rules firing on one would be a false positive — and the
+    xr-metro configs, whose SVIs the segment builder cannot place at all, are the
+    case where staying quiet is the entire point."""
+    pack, _ = build_fact_pack(corpus)
+    fired = rules_fired(pack)
+    for rule_id in (
+        "vlan-segment-split",
+        "fhrp-members-in-different-segments",
+        "subnet-spans-two-vlans",
+    ):
+        assert rule_id not in fired

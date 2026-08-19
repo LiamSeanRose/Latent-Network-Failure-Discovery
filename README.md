@@ -11,7 +11,7 @@ No lab, no containers, no account, no network access.
 ## What it looks for
 
 Most config checkers answer questions about the steady state: is this address duplicated, is
-this VLAN declared, do these two ends agree. Those checks are here — forty-three of them — and
+this VLAN declared, do these two ends agree. Those checks are here — forty-six of them — and
 they are worth having.
 
 The interesting findings are the other kind: failures that no steady state contains, because
@@ -131,14 +131,14 @@ to someone works on a laptop with no network, and anyone can read its source.
 
 ### What a clean run does not mean
 
-`--coverage` answers the question a clean run raises. Forty-five checks, and on a corpus with no
+`--coverage` answers the question a clean run raises. Forty-eight checks, and on a corpus with no
 BFD, no IGP timers and no BGP or spanning-tree timing, seventeen of them never had anything to
 examine — a rule that ran and found nothing and a rule that could not run at all look identical
 otherwise, and the second is the more common case on a real directory.
 
 ```
 $ cassandra check examples/two-site --coverage
-coverage: 28 of 45 checks had something to look at. 17 were inert:
+coverage: 31 of 48 checks had something to look at. 17 were inert:
   bfd-multiplier-of-one (no BFD timers in these configs)
   dampening-exceeds-sla (no dampening profile in these configs)
   fhrp-hold-under-peer-hello (no FHRP timers in these configs sets hold time)

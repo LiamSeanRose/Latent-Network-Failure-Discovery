@@ -275,11 +275,11 @@ def test_the_two_oscillations_differ_in_trigger_and_in_remedy() -> None:
     assert a.remedy != b.remedy
 
 
-def test_seventeen_of_forty_five_checks_are_inert_on_this_corpus() -> None:
+def test_seventeen_of_forty_eight_checks_are_inert_on_this_corpus() -> None:
     """Section 8 quotes both numbers and names what the inert ones wanted."""
     pack, _ = build_fact_pack(CORPUS)
     assessed = coverage.assess(pack)
-    assert len(assessed) == 45
+    assert len(assessed) == 48
     assert len(coverage.inert(assessed)) == 17
     # Nothing here configures BFD, so every check that reads a BFD timer is
     # inert for that reason and not because a device happened to be clean.
@@ -343,10 +343,17 @@ def test_matching_the_preempt_delay_removes_the_divergence(corpus: Path) -> None
     assert len({f.trigger for f in oscillations}) == 1
 
 
-def test_the_new_vlan_is_two_new_findings_against_a_baseline(
+def test_the_new_vlan_is_three_new_findings_against_a_baseline(
     corpus: Path, tmp_path: Path
 ) -> None:
-    """Section 7: the baseline diff reports only what the change introduced."""
+    """Section 7: the baseline diff reports only what the change introduced.
+
+    Three, because the SVIs added on both aggregation switches are two isolated
+    interfaces *and* one subnet in two halves. The per-device finding says the
+    VLAN reaches no neighbour; the split says the two halves each answer as the
+    whole of 10.21.0.0/24, which is the failure the isolation causes and is
+    reported once rather than once per side.
+    """
     fix_the_trunk(corpus)
     fix_the_bgp_session(corpus)
     fix_the_divergence(corpus)
@@ -363,6 +370,7 @@ def test_the_new_vlan_is_two_new_findings_against_a_baseline(
     assert identities(diff.new) == {
         ("svi-vlan-not-trunked", "north-agg1", Severity.MEDIUM),
         ("svi-vlan-not-trunked", "north-agg2", Severity.MEDIUM),
+        ("vlan-segment-split", "north-agg2", Severity.HIGH),
     }
     assert len(diff.unchanged) == 4
     assert not diff.fixed

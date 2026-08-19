@@ -525,3 +525,33 @@ def test_meta_is_untouched_by_derivation() -> None:
     )
     pack = StaticFactPack(meta=meta, **derive([], []))
     assert pack.meta is meta
+
+
+def test_a_segment_can_hold_members_no_adjacency_reaches() -> None:
+    """The property the broadcast-domain rules in `cassandra.facts.rules` rest on.
+
+    Membership of a segment and reachability inside it are two different claims,
+    and the derivation keeps them apart: `b` terminates VLAN 14 on an SVI while
+    trunking only VLAN 24, so it is a member of VLAN 14's segment and no
+    adjacency carrying VLAN 14 touches it. A rule reading the segment alone
+    would call the two devices one broadcast domain; the adjacencies are what
+    say they are two.
+    """
+    devices = [
+        box(
+            "a",
+            port("a", "Ethernet1", mode=SwitchportMode.TRUNK, allowed=(14, 24)),
+            port("a", "Vlan14", addresses=("192.0.2.2/24",)),
+        ),
+        box(
+            "b",
+            port("b", "Ethernet1", mode=SwitchportMode.TRUNK, allowed=(24,)),
+            port("b", "Vlan14", addresses=("192.0.2.3/24",)),
+        ),
+    ]
+    topology = derive(devices, [])
+    assert segments(topology)["vlan-14"] == ["a:Ethernet1", "a:Vlan14", "b:Vlan14"]
+    assert [adjacency.vlans for adjacency in topology["l2_adjacencies"]] == [(24,)]
+    # And the addressing still says the two SVIs share a subnet, which is the
+    # disagreement `vlan-segment-split` reports.
+    assert l3_edges(topology) == {"192.0.2.0/24": ["a:Vlan14", "b:Vlan14"]}

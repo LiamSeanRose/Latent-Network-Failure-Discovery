@@ -23,6 +23,7 @@ breaks the build.
 | [`duplicate-address`](#duplicate-address) | facts | high | One address configured on two interfaces in the collection. |
 | [`fhrp-duplicate-member`](#fhrp-duplicate-member) | facts | high | One device holding two memberships of the same group on one subnet. |
 | [`fhrp-hold-under-peer-hello`](#fhrp-hold-under-peer-hello) | facts | high | A member that gives up before its peer is next due to speak is not a standby, it is a second active gateway. |
+| [`fhrp-members-in-different-segments`](#fhrp-members-in-different-segments) | facts | high | A redundancy group whose members cannot hear each other's advertisements. |
 | [`fhrp-members-on-different-subnets`](#fhrp-members-on-different-subnets) | facts | high | A redundancy group whose two halves are not on the same subnet. |
 | [`fhrp-track-target-shutdown`](#fhrp-track-target-shutdown) | facts | high | A track whose target is administratively down. |
 | [`fhrp-track-undefined`](#fhrp-track-undefined) | facts | high | A group that decrements its priority for a track nobody defined. |
@@ -34,7 +35,9 @@ breaks the build.
 | [`mtu-mismatch`](#mtu-mismatch) | facts | high | Neighbours that disagree about how large a frame may be. |
 | [`ospf-timers-disagree`](#ospf-timers-disagree) | facts | high | OSPF refuses an adjacency whose hello and dead intervals do not match. |
 | [`subnet-mask-disagreement`](#subnet-mask-disagreement) | facts | high | Two devices on one wire that disagree about how wide the wire is. |
+| [`subnet-spans-two-vlans`](#subnet-spans-two-vlans) | facts | high | One subnet whose gateways are SVIs for different VLANs. |
 | [`vlan-not-declared`](#vlan-not-declared) | facts | high | A port assigned to a VLAN the device never creates. |
+| [`vlan-segment-split`](#vlan-segment-split) | facts | high | One subnet on one VLAN, in two broadcast domains that cannot hear each other. |
 | [`bfd-detection-below-floor`](#bfd-detection-below-floor) | facts | medium | A BFD session too fast to survive a control-plane pause takes the IGP down. |
 | [`bfd-no-clients`](#bfd-no-clients) | facts | medium | A session nothing registered against comes up, runs, and is never asked. |
 | [`bfd-no-faster-than-igp`](#bfd-no-faster-than-igp) | facts | medium | BFD exists to detect faster than the IGP. One that does not is decoration. |
@@ -327,6 +330,39 @@ Silent when only one member of the group is in the collection, and silent for ti
 - The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
   `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
 
+### `fhrp-members-in-different-segments`
+
+**high** · `cassandra.facts.rules.fhrp_members_in_different_broadcast_domains`
+
+A redundancy group whose members cannot hear each other's advertisements.
+
+Every member of the group runs an SVI for the same VLAN in the same subnet — which is what makes them one group — and the segment carries that VLAN between none of them. FHRP elects by listening: a member that hears nothing from a higher priority is master, so each of them is master, and the virtual address is live on every device at once. So is the virtual MAC, which both protocols derive from the group number rather than from the device, so the duplication the operator would eventually see in an ARP table is not even two MACs to tell apart.
+
+HIGH, and the argument is what happens next rather than what happens now. While the halves stay apart each side has a working gateway and nothing is a backup: the failover the priorities describe cannot happen, because the device that would take over is not listening to the one that would fail. The moment the VLAN is carried between them — a trunk edited, a cable moved, a port unshut — the two masters hear each other, one stands down, and every host that had resolved the loser's gateway is off the network until its ARP entry expires. A redundancy group is the one thing in a config bought specifically to survive an event, and this is it failing at the event.
+
+`fhrp-members-on-different-subnets` is the layer-3 form of the same accident, where the addressing itself disagrees; here the addressing agrees exactly and the wire does not.
+
+Silent when any member sits on an interface the pack cannot place in a broadcast domain — an IOS-XR BVI, a dot1q subinterface, a routed port. The VLAN an interface belongs to has to be read off its name, so a naming convention this tool does not know produces no claim rather than a guess.
+
+Silent when the members are on SVIs for different VLAN ids, which is `subnet-spans-two-vlans`, and silent on a one-member group, which is `fhrp-no-redundancy`. Silent, like `vlan-segment-split`, unless the stranded member's device provably cannot carry the VLAN off itself, so a collection missing the switch between two members produces nothing.
+
+**Reports:** {…} has a member in a broadcast domain of its own on {…}:{…}
+
+**Detail:** no trunk carries VLAN {…} between {…} and {…}, so no member of {…} hears another's advertisements and each of them is master: {…} and the virtual MAC the group number derives from are live on every device at once. Nothing is a backup, so the failover the priorities describe cannot happen; and when the VLAN is carried between them again the two masters meet, one stands down, and every host holding the loser's gateway is stranded until its ARP entry expires
+
+**Remedy:** add VLAN {…} to the trunk carrying {…}'s uplink, so the members are on one segment before relying on the election between them
+
+**Stays silent when:**
+
+- Both ends trunk the VLAN their SVIs are in, which is the whole of what the rule asks: the advertisements have a path between the two members.  
+  `test_facts_rules.py::test_members_on_one_segment_are_not_split`
+- IOS-XR names its SVIs `BVI14`, so the VLAN a member is in cannot be read off the interface name and the pack places it in no broadcast domain. The rule has nothing to compare and says nothing, rather than reading "not in a segment" as "not in the same segment".  
+  `test_facts_rules.py::test_a_group_on_interfaces_the_pack_cannot_place`
+- Members on Vlan20 and Vlan30 sharing a subnet are in different broadcast domains because the numbers differ, not because a trunk prunes one, and the remedy is a renumbering rather than a trunk edit. `subnet-spans-two-vlans` is the finding for that, and it fires here.  
+  `test_facts_rules.py::test_a_group_split_across_two_vlan_ids_is_the_other_rule`
+- A group with one member has nothing to be separated from, and `fhrp-no-redundancy` is what reports it.  
+  `test_facts_rules.py::test_a_one_member_group_is_not_a_split_one`
+
 ### `fhrp-members-on-different-subnets`
 
 **high** · `cassandra.facts.rules.fhrp_members_addressed_on_different_subnets`
@@ -588,6 +624,39 @@ Silent when the prefix lengths agree, and when neither address is inside the oth
 - A /24 and a /64 on the same pair of interfaces are two masks, and they are not a disagreement: they describe different address families. The rule only compares addresses of one version, and this is what says so.  
   `test_ipv6.py::test_two_families_on_one_wire_do_not_disagree_about_its_mask`
 
+### `subnet-spans-two-vlans`
+
+**high** · `cassandra.facts.rules.subnet_terminated_on_two_vlans`
+
+One subnet whose gateways are SVIs for different VLANs.
+
+The addressing says these interfaces share a wire — that is what an L3 adjacency in the Fact Pack is — and each of them puts its traffic on a different VLAN. A frame leaving one arrives tagged with an id the other does not terminate, so the two never exchange a packet: an SVI addressed in a subnet whose broadcast domain it is not a member of. The usual cause is a VLAN plan that renumbered on one side of a link, or an SVI created by copying a neighbour's stanza and editing the address but not the number.
+
+HIGH, on the same argument as `vlan-segment-split` and for the same traffic: hosts on each side resolve their own gateway and reach nothing on the other, the IGP or FHRP the subnet was meant to carry never comes up, and nothing on either device reports a fault. It is worse than a pruned trunk in one respect — no trunk edit fixes it, because the two ends disagree about what the VLAN *is* — and that is what the remedy has to say.
+
+Read off `L3Adjacency.over_l2_segment`, which is unset precisely when the members of a subnet are not all SVIs for one VLAN.
+
+Silent unless every member of the subnet is an SVI this tool can place. A routed link, a dot1q subinterface or a BVI carries no VLAN id in its name, and a subnet with one of those in it is a subnet whose tagging the pack does not know — not one it knows to be inconsistent.
+
+Silent when either VLAN is the native VLAN of a live trunk on the device that holds it. Untagged frames leave such a trunk with no id at all and land in whatever the far end calls native, so two different numbers can genuinely be one broadcast domain, and the configuration does not say whether they are.
+
+Silent, of course, when every member is an SVI for the same VLAN, which is the ordinary case and the one `over_l2_segment` names.
+
+**Reports:** {…} is terminated on two VLANs: {…}:{…} is in VLAN {…}
+
+**Detail:** {…} puts {…} on VLAN {…} and {…}; the addressing says they share a wire, and each side tags its traffic with a VLAN the other does not terminate, so no frame crosses between them: hosts on each side resolve the gateway on their own side and reach nothing on the other, and no adjacency over this subnet can come up
+
+**Remedy:** put both ends on one VLAN — renumber whichever SVI is on the wrong one — or give this half a subnet of its own
+
+**Stays silent when:**
+
+- Both SVIs in VLAN 20 is the ordinary case, and the one the derived `over_l2_segment` names: the subnet rides a broadcast domain both are in.  
+  `test_facts_rules.py::test_a_subnet_whose_gateways_share_a_vlan_is_silent`
+- Untagged frames leave a trunk with no id at all and land in whatever the far end calls native, so a VLAN that is native somewhere can genuinely be one broadcast domain with a differently numbered one. The configuration does not say whether it is, so the rule does not either.  
+  `test_facts_rules.py::test_a_native_vlan_can_join_two_ids_so_nothing_is_claimed`
+- A routed port carries no VLAN id in its name, so a subnet with one in it is a subnet whose tagging the pack does not know — not one it knows to be inconsistent.  
+  `test_facts_rules.py::test_a_routed_interface_in_the_subnet_leaves_the_tagging_unknown`
+
 ### `vlan-not-declared`
 
 **high** · `cassandra.facts.rules.vlan_used_but_not_declared`
@@ -608,6 +677,47 @@ On most platforms the port stays down or blackholes rather than erroring, so the
   `test_facts_rules.py::test_declared_access_vlan_is_silent`
 - A pure L3 device declares no VLANs and is doing nothing wrong.  
   `test_facts_rules.py::test_a_router_declaring_no_vlans_is_not_flagged`
+
+### `vlan-segment-split`
+
+**high** · `cassandra.facts.rules.vlan_broadcast_domain_is_split`
+
+One subnet on one VLAN, in two broadcast domains that cannot hear each other.
+
+Two devices are addressed in the same subnet on the same VLAN, both SVIs are up, and nothing in the segment carries that VLAN between them. Each half resolves ARP among its own members and behaves as though it were the whole subnet: hosts get an answer, the answer is the gateway on their own side, and every frame addressed across the divide is flooded into a domain the destination is not in and discarded. The two configurations read as correct on their own, and the halves only ever meet in a traceroute nobody ran.
+
+HIGH because the loss is silent, total between the halves, and invisible to every device involved: the interfaces are up, the VLAN is declared, the addresses are inside the subnet, and no counter increments. Whatever the subnet was carrying — an IGP adjacency, a BGP session, an FHRP election, hosts talking to each other — is down for as long as the trunk list stands.
+
+`access-vlan-not-trunked` reports the same cut where an access port is what is stranded, and reports it per port; this reports it per subnet, between the two gateways that were meant to be one. `svi-vlan-not-trunked` reports one device's half of it without knowing whether anything is on the other side. Both stay quiet on a device with no trunks, and so does this.
+
+Silent unless one side provably cannot carry the VLAN off itself at all: a device with no trunk, a device with a trunk that states no allowed list, and a device with a subinterface tagging the VLAN each leave the question open rather than answered, and an open question is not a finding. Silent, therefore, on a collection that is missing the switch in the middle — the halves are joined as long as both ends permit the VLAN on a trunk, so an uncaptured device between two well-configured ones produces nothing.
+
+Silent when only one device is addressed in the subnet, which is `l3-interface-isolated`'s subject and not a split; when the SVI is shut or unaddressed, since a broadcast domain it is not in cannot be divided by it; and across VRFs, where two devices holding one subnet is the point.
+
+**Reports:** {…} is split in two: {…}:{…} is alone in VLAN {…}
+
+**Detail:** {…} {…} addressed in {…} too, and no trunk carries VLAN {…} between {…} and {…}, so the subnet is two broadcast domains rather than one; each half resolves ARP among its own members and answers as the whole subnet, and traffic across the divide is flooded into a domain the destination is not in and dropped without an error anywhere
+
+**Remedy:** add VLAN {…} to the trunk carrying {…}'s uplink, or move the SVI onto a VLAN that trunk already permits
+
+**Stays silent when:**
+
+- The ordinary configuration: both ends trunk the VLAN, so the co-membership graph joins them and there is one broadcast domain to be in.  
+  `test_facts_rules.py::test_a_vlan_both_uplinks_permit_is_one_broadcast_domain`
+- The failure mode that would make these rules useless: a real directory is almost never the whole network, and the switch between two gateways is the device most often left out of one. Both gateways permit VLAN 20 on a trunk, so they are joined whether or not what is between them was collected.  
+  `test_facts_rules.py::test_a_switch_missing_from_the_directory_does_not_split_its_neighbours`
+- A trunk with no allowed list permits every VLAN on real hardware, and an empty `allowed_vlans` in the pack is equally consistent with a construct no parser read. Either way the device may well be carrying VLAN 20.  
+  `test_facts_rules.py::test_a_trunk_that_states_no_allowed_list_is_not_a_split`
+- A router terminating a VLAN it does not bridge has no trunk to omit it from — the same reading `svi-vlan-not-trunked` gives that shape — and a switch whose uplink nothing parsed looks exactly like one.  
+  `test_facts_rules.py::test_a_device_with_no_trunk_at_all_is_not_half_a_segment`
+- One device addressed in the subnet is `l3-interface-isolated`'s subject: there is no second half for it to be cut off from, and the far end being outside the directory is the commonest reason for it.  
+  `test_facts_rules.py::test_the_only_gateway_in_a_subnet_is_not_a_half_of_one`
+- An SVI that is administratively down is in no broadcast domain, so it is not in one that has been divided. Reporting it would tell the operator to edit a trunk to repair an interface they turned off.  
+  `test_facts_rules.py::test_a_shut_svi_is_not_a_stranded_half`
+- The finding is about a subnet with gateways on both sides of a divide. An SVI with no address is on neither side of anything.  
+  `test_facts_rules.py::test_an_unaddressed_svi_is_not_a_stranded_half`
+- A dot1q subinterface puts a VLAN on the wire with no switchport involved, so the trunk lists do not describe every way the VLAN can leave. Written by editing the fact pack because the dialect that populates `dot1q_vlan` names its SVIs `BVI<n>`, which is placed in no segment — the guard is nonetheless the one thing standing between this rule and a false positive on any parser that learns subinterfaces.  
+  `test_facts_rules.py::test_a_subinterface_tagging_the_vlan_off_the_box_is_not_a_split`
 
 ### `bfd-detection-below-floor`
 

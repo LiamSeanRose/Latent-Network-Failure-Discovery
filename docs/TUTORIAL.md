@@ -492,7 +492,10 @@ interface Vlan21
 
 ```
 $ uv run cassandra check /tmp/tutorial --since /tmp/base.json
-2 new since baseline
+3 new since baseline
+
+HIGH  north-agg2  10.21.0.0/24 is split in two: north-agg2:Vlan21 is alone in VLAN 21
+        north-agg1 is addressed in 10.21.0.0/24 too, and no trunk carries VLAN 21 between it and north-agg2, so the subnet is two broadcast domains rather than one; each half resolves ARP among its own members and answers as the whole subnet, and traffic across the divide is flooded into a domain the destination is not in and dropped without an error anywhere
 
 MED   north-agg1  Vlan21 has no trunk carrying VLAN 21
         the interface is up and addressed but the VLAN reaches no neighbour, so anything relying on it is isolated
@@ -506,6 +509,12 @@ baseline taken 2026-08-19 06:24Z
 configs changed since baseline (04d19e9e47f7 -> 9831133f8815)
 run with --explain for evidence, fixes and rule ids
 ```
+
+Three findings for one edit, and they are not the same finding three times. The two MEDIUMs are
+per device and say each SVI reaches no neighbour. The HIGH is about the subnet: `10.21.0.0/24`
+now exists as two broadcast domains, each of which resolves ARP among its own members and
+answers as the whole of it. That is the failure the isolation *causes*, it is a property of the
+pair rather than of either device, and it is reported once rather than once per side.
 
 Exit status 1. The four findings you already knew about are one line, not four screens — they
 were accepted when the baseline was taken, and a regression check that goes red on a backlog is a
@@ -578,7 +587,7 @@ them. It changes nothing about the findings and appends a summary underneath the
 ```
 $ uv run cassandra check /tmp/tutorial --coverage
 ...
-coverage: 28 of 45 checks had something to look at. 17 were inert:
+coverage: 31 of 48 checks had something to look at. 17 were inert:
   bfd-multiplier-of-one (no BFD timers in these configs)
   dampening-exceeds-sla (no dampening profile in these configs)
   fhrp-hold-under-peer-hello (no FHRP timers in these configs sets hold time)
@@ -587,7 +596,7 @@ coverage: 28 of 45 checks had something to look at. 17 were inert:
 
 The findings above the summary are the ones section 2 already printed; they are trimmed here.
 
-Seventeen of forty-five checks never ran on this corpus, and none of them ran because a *fact*
+Seventeen of forty-eight checks never ran on this corpus, and none of them ran because a *fact*
 was absent, not because a device was clean. Nothing in these configs sets a BFD timer, an OSPF
 hello, a BGP or spanning-tree timer, an MTU, a native VLAN or a dampening profile, so every check
 that reads one of those had nothing to decide. `--coverage full` names each one and what it was
@@ -616,7 +625,7 @@ INERT  stp-timers-outside-the-standard    no STP timers in these configs
 INERT  trunk-native-vlan-not-allowed      no interface in these configs sets native VLAN
 ```
 
-Trimmed: the twenty-eight `ran` lines above these, and the summary repeated below them, are
+Trimmed: the thirty-one `ran` lines above these, and the summary repeated below them, are
 omitted. A `ran` line says either how many findings the check produced or `nothing to report`,
 which is the useful half — those are the checks that looked at your configs and were satisfied.
 

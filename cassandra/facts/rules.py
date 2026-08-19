@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import itertools
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Final
 
 from cassandra import dialect
@@ -19,6 +19,7 @@ from cassandra.factpack.schema import (
     AddressFamily,
     BgpNeighbor,
     BgpProcess,
+    Device,
     FhrpGroup,
     FhrpMember,
     Interface,
@@ -530,11 +531,13 @@ def preferred_master_will_not_reclaim(pack: StaticFactPack) -> Iterator[Finding]
 # --------------------------------------------------------------------------
 # Subnet-shaped rules
 #
-# The Fact Pack does not ship an L3 adjacency graph yet, so these derive one
-# the only way the configs allow: two addressed interfaces are on the same
-# wire when their prefixes reduce to the same network in the same VRF. That is
-# an assumption, and it is the same assumption the operator made when they
-# typed the addresses.
+# These index the subnets themselves rather than reading `l3_adjacencies`: two
+# addressed interfaces are on the same wire when their prefixes reduce to the
+# same network in the same VRF, which is an assumption, and the same one the
+# operator made when they typed the addresses. The derived graph makes it too,
+# and drops every shut interface on the way — which is exactly what
+# `device-isolated-by-shutdown` has to be able to see, so it reads this index
+# and the graph both.
 # --------------------------------------------------------------------------
 
 
@@ -1620,4 +1623,460 @@ def bgp_router_id_duplicated(pack: StaticFactPack) -> Iterator[Finding]:
             ),
             remedy="give each device its own router-id, conventionally its "
             "loopback address",
+        )
+
+
+# --------------------------------------------------------------------------
+# Broadcast domains
+#
+# Everything below reads `l2_segments` and `l2_adjacencies`, which no rule above
+# opens. A segment lists one VLAN's members; the adjacencies say which of those
+# members can hear each other. Together they answer "are these two gateways on
+# one wire?", where the rules above can only ask "does this device mention the
+# VLAN?" and take the answer per device.
+#
+# Which direction the derivation errs in is what makes that safe.
+# `topology.py` builds `l2_adjacencies` from co-membership rather than from
+# cabling, so it claims *more* connectivity than the text can prove: every trunk
+# permitting VLAN 20 is joined to every other trunk permitting VLAN 20, cable or
+# no cable. Two devices the graph leaves in separate components are therefore
+# separated under the most generous reading the pack allows, which is the only
+# direction in which a missing edge is safe to reason from. The cost is a split
+# that needs layer-1 data to see — two islands that both trunk the VLAN and are
+# not cabled to each other — and that one stays invisible here rather than being
+# guessed at.
+# --------------------------------------------------------------------------
+
+
+def _broadcast_domains(
+    pack: StaticFactPack,
+) -> dict[VlanId, dict[str, frozenset[str]]]:
+    """Per VLAN, the set of devices each device in its segment can hear.
+
+    A device that reaches nobody maps to a set holding only itself, so the
+    caller never has to distinguish "no entry" from "alone".
+    """
+    return {
+        segment.vlan_id: _components(
+            {ref.device for ref in segment.members},
+            (
+                (adjacency.a.device, adjacency.b.device)
+                for adjacency in pack.l2_adjacencies
+                if segment.vlan_id in adjacency.vlans
+            ),
+        )
+        for segment in pack.l2_segments
+        if segment.vlan_id is not None
+    }
+
+
+def _components(
+    devices: set[str], edges: Iterable[tuple[str, str]]
+) -> dict[str, frozenset[str]]:
+    """Connected components, as a lookup from a device to the one it is in."""
+    groups: dict[str, set[str]] = {device: {device} for device in devices}
+    for a, b in edges:
+        if a not in groups or b not in groups or groups[a] is groups[b]:
+            continue
+        joined = groups[a] | groups[b]
+        # One set object shared by every member, so the next edge that touches
+        # any of them merges the whole component rather than one device of it.
+        for device in joined:
+            groups[device] = joined
+    return {device: frozenset(group) for device, group in groups.items()}
+
+
+def _vlan_cannot_leave(device: Device, vlan_id: VlanId) -> bool:
+    """Is it certain that nothing on this device puts `vlan_id` on a wire?
+
+    This is the guard that decides whether a split may be reported at all, and
+    it is deliberately asymmetric: it answers False both for a device that
+    carries the VLAN and for a device the pack cannot account for, because an
+    incomplete capture must not make a neighbour look partitioned. A directory
+    is almost never the whole network, and a rule that reads absence of evidence
+    as evidence of absence reports every partial collection as a broken one.
+
+    Three things make the answer unknown rather than no:
+
+    * The device has no trunk at all. It is then a router terminating a VLAN it
+      does not bridge — the reading `svi-vlan-not-trunked` already gives that
+      shape — or a switch whose uplink nothing parsed.
+    * A live trunk states no allowed list. Real hardware permits every VLAN on
+      such a trunk, and an empty `allowed_vlans` in the fact pack is equally
+      consistent with a construct no parser read;
+      `trunk-native-vlan-not-allowed` declines to read it for the same reason.
+    * A subinterface tags the VLAN off the box. `dot1q_vlan` puts a VLAN on the
+      wire with no switchport involved, so a trunk list says nothing about it.
+
+    Counted over live interfaces only. A device whose every trunk is shut really
+    cannot carry the VLAN, and this still declines to say so: everything about
+    such a box is off the network, `device-isolated-by-shutdown` says that in
+    one finding, and repeating it once per VLAN would bury it.
+    """
+    live = [interface for interface in device.interfaces if interface.admin_enabled]
+    trunks = [
+        interface
+        for interface in live
+        if interface.switchport_mode is SwitchportMode.TRUNK or interface.allowed_vlans
+    ]
+    if not trunks or any(not trunk.allowed_vlans for trunk in trunks):
+        return False
+    if any(vlan_id in trunk.allowed_vlans for trunk in trunks):
+        return False
+    return not any(interface.dot1q_vlan == vlan_id for interface in live)
+
+
+def _svi_gateways(
+    pack: StaticFactPack,
+) -> dict[tuple[VrfName | None, Network, VlanId], dict[str, str]]:
+    """Every live, addressed SVI, indexed by the subnet and VLAN it serves.
+
+    Keyed per VRF like every other subnet-shaped rule in this module, and host
+    prefixes are left out: a /32 on an SVI is a routing identity rather than a
+    claim about a broadcast domain.
+    """
+    index: dict[tuple[VrfName | None, Network, VlanId], dict[str, str]] = {}
+    for device in pack.devices:
+        for interface in device.interfaces:
+            vlan_id = _svi_vlan(interface)
+            if vlan_id is None or not interface.admin_enabled:
+                continue
+            for net in _networks(interface):
+                if net.prefixlen == net.max_prefixlen:
+                    continue
+                index.setdefault((interface.vrf, net, vlan_id), {})[device.id] = (
+                    interface.name
+                )
+    return index
+
+
+def _halves(
+    devices: Iterable[str], domains: dict[str, frozenset[str]]
+) -> list[list[str]]:
+    """The devices grouped by broadcast domain, largest group first.
+
+    A device the segment does not hold is its own group. That happens only for a
+    caller asking about a device with no interface in the VLAN at all, and
+    answering "alone" rather than raising keeps the question decidable.
+    """
+    parts: dict[frozenset[str], list[str]] = {}
+    for device in sorted(devices):
+        parts.setdefault(domains.get(device, frozenset({device})), []).append(device)
+    return sorted(parts.values(), key=lambda part: (-len(part), part[0]))
+
+
+def _cut_off(part: list[str], devices: dict[str, Device], vlan_id: VlanId) -> bool:
+    """May this whole group of devices be said to be sealed off from the VLAN?
+
+    Every device in it has to be, and a device the pack does not hold counts
+    against: one member with an unread uplink is a path for the whole group.
+    """
+    return all(
+        device in devices and _vlan_cannot_leave(devices[device], vlan_id)
+        for device in part
+    )
+
+
+def _add_vlan_to_the_only_trunk(
+    pack: StaticFactPack, device: Device, vlan_id: VlanId
+) -> tuple[str, ...]:
+    """The edit, but only where the device has one trunk it could go on.
+
+    Which uplink a VLAN belongs on is a decision about the VLAN plan, and a
+    device with two trunks has two answers this tool cannot choose between —
+    so it says nothing there, as `cassandra.dialect` requires of everything
+    that writes a line.
+    """
+    nos = dialect.nos_of(pack, device.id)
+    trunks = [i for i in device.interfaces if i.admin_enabled and i.allowed_vlans]
+    if nos is None or len(trunks) != 1:
+        return ()
+    return dialect.under_interface(
+        nos, trunks[0].name, f"switchport trunk allowed vlan add {vlan_id}"
+    )
+
+
+@rule
+def vlan_broadcast_domain_is_split(pack: StaticFactPack) -> Iterator[Finding]:
+    """One subnet on one VLAN, in two broadcast domains that cannot hear each other.
+
+    Two devices are addressed in the same subnet on the same VLAN, both SVIs are
+    up, and nothing in the segment carries that VLAN between them. Each half
+    resolves ARP among its own members and behaves as though it were the whole
+    subnet: hosts get an answer, the answer is the gateway on their own side,
+    and every frame addressed across the divide is flooded into a domain the
+    destination is not in and discarded. The two configurations read as correct
+    on their own, and the halves only ever meet in a traceroute nobody ran.
+
+    HIGH because the loss is silent, total between the halves, and invisible to
+    every device involved: the interfaces are up, the VLAN is declared, the
+    addresses are inside the subnet, and no counter increments. Whatever the
+    subnet was carrying — an IGP adjacency, a BGP session, an FHRP election,
+    hosts talking to each other — is down for as long as the trunk list stands.
+
+    `access-vlan-not-trunked` reports the same cut where an access port is what
+    is stranded, and reports it per port; this reports it per subnet, between
+    the two gateways that were meant to be one. `svi-vlan-not-trunked` reports
+    one device's half of it without knowing whether anything is on the other
+    side. Both stay quiet on a device with no trunks, and so does this.
+
+    Silent unless one side provably cannot carry the VLAN off itself at all: a
+    device with no trunk, a device with a trunk that states no allowed list, and
+    a device with a subinterface tagging the VLAN each leave the question open
+    rather than answered, and an open question is not a finding. Silent,
+    therefore, on a collection that is missing the switch in the middle — the
+    halves are joined as long as both ends permit the VLAN on a trunk, so an
+    uncaptured device between two well-configured ones produces nothing.
+
+    Silent when only one device is addressed in the subnet, which is
+    `l3-interface-isolated`'s subject and not a split; when the SVI is shut or
+    unaddressed, since a broadcast domain it is not in cannot be divided by it;
+    and across VRFs, where two devices holding one subnet is the point.
+    """
+    devices = {device.id: device for device in pack.devices}
+    domains = _broadcast_domains(pack)
+    for (_vrf, net, vlan_id), gateways in sorted(_svi_gateways(pack).items(), key=str):
+        if len(gateways) < 2:
+            continue
+        parts = _halves(gateways, domains.get(vlan_id, {}))
+        if len(parts) < 2:
+            continue
+        home, *rest = parts
+        for part in rest:
+            # Whichever side is provably sealed off is the side to name: it is
+            # the one whose trunks have to change, and the claim that the two
+            # cannot reach each other rests on its configuration alone. A sealed
+            # part is always one device — a second device in it would need a
+            # trunk permitting the VLAN, which is what being sealed rules out.
+            if _cut_off(part, devices, vlan_id):
+                blamed, far = part, home
+            elif _cut_off(home, devices, vlan_id):
+                blamed, far = home, part
+            else:
+                continue
+            device = blamed[0]
+            interface = gateways[device]
+            trunks = [
+                i
+                for i in devices[device].interfaces
+                if i.admin_enabled and i.allowed_vlans
+            ]
+            yield Finding(
+                rule="vlan-segment-split",
+                tier=Tier.FACTS,
+                severity=Severity.HIGH,
+                device=device,
+                title=f"{net} is split in two: {device}:{interface} is alone in "
+                f"VLAN {vlan_id}",
+                detail=", ".join(far)
+                + f" {'is' if len(far) == 1 else 'are'} addressed in {net} too, and "
+                f"no trunk carries VLAN {vlan_id} between "
+                f"{'it' if len(far) == 1 else 'them'} and {device}, so the "
+                f"subnet is two broadcast domains rather than one; each half "
+                f"resolves ARP among its own members and answers as the whole "
+                f"subnet, and traffic across the divide is flooded into a domain "
+                f"the destination is not in and dropped without an error anywhere",
+                evidence=(
+                    *(
+                        f"{device}:{trunk.name} allowed "
+                        + ",".join(str(v) for v in trunk.allowed_vlans)
+                        for trunk in trunks
+                    ),
+                    *(f"{other}:{gateways[other]} {net}" for other in far),
+                ),
+                remedy=f"add VLAN {vlan_id} to the trunk carrying {device}'s "
+                f"uplink, or move the SVI onto a VLAN that trunk already permits",
+                change=_add_vlan_to_the_only_trunk(pack, devices[device], vlan_id),
+            )
+
+
+@rule
+def fhrp_members_in_different_broadcast_domains(
+    pack: StaticFactPack,
+) -> Iterator[Finding]:
+    """A redundancy group whose members cannot hear each other's advertisements.
+
+    Every member of the group runs an SVI for the same VLAN in the same subnet —
+    which is what makes them one group — and the segment carries that VLAN
+    between none of them. FHRP elects by listening: a member that hears nothing
+    from a higher priority is master, so each of them is master, and the virtual
+    address is live on every device at once. So is the virtual MAC, which both
+    protocols derive from the group number rather than from the device, so the
+    duplication the operator would eventually see in an ARP table is not even
+    two MACs to tell apart.
+
+    HIGH, and the argument is what happens next rather than what happens now.
+    While the halves stay apart each side has a working gateway and nothing is a
+    backup: the failover the priorities describe cannot happen, because the
+    device that would take over is not listening to the one that would fail. The
+    moment the VLAN is carried between them — a trunk edited, a cable moved, a
+    port unshut — the two masters hear each other, one stands down, and every
+    host that had resolved the loser's gateway is off the network until its ARP
+    entry expires. A redundancy group is the one thing in a config bought
+    specifically to survive an event, and this is it failing at the event.
+
+    `fhrp-members-on-different-subnets` is the layer-3 form of the same
+    accident, where the addressing itself disagrees; here the addressing agrees
+    exactly and the wire does not.
+
+    Silent when any member sits on an interface the pack cannot place in a
+    broadcast domain — an IOS-XR BVI, a dot1q subinterface, a routed port. The
+    VLAN an interface belongs to has to be read off its name, so a naming
+    convention this tool does not know produces no claim rather than a guess.
+
+    Silent when the members are on SVIs for different VLAN ids, which is
+    `subnet-spans-two-vlans`, and silent on a one-member group, which is
+    `fhrp-no-redundancy`. Silent, like `vlan-segment-split`, unless the stranded
+    member's device provably cannot carry the VLAN off itself, so a collection
+    missing the switch between two members produces nothing.
+    """
+    devices = {device.id: device for device in pack.devices}
+    domains = _broadcast_domains(pack)
+    interfaces = _interfaces(pack)
+    for group in pack.fhrp_groups:
+        if len(group.members) < 2:
+            continue
+        placed: dict[str, str] = {}
+        vlan_ids: set[VlanId] = set()
+        for member in group.members:
+            interface = interfaces.get((member.device, member.interface))
+            vlan_id = _svi_vlan(interface) if interface is not None else None
+            if interface is None or vlan_id is None or not interface.admin_enabled:
+                vlan_ids = set()
+                break
+            placed[member.device] = member.interface
+            vlan_ids.add(vlan_id)
+        if len(vlan_ids) != 1 or len(placed) < 2:
+            continue
+        vlan_id = vlan_ids.pop()
+        parts = _halves(placed, domains.get(vlan_id, {}))
+        if len(parts) < 2:
+            continue
+        home, *rest = parts
+        for part in rest:
+            if _cut_off(part, devices, vlan_id):
+                blamed, far = part, home
+            elif _cut_off(home, devices, vlan_id):
+                blamed, far = home, part
+            else:
+                continue
+            device = blamed[0]
+            virtual = group.virtual_address or "the virtual address"
+            yield Finding(
+                rule="fhrp-members-in-different-segments",
+                tier=Tier.FACTS,
+                severity=Severity.HIGH,
+                device=device,
+                title=f"{group.label} has a member in a broadcast domain of its "
+                f"own on {device}:{placed[device]}",
+                detail=f"no trunk carries VLAN {vlan_id} between {device} and "
+                + ", ".join(far)
+                + f", so no member of {group_summary(group)} hears another's "
+                f"advertisements and each of them is master: {virtual} and the "
+                f"virtual MAC the group number derives from are live on every "
+                f"device at once. Nothing is a backup, so the failover the "
+                f"priorities describe cannot happen; and when the VLAN is "
+                f"carried between them again the two masters meet, one stands "
+                f"down, and every host holding the loser's gateway is stranded "
+                f"until its ARP entry expires",
+                evidence=tuple(
+                    f"{member.device}:{member.interface} {group_summary(group)} "
+                    f"priority {member.priority}"
+                    for member in group.members
+                ),
+                remedy=f"add VLAN {vlan_id} to the trunk carrying {device}'s "
+                f"uplink, so the members are on one segment before relying on "
+                f"the election between them",
+                change=_add_vlan_to_the_only_trunk(pack, devices[device], vlan_id),
+            )
+
+
+@rule
+def subnet_terminated_on_two_vlans(pack: StaticFactPack) -> Iterator[Finding]:
+    """One subnet whose gateways are SVIs for different VLANs.
+
+    The addressing says these interfaces share a wire — that is what an L3
+    adjacency in the Fact Pack is — and each of them puts its traffic on a
+    different VLAN. A frame leaving one arrives tagged with an id the other does
+    not terminate, so the two never exchange a packet: an SVI addressed in a
+    subnet whose broadcast domain it is not a member of. The usual cause is a
+    VLAN plan that renumbered on one side of a link, or an SVI created by
+    copying a neighbour's stanza and editing the address but not the number.
+
+    HIGH, on the same argument as `vlan-segment-split` and for the same traffic:
+    hosts on each side resolve their own gateway and reach nothing on the other,
+    the IGP or FHRP the subnet was meant to carry never comes up, and nothing on
+    either device reports a fault. It is worse than a pruned trunk in one
+    respect — no trunk edit fixes it, because the two ends disagree about what
+    the VLAN *is* — and that is what the remedy has to say.
+
+    Read off `L3Adjacency.over_l2_segment`, which is unset precisely when the
+    members of a subnet are not all SVIs for one VLAN.
+
+    Silent unless every member of the subnet is an SVI this tool can place. A
+    routed link, a dot1q subinterface or a BVI carries no VLAN id in its name,
+    and a subnet with one of those in it is a subnet whose tagging the pack does
+    not know — not one it knows to be inconsistent.
+
+    Silent when either VLAN is the native VLAN of a live trunk on the device
+    that holds it. Untagged frames leave such a trunk with no id at all and land
+    in whatever the far end calls native, so two different numbers can genuinely
+    be one broadcast domain, and the configuration does not say whether they are.
+
+    Silent, of course, when every member is an SVI for the same VLAN, which is
+    the ordinary case and the one `over_l2_segment` names.
+    """
+    devices = {device.id: device for device in pack.devices}
+    interfaces = _interfaces(pack)
+    for adjacency in pack.l3_adjacencies:
+        if adjacency.over_l2_segment is not None:
+            continue
+        placed: dict[VlanId, list[tuple[str, str]]] = {}
+        for ref in adjacency.members:
+            interface = interfaces.get((ref.device, ref.interface))
+            vlan_id = _svi_vlan(interface) if interface is not None else None
+            if vlan_id is None:
+                placed = {}
+                break
+            placed.setdefault(vlan_id, []).append((ref.device, ref.interface))
+        if len(placed) < 2:
+            continue
+        if any(
+            trunk.native_vlan in placed
+            for device_id, _name in itertools.chain.from_iterable(placed.values())
+            if device_id in devices
+            for trunk in devices[device_id].interfaces
+            if trunk.admin_enabled and trunk.switchport_mode is SwitchportMode.TRUNK
+        ):
+            continue
+        # The odd one out is the smallest group: the one SVI numbered
+        # differently from the rest of the subnet is the line that has to move.
+        odd, *others = sorted(placed.items(), key=lambda item: (len(item[1]), item[0]))
+        vlan_id, members = odd
+        device, interface = members[0]
+        elsewhere = ", ".join(
+            f"{other} puts it on VLAN {number}"
+            for number, holders in others
+            for other, _name in holders
+        )
+        yield Finding(
+            rule="subnet-spans-two-vlans",
+            tier=Tier.FACTS,
+            severity=Severity.HIGH,
+            device=device,
+            title=f"{adjacency.prefix} is terminated on two VLANs: "
+            f"{device}:{interface} is in VLAN {vlan_id}",
+            detail=f"{device} puts {adjacency.prefix} on VLAN {vlan_id} and "
+            f"{elsewhere}; the addressing says they share a wire, and each side "
+            f"tags its traffic with a VLAN the other does not terminate, so no "
+            f"frame crosses between them: hosts on each side resolve the gateway "
+            f"on their own side and reach nothing on the other, and no adjacency "
+            f"over this subnet can come up",
+            evidence=tuple(
+                f"{holder}:{name} vlan {number} {adjacency.prefix}"
+                for number, holders in sorted(placed.items())
+                for holder, name in holders
+            ),
+            remedy="put both ends on one VLAN — renumber whichever SVI is on the "
+            "wrong one — or give this half a subnet of its own",
         )
