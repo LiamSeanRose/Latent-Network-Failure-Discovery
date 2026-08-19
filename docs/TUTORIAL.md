@@ -558,19 +558,25 @@ Trimmed after the first finding.
 ## 9. The web view
 
 ```
-$ uv run cassandra serve
-cassandra: http://127.0.0.1:8765  (ctrl-c to stop)
+$ uv run cassandra serve /tmp/tutorial
+cassandra: http://127.0.0.1:8765/?dir=%2Ftmp%2Ftutorial  (ctrl-c to stop)
 ```
 
-The directory is a query parameter, so open `http://127.0.0.1:8765/?dir=/tmp/tutorial`. It binds
-to loopback and reads nothing you did not name.
+The link already has the directory in it. It binds to loopback and reads nothing you did not
+name.
 
-Three things it has that the CLI does not.
+Five things it has that the CLI does not.
 
 **An adjacency map.** The devices and the links between them, drawn from the same fact pack
 `cassandra facts` prints. It is the fastest way to check that the tool understood your topology
 before you argue with what it says about it — a device missing from that picture is a device
-whose config did not parse the way you expected.
+whose config did not parse the way you expected. A device with findings carries a dot in the
+colour of its worst one and is a link to them, so "which of these is the problem" is one click.
+
+**A picture of the cause.** Under the map, one row per FHRP group showing its preempt delay and
+its tracked decrement. The timeline further down draws the effect; this draws the reason. Two
+rows that do not match are two groups that will answer the same event at different speeds, which
+on this corpus is the entire divergence finding in one glance.
 
 **A timeline under every timing finding.** Point it at the corpus as it ships —
 `?dir=<your clone>/examples/two-site` — and the divergence finding carries a figure captioned
@@ -580,13 +586,19 @@ VRRP 20 stays on `north-agg2` until 69s. The gap between those two bands is the 
 the same run the `evidence:` lines describe, drawn instead of listed, and much easier to check
 for an off-by-one.
 
-**Filters that are links.** Severity and tier are in the query string, so a filtered view is a
-URL you can send someone, and `/findings.json` answers the same question as the page it was
-linked from:
+**Filters that are links.** Severity, tier, device and a free-text search are all in the query
+string, so any filtered view is a URL you can send someone, and `/findings.json` answers the
+same question as the page it was linked from:
 
 ```
 $ curl -s "http://127.0.0.1:8765/findings.json?dir=/tmp/tutorial&severity=high"
 ```
+
+**A baseline comparison.** Put a saved baseline in the second box, or pass `&since=/tmp/base.json`,
+and every finding arrives tagged `new` or `known`, with the ones that stopped being reported in
+their own section. If the configs are byte-identical to the baseline and the findings are not,
+it says so outright — that means the checks changed, not the network, and nobody works that out
+unprompted.
 
 The server also answers `/rules` (every check and when each stays quiet), `/rules.json`, and
 `/report.html`, which downloads a standalone file. The same file comes out of the CLI:
