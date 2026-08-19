@@ -11,8 +11,9 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Final
 
-from cassandra import baseline, coverage
+from cassandra import baseline, coverage, exchange
 from cassandra.app import analyse, compare_with, serve
 from cassandra.catalogue import catalogue, render_text
 from cassandra.factpack import discovery
@@ -23,6 +24,11 @@ from cassandra.findings import Finding, Severity, locate
 from cassandra.report import as_json, render
 from cassandra.report_html import write as write_html
 from cassandra.timing import sequences, timer_rules
+
+# What `check` can print, in the order --help offers them. `text` is for a
+# person; the other three are for something downstream, and which one is right
+# depends on what is already reading it rather than on which is best.
+FORMATS: Final[tuple[str, ...]] = ("text", "json", "sarif", "junit")
 
 
 def render_facts(pack: StaticFactPack, unparsed: dict[str, tuple[str, ...]]) -> str:
@@ -117,7 +123,21 @@ def main(argv: list[str] | None = None) -> int:
         "--json",
         action="store_true",
         dest="as_json",
-        help="emit findings as JSON for a pipeline instead of text",
+        help="emit findings as JSON for a pipeline instead of text; "
+        "the same as --format json",
+    )
+    check.add_argument(
+        "--format",
+        choices=tuple(FORMATS),
+        dest="output_format",
+        metavar="|".join(FORMATS),
+        help=(
+            "the shape of the output. `json` is this tool's own; `sarif` and "
+            "`junit` are formats a CI system already reads — SARIF turns "
+            "findings into annotations on the configuration lines responsible, "
+            "and JUnit turns the rule set into a test report where an inert "
+            "check is a skip rather than a pass. All go to stdout"
+        ),
     )
     check.add_argument(
         "--fail-on",
@@ -245,24 +265,29 @@ def main(argv: list[str] | None = None) -> int:
                 print(error, file=sys.stderr)
                 return 2
             print(baseline.render_diff(diff, explain=args.explain))
-            _report_coverage(pack, args.coverage, quiet=False)
+            _report_coverage(pack, args.coverage, assessed=None, quiet=False)
             # Only NEW findings fail a regression check. The pre-existing ones
             # were known and accepted when the baseline was taken, and failing on
             # them would make every run red until the backlog is cleared, which
             # is how a check gets switched off.
             return 1 if diff.new else 0
 
-        if args.as_json:
-            print(
-                as_json(
-                    findings,
-                    pack_id=pack.meta.fact_pack_id,
-                    digest=pack.meta.config_digest,
-                )
-            )
-        else:
-            print(render(findings, explain=args.explain))
-        _report_coverage(pack, args.coverage, quiet=args.as_json)
+        # `--json` predates `--format` and still means what it always meant.
+        # An explicit `--format` wins over it, because the one the user typed
+        # last is the one they meant, and the alias is the older habit.
+        chosen = args.output_format or ("json" if args.as_json else "text")
+        # Assessed once. JUnit needs the verdict to tell a check that passed
+        # from one that never ran, and `--coverage` prints the same thing; two
+        # traced runs of the whole rule set to say it twice is pure waste.
+        assessed = (
+            coverage.assess(pack)
+            if chosen == "junit" or args.coverage is not None
+            else None
+        )
+        print(_emit(findings, pack, chosen, args, assessed))
+        # Alongside a machine format rather than inside it: a parser handed the
+        # findings should not have to skip a paragraph of prose to reach them.
+        _report_coverage(pack, args.coverage, assessed=assessed, quiet=chosen != "text")
         # Exit status is the verdict: non-zero when something needs attention, so
         # this is usable in a pre-commit hook or CI without parsing the output.
         # --fail-on narrows what counts as attention without narrowing the
@@ -306,7 +331,47 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-def _report_coverage(pack: StaticFactPack, wanted: str | None, *, quiet: bool) -> None:
+def _emit(
+    findings: list[Finding],
+    pack: StaticFactPack,
+    chosen: str,
+    args: argparse.Namespace,
+    assessed: tuple[coverage.RuleCoverage, ...] | None,
+) -> str:
+    """The findings in the shape that was asked for.
+
+    The verdict does not move with the shape: every format exits the same way,
+    because a pipeline reading SARIF still wants a build that fails, and one
+    that had to parse the output to learn that would be reading the exit status
+    for nothing.
+    """
+    if chosen == "json":
+        return as_json(
+            findings,
+            pack_id=pack.meta.fact_pack_id,
+            digest=pack.meta.config_digest,
+        )
+    if chosen == "sarif":
+        # The directory as it was typed, because that is what makes a result URI
+        # resolve from where the command was run — see `exchange.sarif`.
+        return exchange.sarif(
+            findings,
+            base=str(args.config_dir),
+            pack_id=pack.meta.fact_pack_id,
+            digest=pack.meta.config_digest,
+        )
+    if chosen == "junit":
+        return exchange.junit(findings, assessed or ())
+    return render(findings, explain=args.explain)
+
+
+def _report_coverage(
+    pack: StaticFactPack,
+    wanted: str | None,
+    *,
+    assessed: tuple[coverage.RuleCoverage, ...] | None,
+    quiet: bool,
+) -> None:
     """Say which checks had something to look at, after saying what they found.
 
     After, because the findings are what the user came for. The coverage line is
@@ -318,11 +383,11 @@ def _report_coverage(pack: StaticFactPack, wanted: str | None, *, quiet: bool) -
     """
     if wanted is None:
         return
-    assessed = coverage.assess(pack)
+    measured = coverage.assess(pack) if assessed is None else assessed
     text = (
-        coverage.render_text(assessed)
+        coverage.render_text(measured)
         if wanted == "full"
-        else coverage.summary(assessed)
+        else coverage.summary(measured)
     )
     print(text, file=sys.stderr if quiet else sys.stdout)
 

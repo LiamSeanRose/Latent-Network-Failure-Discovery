@@ -6,6 +6,7 @@ import json
 import shutil
 from pathlib import Path
 from typing import Final
+from xml.etree import ElementTree
 
 import pytest
 
@@ -244,3 +245,54 @@ def test_serve_prints_a_link_that_already_has_the_directory_in_it(
     assert main(["serve", str(CORPUS)]) == 0
     assert started["config_dir"] == CORPUS
     assert str(CORPUS) in capsys.readouterr().out
+
+
+def test_check_format_sarif_is_a_log_a_scanner_can_ingest(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stdout has to be the log and nothing else — a pipeline pipes it into a
+    file and hands it to an upload step that will not tolerate a note in it."""
+    assert main(["check", str(CORPUS), "--format", "sarif"]) == 1
+    log = json.loads(capsys.readouterr().out)
+    assert log["version"] == "2.1.0"
+    assert log["runs"][0]["results"], "the corpus must produce results"
+    located = log["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+    assert located["artifactLocation"]["uri"].startswith(str(CORPUS))
+
+
+def test_check_format_junit_marks_an_inert_check_skipped(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The whole reason for this format: a check that never ran must not be
+    counted as a check that passed."""
+    assert main(["check", str(CORPUS), "--format", "junit"]) == 1
+    suites = ElementTree.fromstring(capsys.readouterr().out)
+    cases = list(suites.iter("testcase"))
+    assert len(cases) == len(catalogue())
+    assert any(case.find("skipped") is not None for case in cases)
+    assert int(suites.get("skipped") or 0) > 0
+
+
+def test_format_json_is_what_the_json_flag_always_meant(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["check", str(CORPUS), "--json"])
+    flag = capsys.readouterr().out
+    main(["check", str(CORPUS), "--format", "json"])
+    assert capsys.readouterr().out == flag
+
+
+def test_check_rejects_a_format_that_does_not_exist() -> None:
+    """A typo must not quietly fall back to text and be piped into a parser."""
+    with pytest.raises(SystemExit) as exit_info:
+        main(["check", str(CORPUS), "--format", "sarrif"])
+    assert exit_info.value.code == 2
+
+
+def test_coverage_beside_a_machine_format_stays_out_of_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["check", str(CORPUS), "--format", "sarif", "--coverage"]) == 1
+    printed = capsys.readouterr()
+    json.loads(printed.out)
+    assert "coverage:" in printed.err
