@@ -33,6 +33,7 @@ from urllib.parse import urlencode
 from cassandra import art, baseline, coverage, visuals
 from cassandra.catalogue import RuleDoc, catalogue
 from cassandra.coverage import RuleCoverage
+from cassandra.factpack import discovery
 from cassandra.factpack.builders.common import fhrp_instance
 from cassandra.factpack.schema import TimerSource
 from cassandra.findings import Finding, Severity, Tier
@@ -713,6 +714,35 @@ def _shapes_html() -> str:
     return f'<div class="shapes">{cards}</div>'
 
 
+def _here_offer() -> str:
+    """The directory the server was started in, if it holds any configs.
+
+    Typing an absolute path into a box is the one piece of work this tool asks
+    for before it does anything, and most of the time the answer is the
+    directory the user was already standing in when they ran `serve`. Offering
+    it as a link costs a walk of one directory and removes the whole step.
+
+    Offered, never assumed. The page says which directory it is and the user
+    clicks it, so nothing is read that was not asked for — which is the promise
+    the paragraph above this offer makes.
+    """
+    here = Path.cwd()
+    try:
+        found = discovery.discover(here)
+    except OSError:
+        return ""
+    if not found.configs:
+        return ""
+    link = html.escape(f"/?{urlencode({'dir': str(here)})}")
+    count = len(found.configs)
+    plural = "" if count == 1 else "s"
+    return (
+        f'<p class="offer">Started in <code>{html.escape(str(here))}</code>, '
+        f'which holds {count} config{plural}. <a href="{link}">Analyse '
+        f"{'it' if count == 1 else 'them'}</a>.</p>"
+    )
+
+
 def _example_offer() -> str:
     """A way in for someone who has not got a directory of configs to hand.
 
@@ -824,7 +854,11 @@ def page(
             "back early, the other waits out a delay — and the hatched window "
             "is the stretch where they sit on different devices. Steady-state "
             "analysis never sees it, because at rest the configuration is "
-            "correct.</p>" + _shapes_html() + _example_offer() + "</div>"
+            "correct.</p>"
+            + _shapes_html()
+            + _here_offer()
+            + _example_offer()
+            + "</div>"
         )
     elif not analysis.findings:
         sections.append(

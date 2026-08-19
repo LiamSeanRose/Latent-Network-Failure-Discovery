@@ -279,9 +279,61 @@ def render_facts(pack: StaticFactPack, unparsed: dict[str, tuple[str, ...]]) -> 
     return "\n".join(lines)
 
 
+def _orient(parser: argparse.ArgumentParser) -> int:
+    """What to do, for someone who typed the name of the tool and nothing else.
+
+    Bare `cassandra` used to be an argparse usage error, which is the least
+    useful thing a first run can be: it tells you that you got it wrong and not
+    what right would have looked like. There is exactly one thing this tool
+    needs — a directory of device configs — so the answer is either "here are
+    the ones I can see" or "here is where to point me".
+
+    It does not run the check by itself. Reading a directory the user did not
+    name is a surprise, and the whole promise of the tool is that it reads only
+    what it was pointed at; the line it prints is the command to run, so the
+    cost of not guessing is one paste.
+    """
+    here = Path()
+    found = discovery.discover(here)
+    print(
+        "cassandra reads a directory of network device configs and reports the "
+        "failure modes\nthat only appear between events. Nothing leaves this "
+        "machine.\n",
+        file=sys.stderr,
+    )
+    if found.configs:
+        devices = len(found.configs)
+        plural = "" if devices == 1 else "s"
+        them = "it" if devices == 1 else "them"
+        print(
+            f"{devices} config{plural} here. To check {them}:\n"
+            f"\n    cassandra check\n\n"
+            f"Add --explain for the evidence and the fix, or run `cassandra "
+            f"serve` for the same\nresult in a browser.",
+            file=sys.stderr,
+        )
+        return 0
+    print(
+        "Nothing here reads like a device config. Point it at a directory that "
+        "does:\n"
+        "\n    cassandra check ./configs\n\n"
+        "The directory is walked, not globbed, and anything that reads like a "
+        "config is read\nwhatever it is called. No configs to hand? "
+        "`cassandra check examples/two-site` in a\nclone of this repository is "
+        "a six-device network with four planted defects.\n"
+        "\nEvery command: facts | check | report | rules | serve. "
+        "`cassandra -h` for the rest.",
+        file=sys.stderr,
+    )
+    # Not an error. Being run with no arguments is a question, and this answered
+    # it; exiting non-zero would make `cassandra` fail a shell that checks.
+    del parser
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cassandra", description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
     facts = sub.add_parser("facts", help="materialise a fact pack from configs")
     facts.add_argument(
         "--json",
@@ -289,10 +341,22 @@ def main(argv: list[str] | None = None) -> int:
         dest="as_json",
         help="emit the whole fact pack as JSON instead of structured text",
     )
-    facts.add_argument("config_dir", type=Path)
+    facts.add_argument(
+        "config_dir",
+        type=Path,
+        nargs="?",
+        default=Path(),
+        help="directory of device configs; defaults to the current one",
+    )
 
     check = sub.add_parser("check", help="report latent failure modes in configs")
-    check.add_argument("config_dir", type=Path)
+    check.add_argument(
+        "config_dir",
+        type=Path,
+        nargs="?",
+        default=Path(),
+        help="directory of device configs; defaults to the current one",
+    )
     check.add_argument(
         "--explain",
         action="store_true",
@@ -359,7 +423,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     report = sub.add_parser("report", help="write a shareable HTML report")
-    report.add_argument("config_dir", type=Path)
+    report.add_argument(
+        "config_dir",
+        type=Path,
+        nargs="?",
+        default=Path(),
+        help="directory of device configs; defaults to the current one",
+    )
     report.add_argument(
         "-o", "--output", type=Path, default=Path("cassandra-report.html")
     )
@@ -391,6 +461,9 @@ def main(argv: list[str] | None = None) -> int:
     app.add_argument("--host", default="127.0.0.1")
 
     args = parser.parse_args(argv)
+    if args.command is None:
+        return _orient(parser)
+
     if args.command == "facts":
         loaded = _load(args.config_dir)
         if loaded is None:

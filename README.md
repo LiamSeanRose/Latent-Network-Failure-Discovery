@@ -60,6 +60,8 @@ fetched automatically. Nothing else — the whole tool is the standard library.
 
 ```sh
 uv sync                                        # install
+uv run cassandra                               # what it can see here, and what to type
+uv run cassandra check                         # check the directory you are standing in
 uv run cassandra check ./configs               # findings, ranked; exit 1 if any
 uv run cassandra check ./configs --explain     # + evidence, fixes, rule ids
 uv run cassandra check ./configs --json        # machine-readable, with a config digest
@@ -84,6 +86,24 @@ findings fail it — the ones you already knew about were accepted when the base
 The web view takes the same baseline: findings arrive tagged new or known, and the ones that
 stopped being reported get their own section, because a finding that disappeared may be a fix
 or may be a second defect masking the first.
+
+### What it needs, and what it works out for itself
+
+A directory of device configuration text. That is the entire input — no LLDP, no SNMP, no
+inventory file, no lab, no network access. `cassandra` on its own counts the configs it can see
+and prints the command to run; `cassandra check` with no directory checks the one you are
+standing in, so the shortest true first run is `cd` and two words.
+
+The topology is derived from the configs rather than discovered from the network. Two addressed
+interfaces are on the same wire when their prefixes reduce to the same network in the same VRF —
+which is the same inference the operator made when they typed the addresses. Broadcast domains
+come from VLAN membership over enabled, trunk-permitted links. An FHRP group is assembled across
+devices from its group number and its subnet, so a group written inside an interface on one
+platform and in a top-level block on another lands in one record.
+
+All three are inferences, and the tool says so where it matters: `cassandra facts` prints the
+adjacencies it derived alongside everything it read, so a wrong one is visible rather than
+buried under a finding.
 
 ### Pointing it at real files
 

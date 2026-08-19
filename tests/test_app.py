@@ -1156,3 +1156,30 @@ def test_a_table_that_scrolls_sideways_says_that_it_does() -> None:
         "the covering layers must be the card's own colour, or they hide the "
         "shadow behind a rectangle that does not match anything"
     )
+
+
+def test_the_landing_page_offers_the_directory_the_server_started_in(
+    base_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Typing an absolute path is the one piece of work this asks for before it
+    does anything, and most of the time the answer is where the user already was.
+
+    Offered, never assumed: the page names the directory and the user clicks it,
+    so nothing is read that was not asked for — which is the promise the
+    paragraph above the offer makes.
+    """
+    shutil.copytree(CORPUS, tmp_path / "configs")
+    monkeypatch.chdir(tmp_path / "configs")
+    body = get(base_url + "/")[1]
+    assert "Started in" in body
+    assert str(tmp_path / "configs") in body
+
+
+def test_the_landing_page_offers_nothing_where_there_is_nothing_to_offer(
+    base_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An offer to analyse a directory with no configs in it is a dead link and
+    a wasted line."""
+    monkeypatch.chdir(tmp_path)
+    body = get(base_url + "/")[1]
+    assert "Started in" not in body

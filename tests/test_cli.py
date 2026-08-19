@@ -431,3 +431,66 @@ def test_facts_omits_a_timer_family_that_states_nothing(tmp_path: Path) -> None:
     rendered = render_facts(pack, unparsed)
     assert "fhrp timers" not in rendered
     assert "no timers in these configs" in rendered
+
+
+def test_the_bare_command_says_what_to_do_rather_than_how_you_got_it_wrong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`cassandra` with no arguments was an argparse usage error.
+
+    That is the least useful thing a first run can be: it says you got it wrong
+    and not what right would have looked like. There is exactly one thing this
+    tool needs, so the answer is either "here are the ones I can see" or "here is
+    where to point me".
+    """
+    monkeypatch.chdir(tmp_path)
+    assert main([]) == 0
+    said = capsys.readouterr().err
+    assert "Nothing here reads like a device config" in said
+    assert "cassandra check ./configs" in said
+    # The five commands, so the next question is answered before it is asked.
+    for command in ("facts", "check", "report", "rules", "serve"):
+        assert command in said
+
+
+def test_the_bare_command_counts_what_it_can_see(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Standing in a directory of configs, the answer is the command to run."""
+    shutil.copytree(CORPUS, tmp_path / "configs")
+    monkeypatch.chdir(tmp_path / "configs")
+    assert main([]) == 0
+    said = capsys.readouterr().err
+    expected = len(list((tmp_path / "configs").iterdir()))
+    assert f"{expected} configs here" in said
+    assert "\n    cassandra check\n" in said
+
+
+def test_the_bare_command_does_not_read_a_directory_nobody_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It counts the files and stops.
+
+    Running the check on a directory the user did not name is a surprise, and the
+    whole promise of the tool is that it reads only what it was pointed at. The
+    cost of not guessing is one paste.
+    """
+    shutil.copytree(CORPUS, tmp_path / "configs")
+    monkeypatch.chdir(tmp_path / "configs")
+    assert main([]) == 0
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "fhrp" not in captured.err.lower()
+
+
+def test_check_defaults_to_the_directory_you_are_standing_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`cd configs && cassandra check` is the shortest true first run."""
+    shutil.copytree(CORPUS, tmp_path / "configs")
+    monkeypatch.chdir(tmp_path / "configs")
+    named = main(["check", "."])
+    from_here = capsys.readouterr().out
+    monkeypatch.chdir(tmp_path / "configs")
+    assert main(["check"]) == named
+    assert capsys.readouterr().out == from_here
