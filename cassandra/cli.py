@@ -15,7 +15,7 @@ from cassandra.app import analyse, serve
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
-from cassandra.report import render
+from cassandra.report import as_json, render
 from cassandra.report_html import write as write_html
 from cassandra.timing import sequences, timer_rules
 
@@ -106,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     check.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit findings as JSON for a pipeline instead of text",
+    )
+    check.add_argument(
         "--since",
         type=Path,
         metavar="FILE",
@@ -162,7 +168,16 @@ def main(argv: list[str] | None = None) -> int:
             # is how a check gets switched off.
             return 1 if diff.new else 0
 
-        print(render(findings, explain=args.explain))
+        if args.as_json:
+            print(
+                as_json(
+                    findings,
+                    pack_id=pack.meta.fact_pack_id,
+                    digest=pack.meta.config_digest,
+                )
+            )
+        else:
+            print(render(findings, explain=args.explain))
         # Exit status is the verdict: non-zero when something needs attention, so
         # this is usable in a pre-commit hook or CI without parsing the output.
         return 1 if findings else 0

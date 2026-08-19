@@ -250,6 +250,18 @@ footer.meta-foot { color: var(--ink-3); font-size: .78rem; margin-top: 1.6rem; }
   .counts { gap: 1rem; }
   .figure { padding: .8rem .7rem .3rem; }
 }
+/* Print: a finding list is a thing people take into a change review. Drop the
+   chrome, keep the figures, and let cards break across pages rather than
+   clipping. */
+@media print {
+  body { background: #fff; color: #000; background-image: none; }
+  main { max-width: none; padding: 0; }
+  form.finder, .chips, .pulse { display: none; }
+  .finding, .figure { break-inside: avoid; border: 1px solid #ccc; }
+  .finding { box-shadow: none; }
+  a[href]::after { content: ""; }
+  svg.viz .band rect { fill: var(--c); }
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
   svg.topology .edge line { stroke-dashoffset: 0; }
@@ -593,9 +605,13 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
         )
     elif not analysis.findings:
         sections.append(
-            '<div class="empty">No findings. Nothing in these configs trips a '
-            "consistency rule, and no event sequence the timing model explored "
-            "produced a sustained divergence.</div>"
+            '<div class="empty"><strong>No findings.</strong><br>Nothing in these '
+            "configs trips a consistency rule, and no event sequence the timing "
+            "model explored produced a sustained divergence."
+            '<p class="cap">That is not proof the network is sound. The timing '
+            "tier searches a neighbourhood of sequences derived from the timers "
+            "it found, not the whole space, and it only models what the parsers "
+            "understood.</p></div>"
         )
     else:
         sections.append(_filter_bar(config_dir, analysis.findings, filters))
@@ -652,7 +668,9 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
 </header>
 <form class="finder" method="get" action="/">
   <input type="text" name="dir" placeholder="/path/to/configs"
-         value="{html.escape(config_dir)}" autofocus>
+         value="{html.escape(config_dir)}" autofocus accesskey="d"
+         aria-label="directory of device configs to analyse"
+         spellcheck="false" autocapitalize="off" autocorrect="off">
   {_hidden_filters(filters)}
   <button class="go" type="submit">Analyse</button>
 </form>

@@ -7,6 +7,8 @@ assertion and a model prediction deserve different amounts of trust.
 
 from __future__ import annotations
 
+import json
+
 from cassandra.findings import Finding, Severity, Tier, rank
 
 _LABEL = {
@@ -51,3 +53,38 @@ def render(findings: list[Finding], *, explain: bool = False) -> str:
     if not explain:
         lines.append("run with --explain for evidence, fixes and rule ids")
     return "\n".join(lines)
+
+
+def as_json(findings: list[Finding], *, pack_id: str = "", digest: str = "") -> str:
+    """Machine-readable output for a pipeline.
+
+    Carries the fact-pack identity alongside the findings, because a result
+    without the digest of the configs that produced it cannot be tied back to a
+    revision, which is what a pipeline needs it for.
+    """
+    return json.dumps(
+        {
+            "fact_pack_id": pack_id,
+            "config_digest": digest,
+            "counts": {
+                severity.value: sum(1 for f in findings if f.severity is severity)
+                for severity in Severity
+                if any(f.severity is severity for f in findings)
+            },
+            "findings": [
+                {
+                    "rule": finding.rule,
+                    "tier": finding.tier.value,
+                    "severity": finding.severity.value,
+                    "device": finding.device,
+                    "title": finding.title,
+                    "detail": finding.detail,
+                    "trigger": finding.trigger,
+                    "remedy": finding.remedy,
+                    "evidence": list(finding.evidence),
+                }
+                for finding in rank(findings)
+            ],
+        },
+        indent=2,
+    )
