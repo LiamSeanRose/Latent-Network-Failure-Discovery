@@ -327,6 +327,14 @@ svg.topology .node { transform-box: fill-box; transform-origin: center; }
 .chip:hover { transform: translateY(-1px); color: var(--ink-1);
   border-color: var(--accent); }
 .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chips .label { color: var(--ink-3); font-size: .78rem; text-transform: uppercase;
+  letter-spacing: .05em; align-self: center; min-width: 4.2rem; }
+/* The node is the hit area, not just its label. */
+svg.topology a.node-link { cursor: pointer; }
+svg.topology a.node-link:hover circle { stroke-width: 3.5; }
+svg.topology a.node-link:hover text { fill: var(--accent); }
+svg.topology a.node-link:focus-visible circle { outline: 2px solid var(--accent);
+  outline-offset: 3px; }
 .chip .n { opacity: .72; font-variant-numeric: tabular-nums; }
 
 /* ---- findings ---- */
@@ -438,14 +446,17 @@ class Filters:
 
     severities: frozenset[Severity] = frozenset()
     tiers: frozenset[Tier] = frozenset()
+    devices: frozenset[str] = frozenset()
     unknown: tuple[str, ...] = ()
 
     @property
     def active(self) -> bool:
-        return bool(self.severities or self.tiers)
+        return bool(self.severities or self.tiers or self.devices)
 
     def matches(self, finding: Finding) -> bool:
         if self.severities and finding.severity not in self.severities:
+            return False
+        if self.devices and finding.device not in self.devices:
             return False
         return not (self.tiers and finding.tier not in self.tiers)
 
@@ -475,12 +486,19 @@ def analyse_directory(config_dir: Path) -> tuple[list[Finding], str | None]:
     return list(result.findings), result.error
 
 
-def _requested(params: dict[str, list[str]], name: str) -> list[str]:
-    """Filter values, repeated or comma-separated, de-duplicated in order."""
+def _requested(
+    params: dict[str, list[str]], name: str, *, fold: bool = True
+) -> list[str]:
+    """Filter values, repeated or comma-separated, de-duplicated in order.
+
+    Severities and tiers come from a fixed lower-case vocabulary and are folded.
+    Device names do not: they are hostnames the device chose, and folding one
+    turns a filter for `AGG-A` into a filter that matches nothing.
+    """
     values: list[str] = []
     for raw in params.get(name, []):
         for part in raw.split(","):
-            token = part.strip().lower()
+            token = part.strip().lower() if fold else part.strip()
             if token and token not in values:
                 values.append(token)
     return values
@@ -496,6 +514,10 @@ def parse_filters(params: dict[str, list[str]]) -> Filters:
     severities: list[Severity] = []
     tiers: list[Tier] = []
     unknown: list[str] = []
+    # A device name is not drawn from a fixed vocabulary, so an unrecognised one
+    # cannot be told from a typo here. It is reported by the page instead, which
+    # knows which devices the pack actually holds.
+    devices = _requested(params, "device", fold=False)
     for token in _requested(params, "severity"):
         try:
             severities.append(Severity(token))
@@ -509,6 +531,7 @@ def parse_filters(params: dict[str, list[str]]) -> Filters:
     return Filters(
         severities=frozenset(severities),
         tiers=frozenset(tiers),
+        devices=frozenset(devices),
         unknown=tuple(unknown),
     )
 
@@ -521,6 +544,7 @@ def _query_pairs(config_dir: str, filters: Filters) -> list[tuple[str, str]]:
         ("severity", s.value) for s in _SEVERITY_ORDER if s in filters.severities
     )
     pairs.extend(("tier", t.value) for t in _TIER_ORDER if t in filters.tiers)
+    pairs.extend(("device", device) for device in sorted(filters.devices))
     return pairs
 
 
@@ -610,11 +634,54 @@ def _filter_bar(
         for tier in tiers
     ]
 
+    rows = [severity_chips, tier_chips]
+
+    # Only when there is a choice to make. One device means the row would be a
+    # label, an "all" chip and that device — three controls that do nothing.
+    devices = sorted({f.device for f in findings})
+    if len(devices) > 1:
+        by_others = [
+            f
+            for f in findings
+            if (not filters.tiers or f.tier in filters.tiers)
+            and (not filters.severities or f.severity in filters.severities)
+        ]
+        device_chips = [
+            '<span class="label">device</span>',
+            _chip(
+                "all",
+                len(by_others),
+                href(
+                    "/",
+                    config_dir,
+                    Filters(severities=filters.severities, tiers=filters.tiers),
+                ),
+                on=not filters.devices,
+            ),
+        ]
+        device_chips += [
+            _chip(
+                device,
+                sum(1 for f in by_others if f.device == device),
+                href(
+                    "/",
+                    config_dir,
+                    Filters(
+                        severities=filters.severities,
+                        tiers=filters.tiers,
+                        devices=_toggle(filters.devices, device),
+                    ),
+                ),
+                on=device in filters.devices,
+            )
+            for device in devices
+        ]
+        rows.append(device_chips)
+
     return (
         '<div class="filters">'
-        f'<div class="chips">{"".join(severity_chips)}</div>'
-        f'<div class="chips">{"".join(tier_chips)}</div>'
-        "</div>"
+        + "".join(f'<div class="chips">{"".join(row)}</div>' for row in rows)
+        + "</div>"
     )
 
 
@@ -832,6 +899,20 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
             f"{ignored}.</p>"
         )
 
+    # A device name is free text, so a filter for one that is not in the pack has
+    # to be reported here rather than at parse time. Silently showing nothing
+    # looks identical to a device that is genuinely clean.
+    known = {finding.device for finding in analysis.findings}
+    if analysis.pack is not None:
+        known |= {device.id for device in analysis.pack.devices}
+    absent = sorted(device for device in filters.devices if device not in known)
+    if absent:
+        named = ", ".join(f"<code>{html.escape(device)}</code>" for device in absent)
+        sections.append(
+            f'<p class="note">No device here is called {named}. '
+            "Names come from each config's own hostname line.</p>"
+        )
+
     if analysis.error:
         sections.append(f'<div class="error">{html.escape(analysis.error)}</div>')
     elif not config_dir:
@@ -897,13 +978,32 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
         default=None,
     )
     pulse = "pulse alert" if worst is Severity.HIGH else "pulse"
-    topology = (
-        f'<div class="figure"><h2>adjacency</h2>'
-        f'<p class="cap">Devices, and the subnets they share.</p>'
-        f"{visuals.topology_svg(analysis.pack)}</div>"
-        if analysis.pack is not None and visuals.topology_svg(analysis.pack)
-        else ""
-    )
+    topology = ""
+    if analysis.pack is not None:
+        with_findings = {f.device for f in analysis.findings}
+        drawn = visuals.topology_svg(
+            analysis.pack,
+            lambda device: (
+                href(
+                    "/",
+                    config_dir,
+                    Filters(
+                        severities=filters.severities,
+                        tiers=filters.tiers,
+                        devices=_toggle(filters.devices, device),
+                    ),
+                )
+                if device in with_findings
+                else ""
+            ),
+        )
+        if drawn:
+            topology = (
+                '<div class="figure"><h2>adjacency</h2>'
+                '<p class="cap">Devices, and the subnets they share. A device '
+                "with findings is a link to them.</p>"
+                f"{drawn}</div>"
+            )
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">

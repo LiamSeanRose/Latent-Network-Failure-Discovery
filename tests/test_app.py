@@ -386,3 +386,61 @@ def test_every_served_rule_explains_itself(base_url: str) -> None:
         docs = json.load(response)
     undocumented = [doc["id"] for doc in docs if doc["summary"] is None]
     assert not undocumented, f"rules with no docstring: {', '.join(undocumented)}"
+
+
+def test_device_filter_narrows_the_page(base_url: str, mixed: Path) -> None:
+    body = view(base_url, mixed, "device=edge1")
+    assert "svi-vlan-not-trunked" in body
+    assert "fhrp-divergence" not in body
+
+
+def test_device_filter_keeps_the_case_it_was_given(base_url: str, mixed: Path) -> None:
+    """Device names are hostnames, not a fixed vocabulary.
+
+    Folding them turns a filter for a device that really is called `AGG-A` into
+    a filter that matches nothing, which looks exactly like a clean device.
+    """
+    body = view(base_url, mixed, "device=EDGE1")
+    assert "No device here is called" in body
+    assert "<code>EDGE1</code>" in body
+
+
+def test_a_device_that_is_not_here_is_reported_not_ignored(
+    base_url: str, mixed: Path
+) -> None:
+    body = view(base_url, mixed, "device=nowhere")
+    assert "No device here is called" in body
+    assert "<code>nowhere</code>" in body
+
+
+def test_device_and_severity_filters_combine(base_url: str, mixed: Path) -> None:
+    body = view(base_url, mixed, "device=agg-a&severity=high")
+    assert "fhrp-divergence" in body
+    assert "fhrp-oscillation" not in body
+    assert "svi-vlan-not-trunked" not in body
+
+
+def test_the_map_links_devices_that_have_findings(base_url: str, mixed: Path) -> None:
+    """The map is the only place a device with no findings appears at all, so a
+    node that is clickable has to be one there is something to see."""
+    body = view(base_url, mixed)
+    assert "device=agg-a" in body
+    # core1 is in the corpus and clean; a link to an empty result is a dead end.
+    assert "device=core1" not in body
+
+
+def test_the_device_row_appears_only_when_there_is_a_choice(
+    base_url: str, mixed: Path
+) -> None:
+    single = view(base_url, CORPUS)
+    assert '<span class="label">device</span>' not in single
+    both = view(base_url, mixed)
+    assert '<span class="label">device</span>' in both
+
+
+def test_device_filter_survives_the_form_and_the_json_link(
+    base_url: str, mixed: Path
+) -> None:
+    body = view(base_url, mixed, "device=edge1")
+    assert '<input type="hidden" name="device" value="edge1">' in body
+    assert "device=edge1" in body
