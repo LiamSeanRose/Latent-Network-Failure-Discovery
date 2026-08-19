@@ -15,7 +15,7 @@ import pytest
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts.rules import evaluate
-from cassandra.findings import Severity, Tier
+from cassandra.findings import Finding, Severity, Tier
 
 CORPUS: Final = (
     Path(__file__).resolve().parents[1]
@@ -1184,3 +1184,85 @@ def test_a_readable_virtual_address_is_not_reported_as_unreadable(
     names an address someone dislikes."""
     pack = pair(tmp_path)
     assert "fhrp-virtual-not-an-address" not in rules_fired(pack)
+
+
+# ---------------------------------------------------------------------------
+# The change a finding carries, where a rule can state one (PROJECT.md §5.4)
+# ---------------------------------------------------------------------------
+
+
+def _found(pack: StaticFactPack, rule_id: str) -> Finding:
+    return next(f for f in evaluate(pack) if f.rule == rule_id)
+
+
+def test_a_one_sided_peering_carries_the_statement_the_far_end_needs(
+    tmp_path: Path,
+) -> None:
+    """Every value in it is known: the address this device peers from and both
+    AS numbers. Nothing is left to guess, which is why this rule can say it."""
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    pack, _ = build_fact_pack(examples)
+    finding = _found(pack, "bgp-session-one-sided")
+    assert finding.change
+    assert finding.change[0].startswith("router bgp ")
+    assert "remote-as" in finding.change[-1]
+
+
+def test_a_preferred_master_carries_the_line_that_makes_it_reclaim(
+    tmp_path: Path,
+) -> None:
+    without = pack_from(
+        tmp_path,
+        r1="""hostname r1
+vlan 14
+interface Vlan14
+   ip address 10.14.0.2/24
+   vrrp 14 ipv4 10.14.0.1
+   vrrp 14 priority-level 110
+""",
+        r2="""hostname r2
+vlan 14
+interface Vlan14
+   ip address 10.14.0.3/24
+   vrrp 14 ipv4 10.14.0.1
+   vrrp 14 priority-level 100
+""",
+    )
+    finding = _found(without, "fhrp-no-preempt-on-preferred")
+    # Content, not padding: the indentation is the dialect's business and these
+    # fragments do not state which dialect they are.
+    assert finding.change[0] == "interface Vlan14"
+    assert finding.change[-1].strip().endswith("preempt")
+
+
+def test_a_native_vlan_carries_the_line_that_permits_it(tmp_path: Path) -> None:
+    pack = pack_from(
+        tmp_path,
+        r1="""hostname r1
+vlan 10,20
+interface Ethernet1
+   switchport mode trunk
+   switchport trunk allowed vlan 10
+   switchport trunk native vlan 20
+""",
+    )
+    finding = _found(pack, "trunk-native-vlan-not-allowed")
+    assert finding.change[0] == "interface Ethernet1"
+    assert finding.change[-1].strip() == "switchport trunk allowed vlan add 20"
+
+
+def test_no_rule_suggests_a_change_it_cannot_state(tmp_path: Path) -> None:
+    """A suggestion that is wrong half the time is worse than none.
+
+    Every change a rule emits must name an interface or a process block and
+    nothing else — a bare setting with no context is not something anyone can
+    paste.
+    """
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    pack, _ = build_fact_pack(examples)
+    for finding in evaluate(pack):
+        if not finding.change:
+            continue
+        head = finding.change[0]
+        assert head.startswith(("interface ", "router bgp ")), head
+        assert len(finding.change) > 1, finding.rule

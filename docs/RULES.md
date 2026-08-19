@@ -38,15 +38,19 @@ breaks the build.
 | [`bfd-detection-below-floor`](#bfd-detection-below-floor) | facts | medium | A BFD session too fast to survive a control-plane pause takes the IGP down. |
 | [`bfd-no-clients`](#bfd-no-clients) | facts | medium | A session nothing registered against comes up, runs, and is never asked. |
 | [`bfd-no-faster-than-igp`](#bfd-no-faster-than-igp) | facts | medium | BFD exists to detect faster than the IGP. One that does not is decoration. |
+| [`bgp-hold-under-three-keepalives`](#bgp-hold-under-three-keepalives) | facts | medium | A BGP hold time worth fewer than three keepalives drops healthy sessions. |
 | [`bgp-peer-off-subnet`](#bgp-peer-off-subnet) | facts | medium | A directly-connected peer address that is on none of this device's subnets. |
+| [`bgp-stalepath-under-restart-time`](#bgp-stalepath-under-restart-time) | facts | medium | A router that waits longer for a restarting peer than it will hold that peer's routes. |
 | [`dampening-never-suppresses`](#dampening-never-suppresses) | facts | medium | A dampening profile whose suppress threshold is above its own penalty ceiling never suppresses anything. |
 | [`fhrp-hold-under-three-hellos`](#fhrp-hold-under-three-hellos) | facts | medium | An FHRP hold time worth fewer than three hellos fails the gateway over on one lost advertisement. |
 | [`fhrp-no-redundancy`](#fhrp-no-redundancy) | facts | medium | A redundancy group with fewer than two members in the collection. |
 | [`fhrp-priority-tie`](#fhrp-priority-tie) | facts | medium | Members sharing the top priority, so nothing decides the master. |
 | [`fhrp-track-ineffective`](#fhrp-track-ineffective) | facts | medium | A decrement too small to lose the election is tracking that does nothing. |
 | [`igp-dead-under-three-hellos`](#igp-dead-under-three-hellos) | facts | medium | A dead interval worth fewer than three hellos drops healthy adjacencies. |
+| [`stp-timers-outside-the-standard`](#stp-timers-outside-the-standard) | facts | medium | Spanning-tree timers that the standard's own inequalities reject. |
 | [`svi-vlan-not-trunked`](#svi-vlan-not-trunked) | facts | medium | An addressed SVI for a VLAN no trunk on the device carries. |
 | [`trunk-native-vlan-not-allowed`](#trunk-native-vlan-not-allowed) | facts | medium | A trunk whose native VLAN is missing from its own allowed list. |
+| [`bgp-timers-disagree`](#bgp-timers-disagree) | facts | low | Two ends of a peering that asked for different session timing. |
 | [`fhrp-no-preempt-on-preferred`](#fhrp-no-preempt-on-preferred) | facts | low | The highest-priority member has preempt off, so it never takes back. |
 | [`igp-dead-not-a-multiple-of-hello`](#igp-dead-not-a-multiple-of-hello) | facts | low | A dead interval that is not a whole number of hellos wastes its remainder. |
 | [`trunk-vlan-dead`](#trunk-vlan-dead) | facts | low | A VLAN permitted on a trunk that no device in the topology terminates. |
@@ -666,6 +670,33 @@ The cost is not neutral. The session is configured, monitored and believed, and 
 - Silence over a guess: without a configured dead interval there is no second number, and inventing one would fabricate the finding.  
   `test_timer_rules.py::test_no_igp_on_the_interface_means_nothing_to_compare_against`
 
+### `bgp-hold-under-three-keepalives`
+
+**medium** · `cassandra.timing.timer_rules.bgp_hold_time_leaves_too_few_keepalives`
+
+A BGP hold time worth fewer than three keepalives drops healthy sessions.
+
+RFC 4271 clause 10 has the session send a keepalive every third of the hold time precisely so that two may go missing and the peering survives. Configure the hold below three keepalives and that margin is gone: one keepalive lost to a control-plane pause, a policy push or ordinary queueing takes the session down, every prefix it carried is withdrawn, and the reconvergence that follows was caused by the timer rather than by anything failing. It comes back, so the only evidence left is a flap counter.
+
+Both scopes are checked. A process-wide `timers bgp` sets this for every peering that does not override it, and a peering that does override it can get it wrong on its own. A peering that inherits is not reported again — the numbers are the process's, the process record already carries them, and one line wrongly configured should produce one finding rather than one per peer that happens to be on it.
+
+Silent when either number is missing, and silent when the hold time is zero — that is the documented way to turn keepalives off altogether, which is a different decision with different consequences and not this rule's subject.
+
+**Reports:** BGP on {…} holds {…} for only {…} keepalives
+
+**Detail:** keepalives are sent every {…} and the session is torn down after {…} of silence, so fewer than {…} may be lost before every prefix the peering carries is withdrawn. RFC 4271 derives the keepalive interval from the hold time as a third of it for exactly this margin, and it is not here.
+
+**Remedy:** raise the hold time to at least {…}, or lower the keepalive interval to keep the detection time and regain the margin
+
+**Stays silent when:**
+
+- Three is the floor RFC 4271 builds the protocol on, not a target to exceed, so the value the protocol itself derives is not a defect.  
+  `test_bgp_stp_timers.py::test_a_hold_time_of_exactly_three_keepalives_is_not_reported`
+- `timers bgp 0 0` is the documented way to run a session with no keepalives at all. It is a different decision with different consequences, and reporting it as a bad ratio would describe it wrongly.  
+  `test_bgp_stp_timers.py::test_keepalives_turned_off_altogether_are_not_a_ratio`
+- These three are pinned by digest and by finding set, and the tutorial and both scenario READMEs quote what they produce. A rule that fires on one of them has changed what the documentation says the tool does — silently, since the digest they are pinned by would not move. None of the three configures a BGP or spanning-tree timer, so the correct result is silence rather than a clean bill of health.  
+  `test_bgp_stp_timers.py::test_no_new_rule_fires_on_a_shipped_corpus`
+
 ### `bgp-peer-off-subnet`
 
 **medium** · `cassandra.facts.rules.bgp_peer_on_no_local_subnet`
@@ -686,6 +717,33 @@ Skipped when the peering is explicitly not directly connected — an update-sour
   `test_facts_rules.py::test_multihop_peer_off_subnet_is_intentional`
 - A peer address is checked against the subnets the device is addressed in. With IPv6 addressing unread those subnets did not exist, so every IPv6 peering in every config looked like a peer on no local subnet — a defect reported wholesale about configurations that were correct.  
   `test_ipv6.py::test_an_ipv6_bgp_peer_is_found_on_its_own_subnet`
+
+### `bgp-stalepath-under-restart-time`
+
+**medium** · `cassandra.timing.timer_rules.graceful_restart_outlives_the_stalepath_timer`
+
+A router that waits longer for a restarting peer than it will hold that peer's routes.
+
+The two timers are one mechanism. `restart-time` is how long the router is willing to wait for a graceful-restart-capable peer to come back before treating the session as genuinely gone; `stalepath-time` is how long it will keep that peer's paths marked stale while it waits. Set the stalepath timer shorter and the router deletes the routes it was waiting to reuse, part-way through a restart it had already decided to tolerate — so the restart is graceful for the first part of the window and a full withdrawal for the rest, which is the outage graceful restart was configured to prevent.
+
+The failure is invisible from steady state and from either timer alone. Both are configured, both look reasonable, and the traffic loss only happens when a restart runs longer than the shorter of the two.
+
+Silent when either timer is absent. Every platform defaults the pair to a combination that satisfies this, so a config stating neither is not configured wrongly — it is not configured at all, and inventing the defaults to check them against each other would be checking this tool's memory.
+
+**Reports:** graceful restart on {…} waits {…} for a peer whose routes it keeps for {…}
+
+**Detail:** stale paths from a restarting peer are deleted after {…}, and the session is given {…} to come back. A restart that takes longer than {…} therefore loses the routes graceful restart exists to preserve, for the {…} between the two timers, while the router is still waiting rather than reconverging.
+
+**Remedy:** raise stalepath-time above {…}, or lower restart-time to {…} so the router stops waiting when it stops holding
+
+**Stays silent when:**
+
+- This is the ordering every platform ships with: the router stops holding the routes after it has stopped waiting for the peer, not before.  
+  `test_bgp_stp_timers.py::test_a_stalepath_timer_longer_than_the_restart_window_is_not_reported`
+- The other value is then a platform default, and filling it in to compare against would be checking this tool's memory rather than the configuration.  
+  `test_bgp_stp_timers.py::test_one_graceful_restart_timer_alone_is_not_a_comparison`
+- These three are pinned by digest and by finding set, and the tutorial and both scenario READMEs quote what they produce. A rule that fires on one of them has changed what the documentation says the tool does — silently, since the digest they are pinned by would not move. None of the three configures a BGP or spanning-tree timer, so the correct result is silence rather than a clean bill of health.  
+  `test_bgp_stp_timers.py::test_no_new_rule_fires_on_a_shipped_corpus`
 
 ### `dampening-never-suppresses`
 
@@ -827,6 +885,33 @@ Silent when only one of the two numbers is configured, because the ratio cannot 
 - The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
   `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
 
+### `stp-timers-outside-the-standard`
+
+**medium** · `cassandra.timing.timer_rules.stp_timers_break_the_standard_relationship`
+
+Spanning-tree timers that the standard's own inequalities reject.
+
+IEEE 802.1D-1998 clause 8.10.2 does not treat the three timers as independent knobs. It requires `2 x (forward delay - 1s) >= max age` and `max age >= 2 x (hello time + 1s)`, and each bound protects against a different failure. Break the first and a port can finish listening and learning and start forwarding while a stale topology somewhere else in the network has not yet aged out — a forwarding loop, on a broadcast domain, which is the failure mode that takes a whole site down rather than a link. Break the second and a bridge ages out a root it is still hearing from, reconverging the tree over ordinary packet loss.
+
+The timers a VLAN runs are the root bridge's, not each bridge's own, so this is reported medium rather than high: it takes this device winning the election for its numbers to govern anything. That is also exactly why it survives review — the values are harmless while some other bridge is root, and become the network's the moment that bridge is replaced or reloaded.
+
+Silent unless all three timers are stated for the same scope. The standard's defaults satisfy both inequalities, and filling an unstated timer in from them would be checking a value this tool supplied rather than one the operator did.
+
+**Reports:** spanning-tree timers on {…} for {…} break the relationship the standard requires
+
+**Detail:** {…}. IEEE 802.1D ties the three together so that a port cannot begin forwarding before stale information elsewhere has aged out, and so that a bridge cannot age out a root it is still hearing from. These values are the whole network's whenever {…} is the root bridge for {…}.
+
+**Remedy:** set the three timers as one set — the standard's own 2s / 15s / 20s satisfies both bounds, and any tuning has to keep them satisfied
+
+**Stays silent when:**
+
+- 2s / 15s / 20s is what every bridge ships with and what both inequalities are written around, so the rule firing on it would mean the arithmetic is inverted.  
+  `test_bgp_stp_timers.py::test_the_standard_default_timers_are_not_reported`
+- A relationship between three values cannot be checked from one of them. Filling the other two in from the standard would report a number this tool supplied rather than one the operator did.  
+  `test_bgp_stp_timers.py::test_timers_only_half_stated_are_not_measured_against_defaults`
+- These three are pinned by digest and by finding set, and the tutorial and both scenario READMEs quote what they produce. A rule that fires on one of them has changed what the documentation says the tool does — silently, since the digest they are pinned by would not move. None of the three configures a BGP or spanning-tree timer, so the correct result is silence rather than a clean bill of health.  
+  `test_bgp_stp_timers.py::test_no_new_rule_fires_on_a_shipped_corpus`
+
 ### `svi-vlan-not-trunked`
 
 **medium** · `cassandra.facts.rules.svi_vlan_missing_from_every_trunk`
@@ -870,6 +955,33 @@ Only checked where both facts are present: a trunk stating no allowed list permi
 
 - A native VLAN the trunk also permits is the ordinary configuration: the untagged frames belong to a VLAN the link is allowed to carry.  
   `test_facts_rules.py::test_native_vlan_inside_the_allowed_list_is_silent`
+
+### `bgp-timers-disagree`
+
+**low** · `cassandra.timing.timer_rules.bgp_timers_disagree_across_a_peering`
+
+Two ends of a peering that asked for different session timing.
+
+BGP does not refuse the session over this — it negotiates, and RFC 4271 clause 4.2 makes the hold time the smaller of the two values offered — which is what makes it worth reporting rather than obvious. Nothing alarms, nothing logs, and the end that asked for the longer hold silently runs the shorter one. Every number derived from it downstream is then wrong on that end: the convergence budget, the comparison against a BFD session covering the same path, the length of a maintenance window somebody believed the session would survive.
+
+The finding names which end stated its values on the peering and which end inherited them from `timers bgp` on the process, because those are different lines to change and only one of them affects the other peerings too.
+
+Reported low. The session comes up, carries traffic and stays up; what is wrong is a belief, not the network. Silent when only one end of the peering is in the collection, and silent for a value only one end states — the other is then on a platform default this tool will not guess at.
+
+**Reports:** BGP timers on the {…} to {…} peering disagree
+
+**Detail:** {…}. The session negotiates the smaller hold time, so both ends run {…} whatever they asked for, and the end that configured the longer one is not getting it. {…} {…} its values and {…} {…} its own.
+
+**Remedy:** configure the same keepalive and hold time on both ends of the {…} to {…} peering, or accept {…} and write it down on both
+
+**Stays silent when:**
+
+- Timers stated on one end and inherited on the other are not a disagreement. Both numbers were chosen, they are the same number, and where each was written is a question about tidiness rather than about timing.  
+  `test_bgp_stp_timers.py::test_two_ends_that_agree_are_not_reported`
+- One end of a peering says nothing about the other. A transit provider, or a device whose config was not gathered, is an incomplete collection rather than a defect, and a rule that guessed at the missing end would report the gap in the capture as a fault in the network.  
+  `test_bgp_stp_timers.py::test_a_peering_whose_far_end_is_not_in_the_corpus_is_not_reported`
+- These three are pinned by digest and by finding set, and the tutorial and both scenario READMEs quote what they produce. A rule that fires on one of them has changed what the documentation says the tool does — silently, since the digest they are pinned by would not move. None of the three configures a BGP or spanning-tree timer, so the correct result is silence rather than a clean bill of health.  
+  `test_bgp_stp_timers.py::test_no_new_rule_fires_on_a_shipped_corpus`
 
 ### `fhrp-no-preempt-on-preferred`
 
@@ -987,6 +1099,8 @@ Reported only past MIN_DIVERGENCE_MS. A brief divergence *during* an event is ex
 
 Silent unless the split survives the flap interval being twenty percent either side of the one that produced it, and silent if the same split is there with no events at all. Those two controls are what separate a property of the configuration from an artifact of the model's sampling grid.
 
+Two event classes reach this: a link flapping, and a device reloading. The reload is enumerated last and reports only pairs a flap cannot reach — a group that tracks nothing is untouched by a flap and moved by a reload, and only then does a difference in preempt delay between it and its neighbour show. A reload carries no interval, so the perturbation control does not apply to one and its evidence says so.
+
 **Reports:** {…} and {…} can end up on different devices
 
 **Detail:** they share a device pair but respond to the same event differently, leaving the gateways split for about {…}s
@@ -1043,6 +1157,8 @@ These tests assert that a rule set reports nothing at all on a given input. They
   `test_ipv6.py::test_a_clean_dual_stack_ios_pair_produces_nothing`
 - **`cassandra.facts.rules`** — The same claim again for HSRP, whose IPv6 group is a separate block with its own priority rather than a second address on a shared one.  
   `test_ipv6.py::test_a_clean_dual_stack_nxos_pair_produces_nothing`
+- **`cassandra.timing.timer_rules`** — It holds settings for its members rather than running a session, so a timer record for it would be a session that does not exist.  
+  `test_bgp_stp_timers.py::test_a_peer_group_is_not_itself_a_peering`
 - **`cassandra.timing.timer_rules`** — Fast bfd alongside the same igp is silent  
   `test_timer_rules.py::test_fast_bfd_alongside_the_same_igp_is_silent`
 - **`cassandra.timing.timer_rules`** — Dampening inside the sla is silent  

@@ -14,8 +14,10 @@ import itertools
 from collections.abc import Callable, Iterator
 from typing import Final
 
+from cassandra import dialect
 from cassandra.factpack.schema import (
     AddressFamily,
+    BgpNeighbor,
     BgpProcess,
     FhrpGroup,
     FhrpMember,
@@ -448,6 +450,7 @@ def preferred_master_will_not_reclaim(pack: StaticFactPack) -> Iterator[Finding]
                     tier=Tier.FACTS,
                     severity=Severity.LOW,
                     device=member.device,
+                    change=dialect.fhrp_change(pack, group, member.device, "preempt"),
                     title=f"{group.label} will not return to its preferred master",
                     detail=f"{member.device} has the highest priority ({top}) but "
                     f"preempt is off, so after any failover the group stays on the "
@@ -928,6 +931,64 @@ def _address_owner(pack: StaticFactPack) -> dict[str, str]:
     }
 
 
+def _reciprocal_neighbor(
+    pack: StaticFactPack,
+    process: BgpProcess,
+    peer_device: str,
+    neighbor: BgpNeighbor,
+) -> tuple[str, ...]:
+    """The neighbor statement the far end is missing.
+
+    Every value in it is already known: the address this device peers from, the
+    AS it runs, and the AS the far end runs. What is not known — a description,
+    a password, an update-source, a route-map — is left out rather than invented,
+    so the line is the minimum that brings the session up and nothing more.
+    """
+    nos = dialect.nos_of(pack, peer_device)
+    if nos is None or not process.local_as:
+        return ()
+    back = next(
+        (
+            assignment.address
+            for device in pack.devices
+            if device.id == process.device
+            for interface in device.interfaces
+            for assignment in interface.addresses
+            if _same_subnet_as(pack, peer_device, assignment.address)
+        ),
+        None,
+    )
+    if back is None:
+        return ()
+    far_as = next((p.local_as for p in pack.bgp if p.device == peer_device), None)
+    if not far_as:
+        return ()
+    return (
+        f"router bgp {far_as}",
+        f"   neighbor {back} remote-as {process.local_as}",
+    )
+
+
+def _same_subnet_as(pack: StaticFactPack, device: str, address: str) -> bool:
+    """Is `address` on a subnet `device` is also addressed in?
+
+    The reciprocal statement has to name an address the far end can actually
+    reach, and a device with several interfaces has several candidates.
+    """
+    try:
+        target = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    for entry in pack.devices:
+        if entry.id != device:
+            continue
+        for interface in entry.interfaces:
+            for net in _networks(interface):
+                if net.version == target.version and target in net:
+                    return True
+    return False
+
+
 @rule
 def bgp_session_configured_on_one_side(pack: StaticFactPack) -> Iterator[Finding]:
     """A peering only one end knows about.
@@ -975,6 +1036,10 @@ def bgp_session_configured_on_one_side(pack: StaticFactPack) -> Iterator[Finding
                 ),
                 remedy=f"add the reciprocal neighbor on {peer_device}, or remove "
                 f"this one",
+                # The far end's own address is the one it must peer back to, and
+                # both AS numbers are already known — there is nothing left to
+                # guess, which is why this rule can state a line and most cannot.
+                change=_reciprocal_neighbor(pack, process, peer_device, neighbor),
             )
 
 
@@ -1302,6 +1367,11 @@ def native_vlan_not_permitted_on_the_trunk(pack: StaticFactPack) -> Iterator[Fin
                 ),
                 remedy=f"add VLAN {native} to the allowed list, or make a "
                 f"permitted VLAN the native one",
+                change=dialect.under_interface(
+                    nos, interface.name, f"switchport trunk allowed vlan add {native}"
+                )
+                if (nos := dialect.nos_of(pack, device.id))
+                else (),
             )
 
 

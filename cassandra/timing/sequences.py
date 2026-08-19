@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from cassandra import dialect
 from cassandra.factpack.schema import (
     AddressFamily,
     FhrpGroup,
@@ -214,9 +215,7 @@ def _preempt_delay_line(
     getting one wrong is worse than saying nothing, so this returns nothing at
     all for a device whose dialect is not one of the three.
     """
-    nos = next(
-        (d.nos_family for d in pack.devices if d.id == member.device), None
-    )
+    nos = next((d.nos_family for d in pack.devices if d.id == member.device), None)
     if nos is None:
         return ()
     number = group.group_number
@@ -239,13 +238,10 @@ def _change_for(
     pack: StaticFactPack, group_id: str, device: str, seconds: int
 ) -> tuple[str, ...]:
     """The preempt-delay edit for one group on one device, if it can be stated."""
-    for group in pack.fhrp_groups:
-        if group.id != group_id:
-            continue
-        for member in group.members:
-            if member.device == device:
-                return _preempt_delay_line(pack, group, member, seconds)
-    return ()
+    group = next((g for g in pack.fhrp_groups if g.id == group_id), None)
+    if group is None:
+        return ()
+    return dialect.fhrp_change(pack, group, device, f"preempt delay minimum {seconds}")
 
 
 def _control_note(held: int | None) -> str:
@@ -552,9 +548,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                                 events=events,
                                 held=held,
                                 delay_ms=delays.get(group_id, 0),
-                                change=_change_for(
-                                    pack, group_id, device, suggested
-                                ),
+                                change=_change_for(pack, group_id, device, suggested),
                             )
                         )
     # A reload is its own event class: every interface on the device drops
