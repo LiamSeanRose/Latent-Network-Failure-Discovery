@@ -236,7 +236,7 @@ def test_findings_are_grouped_by_device_with_a_count(
     base_url: str, mixed: Path
 ) -> None:
     body = view(base_url, mixed)
-    assert body.count('<details class="device" open>') == 2
+    assert body.count('<details class="device-group" open>') == 2
     # Match the grouping, not today's counts. Pinning exact numbers couples this
     # test to the FACTS rule registry, which grows.
     for device in ("agg-a", "edge1"):

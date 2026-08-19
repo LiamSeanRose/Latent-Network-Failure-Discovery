@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from cassandra import visuals
 from cassandra.factpack.builders import build_fact_pack
+from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
 from cassandra.findings import Finding, Severity, Tier, rank
 from cassandra.timing import sequences, timer_rules
@@ -47,117 +49,210 @@ _TIMING_CAVEAT: Final = (
 )
 
 _STYLE: Final = """
+/* Colours are the validated categorical slots and the reserved status palette.
+   Dark values are stepped for the dark surface, not flipped. */
 :root {
   color-scheme: light dark;
-  --bg: #fbfbfa; --fg: #1a1a19; --muted: #6b6b68; --line: #e3e3e0;
-  --card: #ffffff; --high: #b3261e; --medium: #8a5a00; --low: #3d5a80;
-  --accent: #2f5d50; --on-bg: #2f5d50; --on-fg: #ffffff;
+  --surface-0: #f6f6f4; --surface-1: #fcfcfb; --surface-2: #eeeeea;
+  --ink-1: #0b0b0b; --ink-2: #52514e; --ink-3: #85847e;
+  --line: #e0e0da;
+  --accent: #256abf;
+  --s-critical: #d03b3b; --s-serious: #ec835a; --s-warning: #fab219; --s-good: #0ca30c;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+  --grid: rgba(37,106,191,.07);
 }
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #161614; --fg: #ece9e4; --muted: #9a978f; --line: #2e2c28;
-    --card: #1e1c1a; --high: #f2857a; --medium: #e0b062; --low: #8fb4d9;
-    --accent: #7fc4ad; --on-bg: #7fc4ad; --on-fg: #14201c;
+  :root:where(:not([data-theme="light"])) {
+    --surface-0: #131312; --surface-1: #1a1a19; --surface-2: #232320;
+    --ink-1: #ffffff; --ink-2: #c3c2b7; --ink-3: #8e8d85;
+    --line: #2e2c28;
+    --accent: #6da7ec;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+    --grid: rgba(109,167,236,.10);
   }
 }
+:root[data-theme="dark"] {
+  --surface-0: #131312; --surface-1: #1a1a19; --surface-2: #232320;
+  --ink-1: #ffffff; --ink-2: #c3c2b7; --ink-3: #8e8d85;
+  --line: #2e2c28; --accent: #6da7ec;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+  --grid: rgba(109,167,236,.10);
+}
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
 body {
-  margin: 0; padding: 2rem 1.25rem; background: var(--bg); color: var(--fg);
+  margin: 0; background: var(--surface-0); color: var(--ink-1);
   font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 44px 44px, 44px 44px;
 }
-main { max-width: 62rem; margin: 0 auto; }
-h1 { font-size: 1.35rem; margin: 0 0 .25rem; letter-spacing: -0.01em; }
-.sub { color: var(--muted); margin: 0 0 1.75rem; }
-a { color: var(--accent); }
-form { display: flex; gap: .5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+main { max-width: 60rem; margin: 0 auto; padding: 2.25rem 1.1rem 4rem; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ---- masthead ---- */
+.masthead { position: relative; margin-bottom: 1.6rem; }
+.wordmark {
+  display: flex; align-items: center; gap: .6rem;
+  font-size: 1.5rem; font-weight: 640; letter-spacing: -.02em; margin: 0;
+}
+.pulse { width: 11px; height: 11px; border-radius: 50%; background: var(--s-good);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--s-good) 60%, transparent);
+  animation: pulse 2.6s ease-out infinite; flex: none; }
+.pulse.alert { background: var(--s-critical);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--s-critical) 60%, transparent); }
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); }
+  40% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--s-good) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.tagline { color: var(--ink-2); margin: .3rem 0 0; }
+
+/* ---- search ---- */
+form.finder { display: flex; gap: .5rem; margin: 1.4rem 0 1.6rem; flex-wrap: wrap; }
 input[type=text] {
-  flex: 1 1 22rem; padding: .6rem .7rem; border: 1px solid var(--line);
-  border-radius: 6px; background: var(--card); color: var(--fg); font: inherit;
+  flex: 1 1 20rem; padding: .62rem .75rem; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface-1); color: var(--ink-1);
+  font: inherit; transition: border-color .18s, box-shadow .18s;
 }
-button {
-  padding: .6rem 1.1rem; border: 0; border-radius: 6px; background: var(--accent);
-  color: var(--on-fg); font: inherit; font-weight: 600; cursor: pointer;
+input[type=text]:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
-.filters { margin: 0 0 1.25rem; }
-.chips { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
-  margin-bottom: .4rem; }
-.chips .label {
-  color: var(--muted); font-size: .74rem; text-transform: uppercase;
-  letter-spacing: .05em; min-width: 4.5rem;
+button.go {
+  padding: .62rem 1.15rem; border: 0; border-radius: 8px; background: var(--accent);
+  color: #fff; font: inherit; font-weight: 620; cursor: pointer;
+  transition: transform .12s ease, filter .18s;
 }
-.chip {
-  display: inline-flex; gap: .4rem; align-items: baseline; padding: .3rem .7rem;
-  border: 1px solid var(--line); border-radius: 999px; background: var(--card);
-  color: var(--fg); text-decoration: none; font-size: .84rem;
+button.go:hover { filter: brightness(1.08); transform: translateY(-1px); }
+
+/* ---- figures ---- */
+.figure {
+  background: var(--surface-1); border: 1px solid var(--line); border-radius: 12px;
+  padding: 1rem 1rem .5rem; margin-bottom: 1rem; overflow-x: auto;
 }
-.chip:hover { border-color: var(--accent); }
-.chip .n { color: var(--muted); font-variant-numeric: tabular-nums; }
-.chip.on {
-  background: var(--on-bg); border-color: var(--on-bg); color: var(--on-fg);
-  font-weight: 600;
+.figure h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--ink-3); margin: 0 0 .1rem; font-weight: 640; }
+.figure p.cap { color: var(--ink-2); font-size: .86rem; margin: 0 0 .7rem; }
+/* Scroll rather than shrink. Below about 520px the bands and their labels
+   stop being readable, and an illegible figure is worse than a scrollbar. */
+svg.viz { width: 100%; min-width: 520px; height: auto; display: block; }
+svg.viz text { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  fill: var(--ink-2); }
+svg.viz .row-label { fill: var(--ink-1); font-weight: 600; }
+svg.viz .band-label { fill: #fff; font-weight: 600; }
+svg.viz .tick { fill: var(--ink-3); }
+svg.viz .ev { stroke: var(--ink-3); stroke-width: 1; opacity: .55; }
+svg.viz .band rect {
+  fill: var(--c); transform-origin: left center;
+  animation: grow .5s cubic-bezier(.2,.8,.3,1) both;
 }
-.chip.on .n { color: inherit; opacity: .8; }
-.showing, .note { color: var(--muted); font-size: .84rem; margin: .6rem 0 1rem; }
-.counts {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
-  gap: .75rem 1.25rem; margin-bottom: 1.5rem;
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) svg.viz .band rect { fill: var(--cd); }
 }
-.count b { font-size: 1.5rem; font-weight: 650; display: block; }
-.count span { color: var(--muted); font-size: .82rem; text-transform: uppercase;
-  letter-spacing: .04em; }
-details.device { margin: 0 0 1.1rem; border-top: 1px solid var(--line); }
-details.device > summary {
-  display: flex; gap: .5rem; align-items: baseline; list-style: none;
-  cursor: pointer; padding: .65rem .1rem; color: var(--fg); font-size: .95rem;
-  font-weight: 650;
+:root[data-theme="dark"] svg.viz .band rect { fill: var(--cd); }
+@keyframes grow {
+  from { transform: scaleX(0); opacity: .2; }
+  to { transform: scaleX(1); opacity: 1; }
 }
-details.device > summary::-webkit-details-marker { display: none; }
-details.device > summary::before { content: "▾"; color: var(--muted);
-  font-size: .75rem; }
-details.device:not([open]) > summary::before { content: "▸"; }
-details.device > summary .n { color: var(--muted); font-weight: 400;
-  font-size: .84rem; }
+svg.topology .edge line { stroke: var(--accent); stroke-width: 2; opacity: .5;
+  stroke-dasharray: 260; stroke-dashoffset: 260;
+  animation: draw .8s ease-out forwards; animation-delay: calc(var(--i) * .09s); }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+svg.topology .edge-label { fill: var(--ink-3); font-size: 10px;
+  paint-order: stroke; stroke: var(--surface-1); stroke-width: 3px;
+  stroke-linejoin: round; }
+svg.topology .node circle { fill: var(--surface-1); stroke: var(--accent);
+  stroke-width: 2.5; animation: pop .45s cubic-bezier(.2,1.3,.4,1) both;
+  animation-delay: calc(.35s + var(--i) * .08s); }
+svg.topology .node text { fill: var(--ink-1); font-weight: 640; font-size: 11px; }
+svg.topology .node.l2only circle { stroke: var(--ink-3); stroke-dasharray: 3 3; }
+svg.topology .node .hint { fill: var(--ink-3); font-weight: 500; font-size: 9px; }
+@keyframes pop { from { transform: scale(0); } to { transform: scale(1); } }
+svg.topology .node { transform-box: fill-box; transform-origin: center; }
+
+/* ---- summary ---- */
+.sparkbar { display: flex; height: 8px; border-radius: 999px; overflow: hidden;
+  background: var(--surface-2); margin: .1rem 0 1rem; }
+.sparkbar .seg { background: var(--c); transform-origin: left center;
+  animation: grow .6s cubic-bezier(.2,.8,.3,1) both; }
+.counts { display: flex; gap: 1.4rem; flex-wrap: wrap; margin-bottom: .4rem; }
+.counts .count b { display: block; font-size: 1.45rem; font-weight: 660;
+  line-height: 1.1; }
+.counts .count span { color: var(--ink-3); font-size: .74rem; text-transform: uppercase;
+  letter-spacing: .05em; }
+
+/* ---- filters ---- */
+.chips { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1.1rem; }
+.chip { display: inline-flex; align-items: center; gap: .35rem; padding: .28rem .62rem;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface-1);
+  color: var(--ink-2); text-decoration: none; font-size: .82rem;
+  transition: border-color .15s, color .15s, transform .12s; }
+.chip:hover { transform: translateY(-1px); color: var(--ink-1);
+  border-color: var(--accent); }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip .n { opacity: .72; font-variant-numeric: tabular-nums; }
+
+/* ---- findings ---- */
+.device-group { margin-bottom: 1.5rem; }
+.device-group > summary { cursor: pointer; list-style: none; padding: .5rem 0;
+  font-weight: 640; display: flex; align-items: center; gap: .5rem;
+  border-bottom: 1px solid var(--line); margin-bottom: .8rem; }
+.device-group > summary::-webkit-details-marker { display: none; }
+.device-group > summary::before { content: "▸"; color: var(--ink-3);
+  transition: transform .18s; display: inline-block; }
+.device-group[open] > summary::before { transform: rotate(90deg); }
+.device-group .n { color: var(--ink-3); font-weight: 500; font-size: .85rem; }
 .finding {
-  background: var(--card); border: 1px solid var(--line); border-left: 3px solid;
-  border-radius: 6px; padding: .9rem 1rem; margin-bottom: .7rem;
+  background: var(--surface-1); border: 1px solid var(--line);
+  border-left: 3px solid var(--ink-3); border-radius: 10px;
+  padding: .9rem 1rem; margin-bottom: .65rem;
+  animation: rise .42s cubic-bezier(.2,.8,.3,1) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+  transition: transform .16s ease, border-color .16s;
 }
-.finding.high { border-left-color: var(--high); }
-.finding.medium { border-left-color: var(--medium); }
-.finding.low, .finding.info { border-left-color: var(--low); }
-.finding h2 { font-size: 1rem; margin: 0 0 .3rem; font-weight: 600; }
-.meta { color: var(--muted); font-size: .82rem; margin-bottom: .5rem; }
-.tag {
-  display: inline-block; border: 1px solid var(--line); border-radius: 999px;
-  padding: 0 .45rem; font-size: .76rem;
+.finding:hover { transform: translateY(-2px); border-color: var(--ink-3); }
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
 }
-.detail { margin: 0 0 .6rem; }
-.trigger, .remedy {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem;
-  background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
-  padding: .35rem .5rem; margin-bottom: .4rem; overflow-x: auto;
-}
-details summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
-details ul { margin: .5rem 0 0; padding-left: 1.1rem; font-family: ui-monospace,
-  SFMono-Regular, Menlo, monospace; font-size: .8rem; color: var(--muted); }
-.empty, .error {
-  background: var(--card); border: 1px solid var(--line); border-radius: 6px;
-  padding: 1.25rem;
-}
-.error { border-left: 3px solid var(--high); }
-.caveat { color: var(--muted); font-size: .85rem; margin-top: 2rem;
-  border-top: 1px solid var(--line); padding-top: 1rem; }
-.provenance { color: var(--muted); font-size: .78rem; margin-top: 1.25rem; }
-.provenance code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.finding.high { border-left-color: var(--s-critical); }
+.finding.medium { border-left-color: var(--s-serious); }
+.finding.low { border-left-color: var(--s-warning); }
+.finding.info { border-left-color: var(--series-1); }
+.finding h2 { font-size: 1rem; margin: 0 0 .3rem; font-weight: 620; }
+.meta { color: var(--ink-3); font-size: .8rem; margin: 0 0 .55rem;
+  display: flex; gap: .45rem; flex-wrap: wrap; align-items: center; }
+.sev { display: inline-flex; align-items: center; gap: .3rem; font-weight: 640; }
+.sev::before { content: ""; width: 8px; height: 8px; border-radius: 2px;
+  background: currentColor; }
+.sev.high { color: var(--s-critical); } .sev.medium { color: var(--s-serious); }
+.sev.low { color: var(--s-warning); } .sev.info { color: var(--series-1); }
+.tag { border: 1px solid var(--line); border-radius: 999px; padding: 0 .45rem;
+  font-size: .72rem; color: var(--ink-3); }
+.detail { margin: 0 0 .55rem; }
+.trigger, .remedy { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .8rem; background: var(--surface-2); border-radius: 6px;
+  padding: .38rem .55rem; margin-bottom: .35rem; overflow-x: auto; }
+.remedy { border-left: 2px solid var(--s-good); }
+details summary { cursor: pointer; color: var(--ink-3); font-size: .82rem; }
+details ul { margin: .45rem 0 0; padding-left: 1.1rem; font-family: ui-monospace,
+  SFMono-Regular, Menlo, monospace; font-size: .78rem; color: var(--ink-2); }
+.empty, .error, .note { background: var(--surface-1); border: 1px solid var(--line);
+  border-radius: 10px; padding: 1.1rem; }
+.error { border-left: 3px solid var(--s-critical); }
+.caveat { color: var(--ink-3); font-size: .84rem; margin-top: 2rem;
+  border-top: 1px solid var(--line); padding-top: .9rem; }
+footer.meta-foot { color: var(--ink-3); font-size: .78rem; margin-top: 1.6rem; }
 @media (max-width: 700px) {
-  body { padding: 1.25rem .85rem; }
-  main { max-width: none; }
-  form { flex-direction: column; align-items: stretch; }
-  input[type=text] { flex: 0 0 auto; width: 100%; }
-  button { width: 100%; }
-  .counts { grid-template-columns: 1fr; gap: .3rem; }
-  .count { display: flex; align-items: baseline; gap: .5rem; }
-  .count b { font-size: 1.15rem; display: inline; }
-  .chips .label { min-width: 100%; }
+  main { padding: 1.4rem .8rem 3rem; }
+  .counts { gap: 1rem; }
+  .figure { padding: .8rem .7rem .3rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  svg.topology .edge line { stroke-dashoffset: 0; }
 }
 """
 
@@ -171,6 +266,9 @@ class Analysis:
     fact_pack_id: str = ""
     digest: str = ""
     device_count: int = 0
+    # Kept so the figures can be drawn from the same facts the findings came
+    # from, rather than re-parsing and risking a picture of a different network.
+    pack: StaticFactPack | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -210,6 +308,7 @@ def analyse(config_dir: Path) -> Analysis:
         fact_pack_id=pack.meta.fact_pack_id,
         digest=pack.meta.config_digest,
         device_count=pack.meta.device_count or len(pack.devices),
+        pack=pack,
     )
 
 
@@ -377,14 +476,15 @@ def _counts_html(visible: list[Finding], total: int) -> str:
     return f'{showing}<div class="counts">{cells}</div>'
 
 
-def _finding_html(finding: Finding) -> str:
+def _finding_html(finding: Finding, figure: str = "") -> str:
     parts = [
         f'<article class="finding {html.escape(finding.severity.value)}">',
         f"<h2>{html.escape(finding.title)}</h2>",
-        f'<p class="meta">{html.escape(finding.device)} · '
-        f"{html.escape(finding.severity.value)} · "
-        f"{html.escape(finding.tier.value)} tier · "
-        f"{html.escape(finding.rule)}"
+        f'<p class="meta"><span class="mono">{html.escape(finding.device)}</span>'
+        f'<span class="sev {html.escape(finding.severity.value)}">'
+        f"{html.escape(finding.severity.value)}</span>"
+        f"<span>{html.escape(finding.tier.value)} tier</span>"
+        f'<span class="mono">{html.escape(finding.rule)}</span>'
         + (
             ' <span class="tag">model-derived</span>'
             if finding.tier is Tier.TIMING
@@ -399,6 +499,13 @@ def _finding_html(finding: Finding) -> str:
         )
     if finding.remedy:
         parts.append(f'<div class="remedy">fix: {html.escape(finding.remedy)}</div>')
+    if figure:
+        parts.append(
+            '<div class="figure"><h2>gateway ownership over time</h2>'
+            '<p class="cap">The model advanced through this trigger. Each band is '
+            "the device holding that group; a split is where two groups sit on "
+            "different devices.</p>" + figure + "</div>"
+        )
     if finding.evidence:
         items = "".join(f"<li>{html.escape(item)}</li>" for item in finding.evidence)
         parts.append(f"<details><summary>evidence</summary><ul>{items}</ul></details>")
@@ -414,13 +521,35 @@ def _by_device(findings: list[Finding]) -> list[tuple[str, list[Finding]]]:
     return list(grouped.items())
 
 
-def _device_html(device: str, findings: list[Finding]) -> str:
+def _device_html(
+    device: str, findings: list[Finding], pack: StaticFactPack | None = None
+) -> str:
+    """One device's findings.
+
+    The first timing finding on a device carries the timeline figure. Drawing it
+    on every one would repeat the same picture three times, since they all come
+    from the same simulated sequence.
+    """
     plural = "" if len(findings) == 1 else "s"
+    cards: list[str] = []
+    drawn = False
+    for index, finding in enumerate(findings):
+        figure = ""
+        if pack is not None and not drawn and finding.tier is Tier.TIMING:
+            figure = visuals.timeline_svg(pack, finding)
+            drawn = bool(figure)
+        cards.append(
+            _finding_html(finding, figure).replace(
+                '<article class="finding',
+                f'<article style="--i:{index}" class="finding',
+                1,
+            )
+        )
     return (
-        '<details class="device" open>'
+        '<details class="device-group" open>'
         f"<summary>{html.escape(device)}"
         f'<span class="n">{len(findings)} finding{plural}</span></summary>'
-        + "".join(_finding_html(finding) for finding in findings)
+        + "".join(cards)
         + "</details>"
     )
 
@@ -464,7 +593,8 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
         if visible:
             sections.append(_counts_html(visible, len(analysis.findings)))
             sections.extend(
-                _device_html(device, group) for device, group in _by_device(visible)
+                _device_html(device, group, analysis.pack)
+                for device, group in _by_device(visible)
             )
         else:
             clear = href("/", config_dir, Filters())
@@ -487,19 +617,37 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
             "findings.json</a></p>"
         )
 
+    worst = min(
+        (f.severity for f in visible),
+        key=lambda s: list(Severity).index(s),
+        default=None,
+    )
+    pulse = "pulse alert" if worst is Severity.HIGH else "pulse"
+    topology = (
+        f'<div class="figure"><h2>adjacency</h2>'
+        f'<p class="cap">Devices, and the subnets they share.</p>'
+        f"{visuals.topology_svg(analysis.pack)}</div>"
+        if analysis.pack is not None and visuals.topology_svg(analysis.pack)
+        else ""
+    )
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cassandra</title><style>{_STYLE}</style></head>
 <body><main>
-<h1>Cassandra</h1>
-<p class="sub">Latent failure modes in network configuration.</p>
-<form method="get" action="/">
+<header class="masthead">
+  <h1 class="wordmark"><span class="{pulse}"></span>Cassandra</h1>
+  <p class="tagline">Latent failure modes in network configuration &mdash; the ones
+  that only exist between events.</p>
+</header>
+<form class="finder" method="get" action="/">
   <input type="text" name="dir" placeholder="/path/to/configs"
          value="{html.escape(config_dir)}" autofocus>
   {_hidden_filters(filters)}
-  <button type="submit">Analyse</button>
+  <button class="go" type="submit">Analyse</button>
 </form>
+{topology}
 {"".join(sections)}
 </main></body></html>"""
 
