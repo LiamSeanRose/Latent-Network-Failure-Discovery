@@ -96,15 +96,4 @@ jobs:
         if: always()
         run: sudo containerlab destroy -t topology.clab.yml --cleanup >/dev/null 2>&1 || true
 
-      - name: why it failed
-        if: failure()
-        run: |
-          echo "================ FAILURE SUMMARY ================"
-          echo "state captured before teardown is in the steps above;"
-          echo "the step that failed is the last one marked with a red X."
-          echo "================================================="
 
-      - name: capture state before teardown
-        if: failure()
-        run: |
-          echo "(no-op placeholder: state capture moved ahead of teardown)"

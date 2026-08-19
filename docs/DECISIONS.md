@@ -54,6 +54,35 @@ operation, so there is no second route.
 
 ---
 
+## 2026-08-19 — Stopped the FRR validation attempt after four failed runs
+
+**Outcome: abandoned for now, nothing validated, nothing regressed.**
+
+Four CI runs, all failing during lab setup. What was learned, so nobody repeats it:
+
+- The FRR image ships real iproute2 6.9.0, not busybox. An early hypothesis blaming busybox
+  was wrong.
+- Creating the macvlan inside the container fails with `Operation not permitted` without
+  NET_ADMIN, and succeeds with it — reproduced locally against the same image, producing the
+  device with the correct virtual MAC. `docker exec --privileged` was added for this.
+- That fix did not make the run pass, and the remaining failure was never diagnosed.
+
+**Why the loop failed to converge, which is the more useful lesson.** Each iteration was a
+blind guess: this environment cannot run containerlab at all (no IPv6 stack, so Docker's bridge
+driver refuses to create networks), so nothing could be reproduced locally end to end. Feedback
+came only from CI, whose log tail was dominated by teardown and post-job noise, and an attempt
+to fix the diagnostics added two steps that printed nothing useful. Four cycles produced one
+real fact. That is the shape of a loop that should be stopped rather than continued.
+
+**What a productive attempt would look like:** run containerlab with FRR on a machine that can
+actually boot it, get VRRP adjacency working by hand, and only then encode the working sequence
+into CI. Guessing at container plumbing through a five-minute remote feedback loop is not a
+method.
+
+**Unchanged:** the timing model remains unvalidated, exactly as before the attempt.
+
+---
+
 ## 2026-08-19 — Partial validation against FRR: attempted, not yet working
 
 **Context:** Phase 4 needs a cEOS image nobody can redistribute, leaving the timing model
