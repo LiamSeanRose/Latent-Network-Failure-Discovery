@@ -830,10 +830,16 @@ def page(
             '<div class="empty"><strong>No findings.</strong><br>Nothing in these '
             "configs trips a consistency rule, and no event sequence the timing "
             "model explored produced a sustained divergence."
-            '<p class="cap">That is not proof the network is sound. The timing '
-            "tier searches a neighbourhood of sequences derived from the timers "
-            "it found, not the whole space, and it only models what the parsers "
-            "understood.</p></div>"
+            # The same two lanes and the same event as the landing page's hero,
+            # with the gap closed. A clean run is a claim about what was
+            # searched rather than about the network, and showing what was
+            # searched is a smaller and more honest thing to say than "fine".
+            f"{art.steady_svg()}"
+            '<p class="cap">Both groups answered the event at the same moment, '
+            "so there is no window between them. That is not proof the network "
+            "is sound: the timing tier searches a neighbourhood of sequences "
+            "derived from the timers it found, not the whole space, and it only "
+            "models what the parsers understood.</p></div>"
         )
     else:
         sections.append(_filter_bar(config_dir, analysis.findings, filters))

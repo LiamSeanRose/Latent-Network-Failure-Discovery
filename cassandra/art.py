@@ -291,3 +291,35 @@ def shapes() -> tuple[tuple[str, str, str], ...]:
             _margin_svg(),
         ),
     )
+
+
+def steady_svg() -> str:
+    """The other outcome, drawn: two groups that answer one event together.
+
+    The clean run needs a picture as much as the failing one does, and for a
+    reason the caption underneath it makes explicit — "no findings" is a claim
+    about a neighbourhood of sequences this tool explored, not about the
+    network. A reader who has seen the split in the hero and then sees the same
+    two lanes with no gap between them has been told what was checked, which is
+    a smaller and more honest thing than being told it is fine.
+
+    Deliberately the same two lanes, the same event and the same geometry as the
+    hero. The only difference is the one that matters.
+    """
+    return (
+        f'<svg class="vignette steady" viewBox="{_VIGNETTE}" role="img" '
+        f'aria-label="Two rows change colour at the same moment after one event, '
+        f'so there is no stretch where they differ.">'
+        + _tick(58, "one event")
+        + _held(6, 10, 52, _A, delay=".05s")
+        + _held(58, 10, 136, _B, delay=".4s")
+        + _held(6, 36, 52, _A, delay=".05s")
+        + _held(58, 36, 136, _B, delay=".4s")
+        # The one mark that is not in the hero: a single line through both
+        # changes, at the moment they both happen. The words for it are in the
+        # caption rather than in here, because the hero's own label sits at this
+        # end of the picture and two captions fighting over the same corner is
+        # how a diagram stops being read.
+        + '<g class="together"><path d="M58 4v53"/></g>'
+        "</svg>"
+    )

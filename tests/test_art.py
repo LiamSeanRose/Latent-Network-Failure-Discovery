@@ -34,9 +34,10 @@ _SHAPES: Final = art.shapes()
         art.mark_svg(),
         art.hero_svg(),
         art.severity_ring({"high": 2}, _COLOURS),
+        art.steady_svg(),
         *(svg for _, _, svg in _SHAPES),
     ],
-    ids=["mark", "hero", "ring", *(heading for heading, _, _ in _SHAPES)],
+    ids=["mark", "hero", "ring", "steady", *(heading for heading, _, _ in _SHAPES)],
 )
 def test_every_piece_is_well_formed_svg(svg: str) -> None:
     """It goes straight into a page with no sanitiser between here and there."""
@@ -50,9 +51,10 @@ def test_every_piece_is_well_formed_svg(svg: str) -> None:
         art.mark_svg(),
         art.hero_svg(),
         art.severity_ring({"low": 1}, _COLOURS),
+        art.steady_svg(),
         *(svg for _, _, svg in _SHAPES),
     ],
-    ids=["mark", "hero", "ring", *(heading for heading, _, _ in _SHAPES)],
+    ids=["mark", "hero", "ring", "steady", *(heading for heading, _, _ in _SHAPES)],
 )
 def test_nothing_is_fetched(svg: str) -> None:
     for pattern in (r"https?://", r"<image", r"xlink:href", r"@import"):
@@ -194,3 +196,30 @@ def test_the_three_shapes_are_three_different_pictures() -> None:
     assert len(set(drawings)) == 3
     headings = [heading for heading, _, _ in _SHAPES]
     assert len(set(headings)) == 3
+
+
+def test_the_steady_picture_is_the_hero_with_the_gap_closed() -> None:
+    """A clean run gets a picture for the same reason a failing one does, and
+    it has to be recognisably the same picture or it teaches nothing.
+
+    Same two lanes, same event, same geometry: the only difference is that both
+    changes happen at the same moment, which is the whole point. The hatch and
+    the split outline must not appear — a reader who has learned that the hatch
+    means a defect would read one here as a defect that was found.
+    """
+    steady = art.steady_svg()
+    divergence = next(svg for heading, _, svg in _SHAPES if heading == "they separate")
+    assert "hatch" not in steady
+    assert "split" not in steady
+    assert "hatch" in divergence
+    # The event is at the same place in both, so a reader comparing them is
+    # comparing the answers rather than two differently drawn pictures.
+    assert 'x1="58"' in steady and 'x1="58"' in divergence
+    assert "one event" in steady
+
+
+def test_the_steady_picture_describes_itself_to_a_screen_reader() -> None:
+    root = ET.fromstring(art.steady_svg())
+    assert root.get("role") == "img"
+    label = " ".join((root.get("aria-label") or "").split())
+    assert "same moment" in label

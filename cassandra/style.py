@@ -199,6 +199,13 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
 .vignette .split { opacity: 0;
   animation: split-in .55s ease-out 1.15s forwards,
              breathe 3.4s ease-in-out 1.7s infinite; }
+/* The clean picture holds still. The split breathes because it is the thing to
+   notice; a steady result that pulsed would be asking for the same attention
+   and would have nothing to give it. */
+.vignette.steady { max-width: 22rem; margin: .6rem 0 .2rem; }
+.vignette .together path { stroke: var(--series-3); stroke-width: 2.4;
+  stroke-linecap: round; fill: none; opacity: 0;
+  animation: split-in .5s ease-out .95s forwards; }
 
 /* ---- ring ---- */
 .ring { flex: none; }
