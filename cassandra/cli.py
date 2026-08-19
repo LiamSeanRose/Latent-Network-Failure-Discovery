@@ -12,13 +12,14 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from cassandra import baseline
+from cassandra import baseline, coverage
 from cassandra.app import analyse, compare_with, serve
 from cassandra.catalogue import catalogue, render_text
+from cassandra.factpack import discovery
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
-from cassandra.findings import Finding, Severity
+from cassandra.findings import Finding, Severity, locate
 from cassandra.report import as_json, render
 from cassandra.report_html import write as write_html
 from cassandra.timing import sequences, timer_rules
@@ -138,6 +139,18 @@ def main(argv: list[str] | None = None) -> int:
         metavar="FILE",
         help="report only what changed since a saved baseline",
     )
+    check.add_argument(
+        "--coverage",
+        nargs="?",
+        const="summary",
+        choices=("summary", "full"),
+        metavar="summary|full",
+        help=(
+            "say which checks had facts to work with and which were inert. A "
+            "clean run and a run where most of the rule set never had an input "
+            "look identical without this. `full` lists every check"
+        ),
+    )
 
     report = sub.add_parser("report", help="write a shareable HTML report")
     report.add_argument("config_dir", type=Path)
@@ -210,8 +223,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         pack, unparsed = loaded
         _warn_unparsed(unparsed)
-        findings = (
-            rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack)
+        # Located here rather than in each rule: a rule states what it found and
+        # names the objects it found it on, and reading those back out of the
+        # text is the one place that knows how to turn them into a file and a
+        # line (PROJECT.md §5.4).
+        findings = locate(
+            rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack),
+            pack,
         )
 
         if args.save_baseline:
@@ -230,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(error, file=sys.stderr)
                 return 2
             print(baseline.render_diff(diff, explain=args.explain))
+            _report_coverage(pack, args.coverage, quiet=False)
             # Only NEW findings fail a regression check. The pre-existing ones
             # were known and accepted when the baseline was taken, and failing on
             # them would make every run red until the backlog is cleared, which
@@ -246,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print(render(findings, explain=args.explain))
+        _report_coverage(pack, args.coverage, quiet=args.as_json)
         # Exit status is the verdict: non-zero when something needs attention, so
         # this is usable in a pre-commit hook or CI without parsing the output.
         # --fail-on narrows what counts as attention without narrowing the
@@ -289,6 +309,27 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _report_coverage(pack: StaticFactPack, wanted: str | None, *, quiet: bool) -> None:
+    """Say which checks had something to look at, after saying what they found.
+
+    After, because the findings are what the user came for. The coverage line is
+    the caveat on them — thirty of forty-one checks inert is a different result
+    from a clean run, and it is not visible in a report that says nothing.
+
+    Goes to stderr alongside the JSON, so a pipeline parsing the findings is not
+    handed a paragraph of prose in the middle of them.
+    """
+    if wanted is None:
+        return
+    assessed = coverage.assess(pack)
+    text = (
+        coverage.render_text(assessed)
+        if wanted == "full"
+        else coverage.summary(assessed)
+    )
+    print(text, file=sys.stderr if quiet else sys.stdout)
+
+
 def _warn_unparsed(unparsed: dict[str, tuple[str, ...]]) -> None:
     """Say how much of the input was not understood, before the findings.
 
@@ -326,9 +367,33 @@ def _load(config_dir: Path) -> tuple[StaticFactPack, dict[str, tuple[str, ...]]]
         return None
     pack, unparsed = build_fact_pack(config_dir)
     if not pack.devices:
-        print(f"no .cfg files in {config_dir}", file=sys.stderr)
+        _explain_empty(config_dir)
         return None
     return pack, unparsed
+
+
+def _explain_empty(config_dir: Path) -> None:
+    """Say that nothing was recognised, and say what was passed over.
+
+    Not "no .cfg files in here". Discovery takes `.cfg`, `.conf`, `.txt`,
+    extensionless files and anything not on its ignore list, and settles the
+    ambiguous ones by reading them — so a message naming one extension turns away
+    the person whose backups are `.conf`, whose files would have worked. The
+    skips discovery thought worth mentioning follow the message, because "there
+    was nothing there" and "there was something there and I would not open it"
+    are different problems with different fixes.
+    """
+    print(f"nothing in {config_dir} reads like a device config", file=sys.stderr)
+    found = discovery.discover(config_dir)
+    for note in found.notes():
+        print(f"  {note}", file=sys.stderr)
+    if not found.notes() and found.skipped:
+        passed = len(found.skipped)
+        print(
+            f"  {passed} path{'' if passed == 1 else 's'} passed over as "
+            f"documents, data or binaries",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

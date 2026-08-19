@@ -63,7 +63,7 @@ def test_empty_directory_is_an_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert main(["facts", str(tmp_path)]) == 2
-    assert "no .cfg files" in capsys.readouterr().err
+    assert "reads like a device config" in capsys.readouterr().err
 
 
 # A pair whose only defect is a tie for the top priority: one medium finding and

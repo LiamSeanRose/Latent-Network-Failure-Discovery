@@ -717,7 +717,7 @@ def test_check_on_a_directory_with_nothing_readable_says_so(
     hazards: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert cli.main(["check", str(hazards["no-configs"])]) == 2
-    assert "no .cfg files" in capsys.readouterr().err
+    assert "reads like a device config" in capsys.readouterr().err
 
 
 def test_check_on_a_path_that_is_not_a_directory(
