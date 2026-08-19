@@ -80,6 +80,15 @@ def _networks(interface: Interface) -> list[ipaddress.IPv4Network]:
 
 @rule
 def virtual_address_outside_subnet(pack: StaticFactPack) -> Iterator[Finding]:
+    """A virtual address outside every subnet the member interface is on.
+
+    Hosts reach their gateway by ARPing for an address on their own subnet. One
+    outside it is unreachable from the segment it is supposed to serve, and the
+    group otherwise looks healthy: it elects, it advertises, and nothing uses it.
+
+    Silent when the interface has no address at all, since there is then no
+    subnet to be outside of.
+    """
     interfaces = _interfaces(pack)
     for group in pack.fhrp_groups:
         if not group.virtual_ipv4:
@@ -107,6 +116,13 @@ def virtual_address_outside_subnet(pack: StaticFactPack) -> Iterator[Finding]:
 
 @rule
 def virtual_address_collides(pack: StaticFactPack) -> Iterator[Finding]:
+    """A virtual address a real interface on the same pair already owns.
+
+    The virtual address is meant to be answered by whichever member is master.
+    When one member also carries it as its own interface address, that member
+    answers for it whether or not it holds the group, so failover moves the
+    group without moving the traffic.
+    """
     interfaces = _interfaces(pack)
     for group in pack.fhrp_groups:
         for member in group.members:
@@ -132,6 +148,13 @@ def virtual_address_collides(pack: StaticFactPack) -> Iterator[Finding]:
 
 @rule
 def group_has_no_redundancy(pack: StaticFactPack) -> Iterator[Finding]:
+    """A redundancy group with fewer than two members in the collection.
+
+    Either the peer's configuration is not in the directory — in which case the
+    finding is telling you the analysis is incomplete, which is worth knowing —
+    or the group really is configured on one device, and the virtual address is
+    a second name for a single point of failure.
+    """
     for group in pack.fhrp_groups:
         if len(group.members) < 2:
             device = group.members[0].device if group.members else "?"
@@ -149,6 +172,13 @@ def group_has_no_redundancy(pack: StaticFactPack) -> Iterator[Finding]:
 
 @rule
 def priority_tie(pack: StaticFactPack) -> Iterator[Finding]:
+    """Members sharing the top priority, so nothing decides the master.
+
+    The protocols break the tie on address comparison, which is deterministic
+    but not chosen: the master is whichever device happens to have the higher
+    interface address. That holds until a reboot changes who advertises first,
+    and then the placement people have been assuming quietly stops being true.
+    """
     for group in pack.fhrp_groups:
         if len(group.members) < 2:
             continue
@@ -171,6 +201,16 @@ def priority_tie(pack: StaticFactPack) -> Iterator[Finding]:
 
 @rule
 def tracked_object_unresolved(pack: StaticFactPack) -> Iterator[Finding]:
+    """A group that decrements its priority for a track nobody defined.
+
+    The intent is legible — the operator meant this group to step aside when
+    something fails — and the configuration will not do it. Nothing complains,
+    because a track that does not exist simply never fires, so the group holds
+    its priority through exactly the failure the track was written for.
+
+    High severity for a rule about an absent line: this is failover that looks
+    configured and is not.
+    """
     for group in pack.fhrp_groups:
         for member in group.members:
             for tracked in member.tracked_objects:
@@ -232,6 +272,16 @@ def tracking_cannot_change_the_outcome(pack: StaticFactPack) -> Iterator[Finding
 
 @rule
 def svi_vlan_missing_from_every_trunk(pack: StaticFactPack) -> Iterator[Finding]:
+    """An addressed SVI for a VLAN no trunk on the device carries.
+
+    The interface is up and has an address, so the device can route for the
+    VLAN; nothing can reach it, because the VLAN leaves on no uplink. It is the
+    shape a VLAN takes after it is removed from a trunk's allowed list during
+    some unrelated cleanup and the SVI is left behind.
+
+    Only checked on devices that have at least one trunk. A device with none is
+    not carrying VLANs anywhere, which is a different thing entirely.
+    """
     for device in pack.devices:
         trunks = [i for i in device.interfaces if i.allowed_vlans]
         if not trunks:
@@ -258,6 +308,16 @@ def svi_vlan_missing_from_every_trunk(pack: StaticFactPack) -> Iterator[Finding]
 
 @rule
 def duplicate_addresses(pack: StaticFactPack) -> Iterator[Finding]:
+    """One IPv4 address configured on two interfaces in the collection.
+
+    Whichever device answers first wins, and which one that is depends on ARP
+    timing rather than on anything written down. The usual cause is a config
+    copied between devices and edited everywhere except the address, so the
+    duplicate is often on the device that was working yesterday.
+
+    Compares addresses, not prefixes: the same address with two different masks
+    is still one address two devices claim.
+    """
     seen: dict[str, str] = {}
     for device in pack.devices:
         for interface in device.interfaces:
@@ -279,6 +339,16 @@ def duplicate_addresses(pack: StaticFactPack) -> Iterator[Finding]:
 
 @rule
 def preferred_master_will_not_reclaim(pack: StaticFactPack) -> Iterator[Finding]:
+    """The highest-priority member has preempt off, so it never takes back.
+
+    After the first failover the group stays on the backup for good. That is a
+    legitimate choice — it avoids a second interruption to move back — but it
+    means the priorities in the configuration no longer describe where traffic
+    is, and the next person to read them will be wrong about the current state.
+
+    Low severity because it is a defensible configuration. It is reported so the
+    choice is visible rather than assumed.
+    """
     for group in pack.fhrp_groups:
         if len(group.members) < 2:
             continue

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from cassandra import baseline
 from cassandra.app import analyse, serve
+from cassandra.catalogue import catalogue, render_text
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
@@ -124,6 +125,13 @@ def main(argv: list[str] | None = None) -> int:
         "-o", "--output", type=Path, default=Path("cassandra-report.html")
     )
 
+    explain_rules = sub.add_parser("rules", help="explain the checks this tool makes")
+    explain_rules.add_argument(
+        "rule",
+        nargs="?",
+        help="a rule id as printed by a finding; omit to list every rule",
+    )
+
     app = sub.add_parser("serve", help="open the local web view")
     app.add_argument("--port", type=int, default=8765)
     app.add_argument("--host", default="127.0.0.1")
@@ -190,6 +198,15 @@ def main(argv: list[str] | None = None) -> int:
         written = write_html(analysis, args.config_dir, args.output)
         print(f"wrote {written}", file=sys.stderr)
         return 1 if analysis.findings else 0
+
+    if args.command == "rules":
+        if args.rule and args.rule not in {doc.id for doc in catalogue()}:
+            # A lookup that names no rule is the user mistyping, not a result.
+            print(f"no such rule: {args.rule}", file=sys.stderr)
+            print(render_text(), file=sys.stderr)
+            return 2
+        print(render_text(args.rule))
+        return 0
 
     if args.command == "serve":
         serve(host=args.host, port=args.port)

@@ -20,7 +20,7 @@ from urllib.request import urlopen
 
 import pytest
 
-from cassandra.app import Handler, analyse_directory
+from cassandra.app import Handler, analyse, analyse_directory
 from cassandra.factpack.builders import build_fact_pack
 
 CORPUS: Final = (
@@ -346,3 +346,43 @@ def test_root_variables_only_reference_other_root_variables() -> None:
         assert used in declared, (
             f"{by} on :root references {used}, which :root does not define"
         )
+
+
+def test_the_rules_behind_the_findings_are_explained_on_the_page(
+    base_url: str, mixed: Path
+) -> None:
+    """A rule identifier is useless on its own.
+
+    Someone reading `fhrp-priority-tie` needs to know what it checks and, more
+    to the point, what it declines to check — a rule's silence is only
+    reassuring if you know what it is silent about.
+    """
+    body = view(base_url, mixed)
+    assert 'class="rulebook"' in body
+    for rule in {f.rule for f in analyse(mixed).findings}:
+        assert f'id="rule-{rule}"' in body, f"{rule} fired but is not explained"
+        assert f'href="#rule-{rule}"' in body, f"{rule} is not linked from its finding"
+
+
+def test_only_the_rules_that_fired_are_explained(base_url: str, mixed: Path) -> None:
+    """Twenty-five entries under four findings would bury the four."""
+    body = view(base_url, mixed)
+    fired = {f.rule for f in analyse(mixed).findings}
+    assert body.count('<article class="rule"') == len(fired)
+
+
+def test_the_rule_catalogue_is_served_as_json(base_url: str) -> None:
+    with urlopen(f"{base_url}/rules.json") as response:
+        assert response.headers["Content-Type"] == "application/json"
+        docs = json.load(response)
+    assert docs, "the catalogue should never be empty"
+    first = docs[0]
+    assert {"id", "tier", "severity", "summary", "silence"} <= set(first)
+
+
+def test_every_served_rule_explains_itself(base_url: str) -> None:
+    """An undocumented rule is a defect. This is where it becomes visible."""
+    with urlopen(f"{base_url}/rules.json") as response:
+        docs = json.load(response)
+    undocumented = [doc["id"] for doc in docs if doc["summary"] is None]
+    assert not undocumented, f"rules with no docstring: {', '.join(undocumented)}"

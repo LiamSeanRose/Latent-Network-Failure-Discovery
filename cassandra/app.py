@@ -20,13 +20,15 @@ from __future__ import annotations
 import html
 import json
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from cassandra import art, visuals
+from cassandra.catalogue import RuleDoc, catalogue
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
@@ -175,6 +177,32 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   text-transform: uppercase; letter-spacing: .08em; }
 .summary { display: flex; align-items: center; gap: 1.6rem; flex-wrap: wrap; }
 .summary .totals { flex: 1 1 16rem; min-width: 0; }
+
+/* ---- rulebook ---- */
+.rulebook { margin-top: 2.2rem; border-top: 1px solid var(--line);
+  padding-top: 1.2rem; }
+.rulebook > h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--ink-3); margin: 0 0 .15rem; font-weight: 640; }
+.rule {
+  background: var(--surface-1); border: 1px solid var(--line); border-radius: 10px;
+  padding: .85rem 1rem; margin-bottom: .6rem; scroll-margin-top: 1rem;
+}
+.rule h3 { font-size: .92rem; margin: 0 0 .5rem; font-weight: 620;
+  display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.rule p { margin: 0 0 .5rem; }
+.rule ul { margin: .3rem 0 .5rem; padding-left: 1.1rem; color: var(--ink-2);
+  font-size: .86rem; }
+.rule li { margin-bottom: .3rem; }
+.rule .src { display: block; color: var(--ink-3); font-size: .74rem; }
+.rule .undocumented { color: var(--s-serious); font-size: .88rem; }
+/* The linked rule is marked, not merely scrolled to: landing in a list of
+   near-identical boxes and having to work out which one you asked for is the
+   failure mode of every in-page anchor. */
+.rule:target { border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+a.rule-link { color: var(--ink-3); text-decoration: none;
+  border-bottom: 1px dotted var(--ink-3); transition: color .15s; }
+a.rule-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
 
 /* ---- theme ---- */
 .visually-hidden {
@@ -371,6 +399,16 @@ footer.meta-foot { color: var(--ink-3); font-size: .78rem; margin-top: 1.6rem; }
 }
 """
 )
+
+
+@lru_cache(maxsize=1)
+def _rulebook() -> dict[str, RuleDoc]:
+    """The catalogue keyed by rule id.
+
+    Cached because building it parses the rule modules and the test suite, and
+    the answer cannot change while the process is running.
+    """
+    return {doc.id: doc for doc in catalogue()}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -622,7 +660,8 @@ def _finding_html(finding: Finding, figure: str = "") -> str:
         f'<span class="sev {html.escape(finding.severity.value)}">'
         f"{html.escape(finding.severity.value)}</span>"
         f"<span>{html.escape(finding.tier.value)} tier</span>"
-        f'<span class="mono">{html.escape(finding.rule)}</span>'
+        f'<a class="mono rule-link" href="#rule-{html.escape(finding.rule)}">'
+        f"{html.escape(finding.rule)}</a>"
         + (
             ' <span class="tag">model-derived</span>'
             if finding.tier is Tier.TIMING
@@ -692,6 +731,83 @@ def _device_html(
     )
 
 
+def _rule_entry(doc: RuleDoc) -> str:
+    """One rule, opened by clicking its identifier in a finding."""
+    # Plain sections rather than <details>: whether a closed <details> opens
+    # when a link targets it is browser-dependent, and a link that lands on a
+    # collapsed box has failed. Only the rules that fired are listed, so the
+    # panel stays short enough to leave open.
+    parts = [
+        f'<article class="rule" id="rule-{html.escape(doc.id)}">',
+        f'<h3><span class="mono">{html.escape(doc.id)}</span>'
+        f'<span class="sev {html.escape(doc.severity.value)}">'
+        f"{html.escape(doc.severity.value)}</span>"
+        f'<span class="tag">{html.escape(doc.tier.value)}</span></h3>',
+    ]
+    if doc.summary is None:
+        # Said out loud rather than papered over. An entry that reads
+        # "undocumented" is a defect anyone can see, which is the point.
+        parts.append(
+            '<p class="undocumented">This rule ships with no explanation of '
+            "itself. What it reports is below; why it matters is not written "
+            "down anywhere yet.</p>"
+        )
+    for paragraph in (doc.summary, *doc.checks):
+        if paragraph:
+            parts.append(f"<p>{html.escape(paragraph)}</p>")
+    if doc.reports:
+        # The message template, with {…} where a value is filled in. It is what
+        # someone matches against when they see a finding and want to know which
+        # rule wrote it.
+        parts.append(f'<div class="trigger">reports: {html.escape(doc.reports)}</div>')
+    if doc.remedy:
+        parts.append(f'<div class="remedy">fix: {html.escape(doc.remedy)}</div>')
+    if doc.silence:
+        # The half of a rule a clean run depends on: a check that never fires is
+        # indistinguishable from a check that found nothing until you know what
+        # it declines to look at.
+        notes = "".join(
+            f"<li>{html.escape(note.note)}"
+            f'<span class="src mono">{html.escape(note.source)}</span></li>'
+            for note in doc.silence
+        )
+        parts.append(f'<p class="cap">Stays silent when:</p><ul>{notes}</ul>')
+    else:
+        parts.append(
+            '<p class="cap">No test asserts that this rule stays quiet, so its '
+            "silence is not evidence of anything.</p>"
+        )
+    parts.append(
+        f'<p class="cap mono">{html.escape(doc.module)}.'
+        f"{html.escape(doc.function)}</p></article>"
+    )
+    return "".join(parts)
+
+
+def _rulebook_html(findings: list[Finding]) -> str:
+    """What each rule on screen actually checks, and when it declines to fire.
+
+    Only the rules that fired are listed. The full catalogue is a document; this
+    is the footnote to the page someone is reading, and twenty-five entries under
+    four findings would bury it.
+    """
+    book = _rulebook()
+    seen: list[RuleDoc] = []
+    for finding in findings:
+        doc = book.get(finding.rule)
+        if doc is not None and doc not in seen:
+            seen.append(doc)
+    if not seen:
+        return ""
+    plural = "" if len(seen) == 1 else "s"
+    return (
+        '<section class="rulebook"><h2>The rule{}</h2>'
+        '<p class="cap">Each identifier above links here. Generated from the '
+        "rules themselves, so it cannot describe a check the tool no longer "
+        "makes.</p>{}</section>"
+    ).format(plural, "".join(_rule_entry(doc) for doc in seen))
+
+
 def _hidden_filters(filters: Filters) -> str:
     """Keep the active filters when the directory form is submitted."""
     return "".join(
@@ -754,6 +870,9 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
                 f'<a href="{clear}">Show all {len(analysis.findings)}</a>.</div>'
             )
 
+    if visible:
+        sections.append(_rulebook_html(visible))
+
     if any(finding.tier is Tier.TIMING for finding in visible):
         sections.append(f'<p class="caveat">{_TIMING_CAVEAT}</p>')
 
@@ -765,7 +884,8 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
             f"fact pack <code>{html.escape(analysis.fact_pack_id)}</code> · "
             f"{devices} · digest <code>{html.escape(analysis.digest[:12])}</code> · "
             f'<a href="{href("/findings.json", config_dir, filters)}">'
-            "findings.json</a></p>"
+            "findings.json</a> · "
+            '<a href="/rules.json">rules.json</a></p>'
         )
 
     worst = min(
@@ -846,6 +966,13 @@ class Handler(BaseHTTPRequestHandler):
                 analysis = analyse(Path(config_dir).expanduser())
             except OSError as exc:
                 analysis = Analysis(error=f"could not read {config_dir}: {exc}")
+
+        if parsed.path == "/rules.json":
+            self._respond(
+                json.dumps([asdict(doc) for doc in catalogue()], indent=2),
+                "application/json",
+            )
+            return
 
         if parsed.path == "/findings.json":
             visible = [f for f in analysis.findings if filters.matches(f)]

@@ -111,7 +111,85 @@ def _transitions(timeline: list[Placement], group_id: str) -> int:
     return count
 
 
+def _divergence(
+    *,
+    device: str,
+    first: str,
+    second: str,
+    labels: dict[str, str],
+    span_ms: int,
+    trigger: str,
+    events: tuple[Event, ...],
+) -> Finding:
+    """Two FHRP groups on the same device pair that stop agreeing who is master.
+
+    Both groups see one event. They answer it at different speeds — a different
+    tracking decrement, a preempt delay on one and not the other — and for the
+    stretch between their two answers, traffic for one VLAN leaves through one
+    device and traffic for the next VLAN leaves through the other. Everything
+    that assumes a single default gateway per site (a stateful firewall, a NAT
+    table, an asymmetric-path check) breaks for exactly that window and then
+    heals, which is what makes it so hard to catch after the fact.
+
+    Reported only past MIN_DIVERGENCE_MS. A brief divergence *during* an event is
+    expected behaviour; one that persists long after recovery is the defect.
+    """
+    return Finding(
+        rule="fhrp-divergence",
+        tier=Tier.TIMING,
+        severity=Severity.HIGH,
+        device=device,
+        title=f"{labels[first]} and {labels[second]} can end up on different devices",
+        detail=f"they share a device pair but respond to the same event "
+        f"differently, leaving the gateways split for about {span_ms // 1000}s",
+        trigger=trigger,
+        evidence=tuple(e.describe() for e in events),
+        remedy="make tracking and preempt delay consistent across groups on "
+        "the same pair",
+    )
+
+
+def _oscillation(
+    *,
+    device: str,
+    group_id: str,
+    labels: dict[str, str],
+    moves: int,
+    trigger: str,
+    events: tuple[Event, ...],
+) -> Finding:
+    """A group that changes master repeatedly while one interface flaps.
+
+    A group with preempt and no preempt delay follows its tracked interface
+    exactly: every flap hands mastership back and forth. Each handover is a
+    short forwarding interruption for every host using that gateway, so a link
+    that flaps five times does not cost one outage, it costs five — and the
+    configuration looks correct at rest, because at rest it is.
+
+    Reported past MIN_TRANSITIONS, which is high enough that the one handover a
+    genuine failure causes does not count as chasing.
+    """
+    return Finding(
+        rule="fhrp-oscillation",
+        tier=Tier.TIMING,
+        severity=Severity.MEDIUM,
+        device=device,
+        title=f"{labels[group_id]} changes master {moves} times under a single "
+        f"flap sequence",
+        detail="each transition is a forwarding interruption for everything "
+        "using that gateway",
+        trigger=trigger,
+        evidence=tuple(e.describe() for e in events),
+        remedy="add a preempt delay so the group does not chase a flapping interface",
+    )
+
+
 def analyse(pack: StaticFactPack) -> list[Finding]:
+    """Every finding the enumeration produces, worst first.
+
+    The two rules above are the conclusions; this is the search that reaches
+    them. It is bounded, and the findings say so.
+    """
     findings: list[Finding] = []
     seen: set[tuple[str, str, str]] = set()
     group_ids = [group.id for group in pack.fhrp_groups]
@@ -142,20 +220,14 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                                 continue
                             seen.add(key)
                             findings.append(
-                                Finding(
-                                    rule="fhrp-divergence",
-                                    tier=Tier.TIMING,
-                                    severity=Severity.HIGH,
+                                _divergence(
                                     device=device,
-                                    title=f"{labels[first]} and {labels[second]} can "
-                                    f"end up on different devices",
-                                    detail=f"they share a device pair but respond to "
-                                    f"the same event differently, leaving the "
-                                    f"gateways split for about {span // 1000}s",
+                                    first=first,
+                                    second=second,
+                                    labels=labels,
+                                    span_ms=span,
                                     trigger=trigger,
-                                    evidence=tuple(e.describe() for e in events),
-                                    remedy="make tracking and preempt delay "
-                                    "consistent across groups on the same pair",
+                                    events=events,
                                 )
                             )
 
@@ -168,19 +240,13 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                             continue
                         seen.add(key)
                         findings.append(
-                            Finding(
-                                rule="fhrp-oscillation",
-                                tier=Tier.TIMING,
-                                severity=Severity.MEDIUM,
+                            _oscillation(
                                 device=device,
-                                title=f"{labels[group_id]} changes master "
-                                f"{moves} times under a single flap sequence",
-                                detail="each transition is a forwarding "
-                                "interruption for everything using that gateway",
+                                group_id=group_id,
+                                labels=labels,
+                                moves=moves,
                                 trigger=trigger,
-                                evidence=tuple(e.describe() for e in events),
-                                remedy="add a preempt delay so the group does not "
-                                "chase a flapping interface",
+                                events=events,
                             )
                         )
     return findings
