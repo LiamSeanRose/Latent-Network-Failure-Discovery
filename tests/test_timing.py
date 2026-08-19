@@ -11,12 +11,14 @@ configurations that are symmetric, untracked, or otherwise fine.
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 from typing import Final
 
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.findings import Severity, Tier
+from cassandra.timing import sequences
 from cassandra.timing.model import Event, EventKind, simulate
 from cassandra.timing.sequences import analyse
 
@@ -225,3 +227,56 @@ def test_a_group_without_preempt_cannot_be_taken_from_a_live_master(
     and forth, so there is nothing to report."""
     pack = without_preempt(tmp_path, g14=TRACK14, g24=TRACK24)
     assert [f for f in analyse(pack) if f.rule == "fhrp-oscillation"] == []
+
+
+def test_a_split_present_with_no_events_is_not_reported_as_caused_by_one() -> None:
+    """PROJECT.md §2.4's no-trigger control, with its criterion inverted.
+
+    A pair that sits split with nothing happening is a configuration that is
+    wrong at rest. That is the FACTS tier's finding, and attributing it to a
+    flap would send the reader to look at a link that had nothing to do with it.
+    """
+    pack, _ = build_fact_pack(CORPUS)
+    control = sequences._control_timeline(pack, [g.id for g in pack.fhrp_groups])
+    for first, second in itertools.combinations(
+        [group.id for group in pack.fhrp_groups], 2
+    ):
+        span = sequences._longest_divergence_ms(control, first, second)
+        assert span < sequences.MIN_DIVERGENCE_MS, (
+            f"{first} and {second} are split with no events at all"
+        )
+
+
+def test_the_perturbation_control_is_not_three_copies_of_one_run() -> None:
+    """Twenty percent of a short interval could round back onto the nominal one,
+    which would turn the control into the same run agreeing with itself."""
+    for nominal in (5_000, 20_000, 120_000):
+        assert len(set(sequences._intervals_around(nominal))) == 3, nominal
+
+
+def test_the_controls_are_recorded_in_the_evidence() -> None:
+    """A reader weighing a model-derived finding needs to know what survived
+    what, not just that something did."""
+    pack, _ = build_fact_pack(CORPUS)
+    findings = sequences.analyse(pack)
+    assert findings
+    for finding in findings:
+        notes = [line for line in finding.evidence if "runs at" in line]
+        assert notes, f"{finding.rule} carries no record of its controls"
+        assert "absent with no events" in notes[0]
+
+
+def test_a_knife_edge_result_does_not_survive_perturbation() -> None:
+    """A divergence that exists at exactly one interval and nowhere near it is a
+    property of the sampling grid, not of the configuration."""
+    pack, _ = build_fact_pack(CORPUS)
+    reported = {
+        (f.rule, f.title)
+        for f in sequences.analyse(pack)
+        if f.rule == "fhrp-divergence"
+    }
+    assert reported, "the corpus divergence must survive its own controls"
+    # And it survives all three runs, which is what the evidence claims.
+    for finding in sequences.analyse(pack):
+        if finding.rule == "fhrp-divergence":
+            assert "held in 3 of 3" in " ".join(finding.evidence)

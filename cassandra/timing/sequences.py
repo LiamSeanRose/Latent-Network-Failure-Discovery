@@ -31,6 +31,27 @@ SETTLE_MS: Final = 30_000
 MIN_DIVERGENCE_MS: Final = 30_000
 MIN_TRANSITIONS: Final = 4
 
+# PROJECT.md §2.4. The controls are written there for the emulation tier, and
+# two of the three are just as cheap and just as necessary here.
+#
+# The no-trigger control asks whether the sequence caused the observation at all.
+# If two groups sit apart with no events, the trigger explains nothing and the
+# finding is at best mislabelled — the FACTS tier owns a configuration that is
+# split at rest.
+#
+# The perturbation control asks whether the observation survives the interval
+# being slightly different. A divergence that appears at exactly ninety seconds
+# and nowhere near it is an artifact of this model's one-second sampling grid,
+# not a property of the configuration, and reporting it would spend the reader's
+# trust on a number the model invented.
+#
+# Repetition, the third control, does not apply: this model is deterministic, so
+# three runs of one sequence are one run three times. It is the emulator that
+# needs it.
+PERTURBATION: Final = 0.2
+PERTURBED_RUNS: Final = 3
+MIN_CONFIRMATIONS: Final = 2
+
 
 def _tracked_interfaces(pack: StaticFactPack) -> dict[str, set[str]]:
     """Interfaces whose state can change an election, per device."""
@@ -111,6 +132,14 @@ def _transitions(timeline: list[Placement], group_id: str) -> int:
     return count
 
 
+def _control_note(held: int) -> str:
+    """What the controls established, in the evidence where it can be weighed."""
+    return (
+        f"held in {held} of {PERTURBED_RUNS} runs at "
+        f"±{int(PERTURBATION * 100)}% of the interval; absent with no events"
+    )
+
+
 def _divergence(
     *,
     device: str,
@@ -120,6 +149,7 @@ def _divergence(
     span_ms: int,
     trigger: str,
     events: tuple[Event, ...],
+    held: int = PERTURBED_RUNS,
 ) -> Finding:
     """Two FHRP groups on the same device pair that stop agreeing who is master.
 
@@ -133,6 +163,11 @@ def _divergence(
 
     Reported only past MIN_DIVERGENCE_MS. A brief divergence *during* an event is
     expected behaviour; one that persists long after recovery is the defect.
+
+    Silent unless the split survives the flap interval being twenty percent
+    either side of the one that produced it, and silent if the same split is
+    there with no events at all. Those two controls are what separate a property
+    of the configuration from an artifact of the model's sampling grid.
     """
     return Finding(
         rule="fhrp-divergence",
@@ -143,7 +178,7 @@ def _divergence(
         detail=f"they share a device pair but respond to the same event "
         f"differently, leaving the gateways split for about {span_ms // 1000}s",
         trigger=trigger,
-        evidence=tuple(e.describe() for e in events),
+        evidence=(*(e.describe() for e in events), _control_note(held)),
         remedy="make tracking and preempt delay consistent across groups on "
         "the same pair",
     )
@@ -157,6 +192,7 @@ def _oscillation(
     moves: int,
     trigger: str,
     events: tuple[Event, ...],
+    held: int = PERTURBED_RUNS,
 ) -> Finding:
     """A group that changes master repeatedly while one interface flaps.
 
@@ -168,6 +204,9 @@ def _oscillation(
 
     Reported past MIN_TRANSITIONS, which is high enough that the one handover a
     genuine failure causes does not count as chasing.
+
+    Silent unless the chasing survives the flap interval being twenty percent
+    either side, and silent if the group moves that often with no events at all.
     """
     return Finding(
         rule="fhrp-oscillation",
@@ -179,9 +218,45 @@ def _oscillation(
         detail="each transition is a forwarding interruption for everything "
         "using that gateway",
         trigger=trigger,
-        evidence=tuple(e.describe() for e in events),
+        evidence=(*(e.describe() for e in events), _control_note(held)),
         remedy="add a preempt delay so the group does not chase a flapping interface",
     )
+
+
+def _intervals_around(up_ms: int) -> tuple[int, ...]:
+    """The nominal interval and one either side of it, clamped to the grid.
+
+    Twenty percent, per §2.4. Sub-sample perturbations collapse back onto the
+    nominal run, which would turn the control into three copies of the same
+    thing agreeing with itself.
+    """
+    low = max(DEFAULT_ADVERT_MS, round(up_ms * (1 - PERTURBATION)))
+    high = round(up_ms * (1 + PERTURBATION))
+    return (up_ms, low, high)
+
+
+def _run(
+    pack: StaticFactPack,
+    device: str,
+    interface: str,
+    flaps: int,
+    up_ms: int,
+    group_ids: list[str],
+) -> tuple[tuple[Event, ...], list[Placement]]:
+    """One flap sequence and the timeline it produces."""
+    events = _flap_sequence(device, interface, flaps=flaps, up_ms=up_ms)
+    horizon = events[-1].at_ms + SETTLE_MS + 60_000
+    return events, simulate(pack, events, until_ms=horizon, only=group_ids)
+
+
+def _control_timeline(pack: StaticFactPack, group_ids: list[str]) -> list[Placement]:
+    """The same window with nothing happening in it.
+
+    §2.4's no-trigger control, with its criterion inverted rather than skipped:
+    an observation present here was not caused by any trigger.
+    """
+    horizon = DOWN_MS * MAX_FLAPS + SETTLE_MS + 60_000
+    return simulate(pack, [], until_ms=horizon, only=group_ids)
 
 
 def _groups_by_device(pack: StaticFactPack) -> dict[str, list[str]]:
@@ -218,11 +293,14 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
         if len(group_ids) < 1:
             continue
         for interface in sorted(interfaces):
+            control = _control_timeline(pack, group_ids)
             for up_ms in _candidate_intervals(pack):
                 for flaps in range(1, MAX_FLAPS + 1):
-                    events = _flap_sequence(device, interface, flaps=flaps, up_ms=up_ms)
-                    horizon = events[-1].at_ms + SETTLE_MS + 60_000
-                    timeline = simulate(pack, events, until_ms=horizon, only=group_ids)
+                    runs = [
+                        _run(pack, device, interface, flaps, interval, group_ids)
+                        for interval in _intervals_around(up_ms)
+                    ]
+                    events, timeline = runs[0]
                     trigger = (
                         f"flap {device}:{interface} {flaps}x "
                         f"({DOWN_MS // 1000}s down, {up_ms // 1000}s up)"
@@ -236,6 +314,21 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                             key = ("divergence", first, second)
                             if key in seen:
                                 continue
+                            held = sum(
+                                _longest_divergence_ms(t, first, second)
+                                >= MIN_DIVERGENCE_MS
+                                for _, t in runs
+                            )
+                            if held < MIN_CONFIRMATIONS:
+                                continue
+                            if (
+                                _longest_divergence_ms(control, first, second)
+                                >= MIN_DIVERGENCE_MS
+                            ):
+                                # Split with no events at all. The sequence did
+                                # not cause it, so reporting it under this
+                                # trigger would point at the wrong thing.
+                                continue
                             seen.add(key)
                             findings.append(
                                 _divergence(
@@ -246,6 +339,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                                     span_ms=span,
                                     trigger=trigger,
                                     events=events,
+                                    held=held,
                                 )
                             )
 
@@ -256,6 +350,14 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                         key = ("oscillation", group_id, "")
                         if key in seen:
                             continue
+                        held = sum(
+                            _transitions(t, group_id) >= MIN_TRANSITIONS
+                            for _, t in runs
+                        )
+                        if held < MIN_CONFIRMATIONS:
+                            continue
+                        if _transitions(control, group_id) >= MIN_TRANSITIONS:
+                            continue
                         seen.add(key)
                         findings.append(
                             _oscillation(
@@ -265,6 +367,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                                 moves=moves,
                                 trigger=trigger,
                                 events=events,
+                                held=held,
                             )
                         )
     return findings
