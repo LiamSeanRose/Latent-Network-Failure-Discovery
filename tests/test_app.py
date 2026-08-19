@@ -1056,3 +1056,39 @@ def test_every_page_fetches_nothing(base_url: str, mixed: Path, path: str) -> No
     body = view(base_url, mixed, path=path)
     for pattern in (r"<script", r"https?://", r"<link[^>]+href", r"@import", r"<img"):
         assert not re.search(pattern, body), f"{path}: {pattern}"
+
+
+def test_the_facts_page_shows_the_bgp_and_the_timers_it_read(
+    base_url: str,
+) -> None:
+    """The page is titled "what the tool read" and showed a third of it.
+
+    Interfaces and FHRP groups only, so a reader with a corpus full of BGP
+    peerings and spanning-tree timing saw none of it and could reasonably
+    conclude the parser had missed them — while four rules were reading those
+    exact records. The command-line `facts` had the same gap and lost it at the
+    same time; the two are one answer to one question and a family printed by one
+    and not the other is the tool admitting to part of its own reading.
+    """
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    body = get(f"{base_url}/facts?dir={quote(str(examples))}")[1]
+    assert "BGP" in body
+    assert "AS 65010" in body
+    assert "Timers" in body
+    assert "hello interval 1000ms" in body
+    # A process with no peering at all is the shipped corpus's planted defect,
+    # and the page has to show the process rather than skipping it for having an
+    # empty table — that absence is the whole finding.
+    assert "AS 65003" in body
+
+
+def test_a_timer_the_config_does_not_state_is_not_shown_as_blank(
+    base_url: str,
+) -> None:
+    """An empty cell reads as a value this tool failed to parse. A value nobody
+    configured has no row, which is what makes the rows that are there mean
+    something."""
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    body = get(f"{base_url}/facts?dir={quote(str(examples))}")[1]
+    assert "None" not in body
+    assert "hold time" not in body

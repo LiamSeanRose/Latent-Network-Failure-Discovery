@@ -1153,6 +1153,103 @@ def facts_page(
     )
 
 
+def _bgp_rows(pack: StaticFactPack, device: str) -> str:
+    """This device's BGP peerings, as one-sided statements about a peer.
+
+    One-sided on purpose, because that is what the configuration is: this table
+    says what this device asked for, and the disagreement between two ends is a
+    finding rather than a fact.
+    """
+    processes = [process for process in pack.bgp if process.device == device]
+    if not processes:
+        return ""
+    rows = [_row(["peer", "remote as", "update source", "bfd"], head=True)]
+    for process in processes:
+        for neighbor in process.neighbors:
+            rows.append(
+                _row(
+                    [
+                        f'<span class="mono">{html.escape(neighbor.address)}</span>',
+                        html.escape(neighbor.remote_as or "—"),
+                        f'<span class="mono">'
+                        f"{html.escape(neighbor.update_source or '—')}</span>",
+                        "yes" if neighbor.bfd else "—",
+                    ]
+                )
+            )
+    local = ", ".join(
+        f"AS {html.escape(process.local_as)}"
+        + (
+            f" · router-id {html.escape(process.router_id)}"
+            if process.router_id
+            else ""
+        )
+        for process in processes
+    )
+    body = '<table class="facts">' + "".join(rows) + "</table>" if len(rows) > 1 else ""
+    return f'<p class="cap">BGP — {local}</p>{body}'
+
+
+# Every timer family, the words for it, and how to say one record's values. The
+# page and `cassandra facts` show the same eight because they answer the same
+# question; a family printed by one and not the other would be a fact the tool
+# read and one of its two windows onto the reading did not admit to.
+_TIMER_FAMILIES: Final = (
+    ("fhrp", ("hello_interval_ms", "hold_time_ms", "preempt_delay_ms")),
+    ("igp hello", ("hello_interval_ms", "dead_interval_ms")),
+    ("bfd", ("desired_min_tx_ms", "required_min_rx_ms", "detect_multiplier")),
+    ("bgp", ("keepalive_ms", "hold_time_ms", "graceful_restart_time_s")),
+    ("stp", ("hello_time_ms", "forward_delay_ms", "max_age_ms")),
+    ("spf throttle", ("initial_delay_ms", "min_hold_ms", "max_wait_ms")),
+    ("carrier delay", ("up_ms", "down_ms")),
+    ("dampening", ("half_life_s", "suppress_threshold", "max_suppress_s")),
+)
+
+
+def _timer_value(name: str, value: object) -> str:
+    if value is None:
+        return ""
+    label = name.removesuffix("_ms").removesuffix("_s").replace("_", " ")
+    unit = "ms" if name.endswith("_ms") else "s" if name.endswith("_s") else ""
+    return f"{label} {value}{unit}"
+
+
+def _timer_rows(pack: StaticFactPack, device: str) -> str:
+    """Every timer record scoped to this device, whatever family it is in.
+
+    Grouped by family rather than by scope because the families are what a
+    reader is checking for — the question this table answers is "did it read my
+    BGP timers", and the answer is the row's presence.
+    """
+    rows = [_row(["family", "scope", "values"], head=True)]
+    for family, fields in _TIMER_FAMILIES:
+        for record in getattr(pack.timers, family.replace(" ", "_"), ()):
+            if record.scope.device != device:
+                continue
+            stated = [
+                said
+                for name in fields
+                if (said := _timer_value(name, getattr(record, name, None)))
+            ]
+            if not stated:
+                continue
+            scope = record.scope.interface or record.scope.neighbor or "device"
+            if record.scope.instance:
+                scope = f"{scope} [{record.scope.instance}]"
+            rows.append(
+                _row(
+                    [
+                        html.escape(family),
+                        f'<span class="mono">{html.escape(scope)}</span>',
+                        f'<span class="mono">{html.escape("  ".join(stated))}</span>',
+                    ]
+                )
+            )
+    if len(rows) == 1:
+        return ""
+    return '<p class="cap">Timers</p><table class="facts">' + "".join(rows) + "</table>"
+
+
 def facts_cards(pack: StaticFactPack, unparsed: tuple[tuple[str, int], ...]) -> str:
     """The reading itself, without a page around it.
 
@@ -1190,6 +1287,8 @@ def facts_cards(pack: StaticFactPack, unparsed: tuple[tuple[str, int], ...]) -> 
                 if groups
                 else '<p class="cap">No FHRP group on this device.</p>'
             )
+            + _bgp_rows(pack, device.id)
+            + _timer_rows(pack, device.id)
             + "</article>"
         )
 
