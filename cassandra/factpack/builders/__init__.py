@@ -15,6 +15,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Final
 
+from cassandra.factpack import topology
 from cassandra.factpack.builders import eos, ios, nxos
 from cassandra.factpack.builders.common import ParsedDevice
 from cassandra.factpack.schema import (
@@ -133,6 +134,7 @@ def build_fact_pack(
         ),
         devices=tuple(devices),
         vlans=tuple(vlans),
+        **topology.derive(devices, vlans),
         bgp=tuple(bgp),
         fhrp_groups=tuple(
             FhrpGroup(

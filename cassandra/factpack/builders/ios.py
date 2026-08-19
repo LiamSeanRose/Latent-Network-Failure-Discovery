@@ -8,18 +8,28 @@ HSRP and VRRP are modelled as the same shape deliberately. They differ in defaul
 and on the wire, but the questions this tool asks — who holds the group, what
 decrements the priority, how long preemption waits — have the same answers in both.
 Where they diverge, the protocol is on the group and a rule can branch on it.
+
+BGP peerings read the same way: `router bgp` writes one flat `neighbor <ip>
+<setting>` line per setting, so the setting half comes from `common.py` and only
+the flat-versus-nested difference lives here.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from typing import Final
 
 from cassandra.factpack.builders.common import (
+    BgpPeerSettings,
     ParsedDevice,
+    apply_bgp_peer_setting,
+    bgp_neighbors_from,
     declared_vlans_from,
     interface_kind,
     is_out_of_scope,
     netmask_to_prefix_length,
+    register_bgp_peer,
     seconds_to_ms,
     stanzas,
     strip_banners,
@@ -27,6 +37,7 @@ from cassandra.factpack.builders.common import (
 )
 from cassandra.factpack.schema import (
     AddressFamily,
+    BgpProcess,
     Device,
     DeviceRole,
     FhrpMember,
@@ -59,11 +70,41 @@ _UNINTERESTING = re.compile(
 )
 
 
+# `router bgp` lines that are structure or carry no fact any tier reads yet. Kept
+# separate from the module-wide list because several of these words mean
+# something else outside a BGP process — `timers` on an interface is an FHRP
+# setting, and `bgp dampening` is a timer this dialect does not read yet and so
+# must stay visible in `unparsed_lines`.
+_BGP_PROCESS: Final = re.compile(
+    r"(?:no )?(?:"
+    r"address-family .*|exit-address-family|"
+    r"aggregate-address .*|auto-summary|synchronization|"
+    r"bgp (?:additional-paths|always-compare-med|bestpath|deterministic-med|"
+    r"graceful-restart|listen|log-neighbor-changes|redistribute-internal)\b.*|"
+    r"default-information .*|distance bgp .*|maximum-paths .*|"
+    r"redistribute .*|timers bgp .*"
+    r")"
+)
+
+
+@dataclass(slots=True)
+class IosDevice(ParsedDevice):
+    """`ParsedDevice` plus the fact families only some dialects read.
+
+    Same reasoning as `eos.EosDevice`: the shared record carries what every
+    dialect produced when it was written, and `builders/__init__` collects the
+    rest by attribute, so a dialect that grows a new family declares it here
+    rather than widening the base for parsers that never fill it.
+    """
+
+    bgp: tuple[BgpProcess, ...] = ()
+
+
 def looks_like_ios(text: str) -> bool:
     return any(marker.search(text) for marker in MARKERS)
 
 
-def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
+def parse_device(text: str, *, device_id: str | None = None) -> IosDevice:
     text = strip_banners(text)
     hostname = device_id or "unknown"
     interfaces: list[Interface] = []
@@ -72,6 +113,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
     timers: list[FhrpTimers] = []
     unparsed: list[str] = []
     declared_vlans: list[Vlan] = []
+    bgp_processes: list[BgpProcess] = []
 
     for stanza in stanzas(text):
         header = stanza.header
@@ -106,6 +148,12 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
             unparsed.extend(leftover)
             continue
 
+        if m := re.fullmatch(r"router bgp (\S+)", header):
+            process, bgp_unparsed = _parse_router_bgp(hostname, m.group(1), stanza.body)
+            bgp_processes.append(process)
+            unparsed.extend(bgp_unparsed)
+            continue
+
         # An out-of-scope section takes its body with it. Reporting the body
         # of a route-map or a management stanza is the same noise as reporting
         # its header, and it is the noise that makes the list unreadable.
@@ -119,7 +167,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
             if not _UNINTERESTING.fullmatch(line) and not is_out_of_scope(line)
         )
 
-    return ParsedDevice(
+    return IosDevice(
         device=Device(
             id=hostname,
             hostname=hostname,
@@ -133,7 +181,54 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
         timers=tuple(timers),
         unparsed_lines=tuple(unparsed),
         vlans=tuple(declared_vlans),
+        bgp=tuple(bgp_processes),
     )
+
+
+def _parse_router_bgp(
+    device: str, asn: str, body: list[str]
+) -> tuple[BgpProcess, list[str]]:
+    """`router bgp <asn>` and the peerings it declares.
+
+    Peer settings arrive one flat line at a time, so they accumulate per address
+    and the neighbour is assembled at the end — the same shape `eos.py` uses,
+    with the setting vocabulary shared from `common.py` instead of restated.
+
+    Two IOS-only wrinkles. `neighbor <name> peer-group` with nothing after it
+    *defines* a peer-group rather than configuring a peering, and everything
+    subsequently set on that name belongs to the group. And `address-family`
+    sections are indented under `router bgp`, which `common.stanzas` has already
+    flattened into this body, so their headers are structure to step over rather
+    than facts to read.
+    """
+    unparsed: list[str] = []
+    peers: dict[str, BgpPeerSettings] = {}
+    groups: dict[str, BgpPeerSettings] = {}
+    router_id: str | None = None
+
+    for line in body:
+        if m := re.fullmatch(r"(?:bgp )?router-id (\S+)", line):
+            router_id = m.group(1)
+        elif m := re.fullmatch(r"neighbor (\S+) peer-group", line):
+            groups.setdefault(m.group(1), {})
+        elif m := re.fullmatch(r"neighbor (\S+)(?: (.+))?", line):
+            settings = register_bgp_peer(peers, groups, m.group(1))
+            if m.group(2) is not None and not apply_bgp_peer_setting(
+                settings, m.group(2)
+            ):
+                # The address is registered either way: an unreadable setting is
+                # a gap in this parser, not evidence the peering is not there.
+                unparsed.append(line)
+        elif not _BGP_PROCESS.fullmatch(line) and not _UNINTERESTING.fullmatch(line):
+            unparsed.append(line)
+
+    process = BgpProcess(
+        device=device,
+        local_as=asn,
+        router_id=router_id,
+        neighbors=bgp_neighbors_from(device, peers, groups),
+    )
+    return process, unparsed
 
 
 def _parse_interface(
