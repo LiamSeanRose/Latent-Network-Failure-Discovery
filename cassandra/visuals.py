@@ -185,16 +185,28 @@ def topology_svg(pack: StaticFactPack) -> str:
     if len(devices) < 2 or not edges:
         return ""
 
-    width, height = 720, 300
-    cx, cy = width / 2, height / 2 + 6
-    radius = min(width, height) / 2 - 66
+    linked = {device for edge in edges for device in edge[:2]}
+    connected = [d for d in devices if d in linked]
+    detached = [d for d in devices if d not in linked]
+
+    width = 720
+    height = 250 + (62 if detached else 0)
+    cx, cy = width / 2, 128
+    radius = 90
+
+    # Connected devices ring the centre. Unattached ones get their own row
+    # instead of a slot in the ring, where they push the real topology apart and
+    # imply an adjacency that is not there.
     positions: dict[str, tuple[float, float]] = {}
-    for i, device in enumerate(devices):
-        angle = -math.pi / 2 + 2 * math.pi * i / len(devices)
+    for i, device in enumerate(connected):
+        angle = -math.pi / 2 + 2 * math.pi * i / max(len(connected), 1)
         positions[device] = (
             cx + radius * math.cos(angle),
             cy + radius * math.sin(angle),
         )
+    for i, device in enumerate(detached):
+        step = width / (len(detached) + 1)
+        positions[device] = (step * (i + 1), height - 48)
 
     parts: list[str] = [
         f'<svg class="viz topology" viewBox="0 0 {width} {height}" role="img" '
@@ -211,18 +223,34 @@ def topology_svg(pack: StaticFactPack) -> str:
             f'y="{(y1 + y2) / 2 - 5 + (index % 2) * 13:.1f}" text-anchor="middle">'
             f"{html.escape(label)}</text></g>"
         )
-    linked = {device for edge in edges for device in edge[:2]}
+    addressed = {
+        device.id
+        for device in pack.devices
+        if any(interface.addresses for interface in device.interfaces)
+    }
     for index, device in enumerate(devices):
         x, y = positions[device]
-        # A device sharing no subnet is not an error — an access switch is L2 only
-        # and has no addresses to share. Say so, rather than leaving it floating
-        # and looking like a missing edge.
-        isolated = "" if device in linked else " l2only"
+        # Two different situations, and labelling both "L2 only" was wrong. A
+        # switch with no addresses genuinely is layer 2. An addressed device on
+        # nobody else's subnet is simply not adjacent to anything in this
+        # directory, usually because its peer is not in the corpus.
+        detached = device not in linked
+        hint = (
+            ""
+            if not detached
+            else ("L2 only" if device not in addressed else "no peer here")
+        )
+        isolated = " l2only" if detached else ""
         title = (
             ""
-            if device in linked
-            else "<title>no addressed interface shares a subnet: "
-            "layer 2 only, or not adjacent to anything here</title>"
+            if not detached
+            else "<title>"
+            + (
+                "no addressed interface: layer 2 only"
+                if device not in addressed
+                else "addressed, but shares no subnet with any device here"
+            )
+            + "</title>"
         )
         parts.append(
             f'<g class="node{isolated}" style="--i:{index}">'
@@ -231,9 +259,9 @@ def topology_svg(pack: StaticFactPack) -> str:
             f"{html.escape(device)}</text>"
             + (
                 ""
-                if device in linked
+                if not hint
                 else f'<text class="hint" x="{x:.1f}" y="{y + 24:.1f}" '
-                f'text-anchor="middle">L2 only</text>'
+                f'text-anchor="middle">{hint}</text>'
             )
             + "</g>"
         )

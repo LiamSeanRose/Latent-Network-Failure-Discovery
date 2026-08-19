@@ -3,7 +3,22 @@
 **Point it at a directory of network configs. Get back a ranked list of latent failure modes,
 each with the evidence that produced it.**
 
-Arista EOS and Cisco IOS, detected automatically. VRRP and HSRP.
+Arista EOS, Cisco IOS and NX-OS, detected automatically. VRRP and HSRP.
+
+![The web view: an adjacency map and findings by severity](docs/images/screenshot.png)
+
+## The figure that makes the point
+
+A timing finding says two gateway groups end up on different devices for ninety
+seconds. That sentence is easy to nod at and hard to picture, so the tool draws
+the model's own output — which device holds each group, second by second, under
+the trigger that produced the finding:
+
+![Gateway ownership over time, showing one group stranded on the backup](docs/images/timeline.png)
+
+VRRP 24 sits on `agg-b` while 14 and 34 sit on `agg-a`. That gap **is** the
+failure. No steady state contains it, which is why static analysis reports this
+network healthy.
 
 ```
 $ cassandra check ./configs
