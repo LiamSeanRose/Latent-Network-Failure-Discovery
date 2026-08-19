@@ -31,6 +31,8 @@ from cassandra.factpack.builders.common import (
 from cassandra.factpack.schema import (
     AddressFamily,
     BfdTimers,
+    BgpNeighbor,
+    BgpProcess,
     DampeningKind,
     DampeningProfile,
     Device,
@@ -95,6 +97,7 @@ class EosDevice(ParsedDevice):
 
     bfd: tuple[BfdTimers, ...] = ()
     igp_hello: tuple[IgpHelloTimers, ...] = ()
+    bgp: tuple[BgpProcess, ...] = ()
     dampening: tuple[DampeningProfile, ...] = ()
 
 
@@ -134,6 +137,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
     # Resolved once every interface is known: a BGP peer address names a session
     # by subnet, and `bfd default` names every session on the device.
     bgp_bfd_neighbors: list[str] = []
+    bgp_processes: list[BgpProcess] = []
     device_wide_bfd_clients: set[str] = set()
 
     for stanza in stanzas(text):
@@ -178,12 +182,13 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
             continue
 
         if m := re.fullmatch(r"router bgp (\S+)", header):
-            profiles, neighbors, bgp_unparsed = _parse_router_bgp(
+            profiles, neighbors, bgp_unparsed, process = _parse_router_bgp(
                 hostname, m.group(1), stanza.body
             )
             dampening.extend(profiles)
             bgp_bfd_neighbors.extend(neighbors)
             unparsed.extend(bgp_unparsed)
+            bgp_processes.append(process)
             continue
 
         if m := re.fullmatch(r"router (ospf|isis) (\S+)", header):
@@ -241,6 +246,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
         timers=tuple(timers),
         unparsed_lines=tuple(unparsed),
         vlans=tuple(declared_vlans),
+        bgp=tuple(bgp_processes),
         bfd=tuple(bfd),
         igp_hello=tuple(igp_hello),
         dampening=tuple(dampening),
@@ -266,15 +272,47 @@ def _bgp_clients(
 
 def _parse_router_bgp(
     device: str, asn: str, body: list[str]
-) -> tuple[list[DampeningProfile], list[str], list[str]]:
+) -> tuple[list[DampeningProfile], list[str], list[str], BgpProcess]:
     profiles: list[DampeningProfile] = []
     neighbors: list[str] = []
     unparsed: list[str] = []
     scope = TimerScope(device=device, instance=asn, source=TimerSource.CONFIGURED)
 
+    # Peer settings arrive on separate lines, so they accumulate per address and
+    # the neighbour is assembled at the end.
+    peers: dict[str, dict[str, str | bool]] = {}
+    router_id: str | None = None
+
+    def peer(address: str) -> dict[str, str | bool]:
+        return peers.setdefault(address, {})
+
     for line in body:
-        if m := re.fullmatch(r"neighbor (\S+) bfd", line):
+        if m := re.fullmatch(r"router-id (\S+)", line):
+            router_id = m.group(1)
+        elif m := re.fullmatch(r"neighbor (\S+) remote-as (\S+)", line):
+            peer(m.group(1))["remote_as"] = m.group(2)
+        elif m := re.fullmatch(r"neighbor (\S+) description (.+)", line):
+            peer(m.group(1))["description"] = m.group(2)
+        elif m := re.fullmatch(r"neighbor (\S+) update-source (\S+)", line):
+            peer(m.group(1))["update_source"] = m.group(2)
+        elif m := re.fullmatch(r"neighbor (\S+) ebgp-multihop(?: \d+)?", line):
+            peer(m.group(1))["multihop"] = True
+        elif m := re.fullmatch(r"neighbor (\S+) shutdown", line):
+            peer(m.group(1))["shutdown"] = True
+        elif m := re.fullmatch(r"neighbor (\S+) peer group (\S+)", line):
+            peer(m.group(1))["peer_group"] = m.group(2)
+        elif m := re.fullmatch(
+            r"neighbor (\S+) (?:maximum-routes|password|send-community|"
+            r"next-hop-self|route-map|allowas-in|soft-reconfiguration|"
+            r"timers|route-reflector-client|local-as|transport)\b.*",
+            line,
+        ):
+            # Recognised peer settings that carry no fact any tier reads yet.
+            # Registering the address still matters: it keeps the peering visible.
+            peer(m.group(1))
+        elif m := re.fullmatch(r"neighbor (\S+) bfd", line):
             neighbors.append(m.group(1))
+            peer(m.group(1))["bfd"] = True
         elif m := re.fullmatch(r"bgp dampening(?: (.+))?", line):
             profile = _dampening_profile(scope, m.group(1))
             if profile is None:
@@ -283,7 +321,35 @@ def _parse_router_bgp(
                 profiles.append(profile)
         elif not _UNINTERESTING.fullmatch(line):
             unparsed.append(line)
-    return profiles, neighbors, unparsed
+
+    process = BgpProcess(
+        device=device,
+        local_as=asn,
+        router_id=router_id,
+        neighbors=tuple(
+            BgpNeighbor(
+                device=device,
+                address=address,
+                remote_as=str(settings["remote_as"])
+                if "remote_as" in settings
+                else None,
+                description=str(settings["description"])
+                if "description" in settings
+                else None,
+                update_source=str(settings["update_source"])
+                if "update_source" in settings
+                else None,
+                bfd=bool(settings.get("bfd", False)),
+                multihop=bool(settings.get("multihop", False)),
+                shutdown=bool(settings.get("shutdown", False)),
+                peer_group=str(settings["peer_group"])
+                if "peer_group" in settings
+                else None,
+            )
+            for address, settings in sorted(peers.items())
+        ),
+    )
+    return profiles, neighbors, unparsed, process
 
 
 def _dampening_profile(

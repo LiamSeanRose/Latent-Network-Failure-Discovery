@@ -372,6 +372,39 @@ class FhrpGroup:
 
 
 # --------------------------------------------------------------------------
+# BGP
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BgpNeighbor:
+    """One configured peering, as the local device sees it.
+
+    Deliberately one-sided: this is what a device says about a peer, not a
+    negotiated session. The interesting defects live in the disagreement between
+    the two ends, which is only visible when both are in the same fact pack.
+    """
+
+    device: DeviceId
+    address: IpAddress
+    remote_as: str | None = None
+    description: str | None = None
+    update_source: InterfaceName | None = None
+    bfd: bool = False
+    multihop: bool = False
+    shutdown: bool = False
+    peer_group: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BgpProcess:
+    device: DeviceId
+    local_as: str
+    router_id: IpAddress | None = None
+    neighbors: tuple[BgpNeighbor, ...] = ()
+
+
+# --------------------------------------------------------------------------
 # Timer inventory
 # --------------------------------------------------------------------------
 
@@ -588,4 +621,5 @@ class StaticFactPack:
     l2_adjacencies: tuple[L2Adjacency, ...] = ()
     l3_adjacencies: tuple[L3Adjacency, ...] = ()
     fhrp_groups: tuple[FhrpGroup, ...] = ()
+    bgp: tuple[BgpProcess, ...] = ()
     timers: TimerInventory = field(default_factory=TimerInventory)

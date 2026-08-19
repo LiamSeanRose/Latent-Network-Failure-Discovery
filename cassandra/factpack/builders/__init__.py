@@ -19,6 +19,7 @@ from cassandra.factpack.builders import eos, ios, nxos
 from cassandra.factpack.builders.common import ParsedDevice
 from cassandra.factpack.schema import (
     BfdTimers,
+    BgpProcess,
     DampeningProfile,
     Device,
     FactPackMeta,
@@ -75,6 +76,7 @@ def build_fact_pack(
     igp_timers: list[IgpHelloTimers] = []
     dampening: list[DampeningProfile] = []
     vlans: list[Vlan] = []
+    bgp: list[BgpProcess] = []
     unparsed: dict[str, tuple[str, ...]] = {}
     digest = hashlib.sha256()
 
@@ -88,6 +90,7 @@ def build_fact_pack(
         igp_timers.extend(getattr(parsed, "igp_hello", ()))
         dampening.extend(getattr(parsed, "dampening", ()))
         vlans.extend(parsed.vlans)
+        bgp.extend(getattr(parsed, "bgp", ()))
         unparsed[parsed.device.id] = parsed.unparsed_lines
 
         # Tracked objects are defined at top level; join them to the groups that
@@ -130,6 +133,7 @@ def build_fact_pack(
         ),
         devices=tuple(devices),
         vlans=tuple(vlans),
+        bgp=tuple(bgp),
         fhrp_groups=tuple(
             FhrpGroup(
                 id=_group_id(key, groups),

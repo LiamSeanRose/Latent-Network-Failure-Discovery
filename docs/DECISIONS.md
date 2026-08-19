@@ -54,6 +54,37 @@ operation, so there is no second route.
 
 ---
 
+## 2026-08-19 — Model BGP peerings, one side at a time
+
+**Context:** after the noise filter, exactly one line still went unaccounted for on a realistic
+config: `neighbor 10.0.0.0 remote-as 65000`. That was honest — peering genuinely was not
+modelled — and it is where a lot of real outages live.
+
+**Chosen:** a `BgpNeighbor` is deliberately one-sided. It records what a device *says* about a
+peer, not a negotiated session, because the interesting defects live in the disagreement
+between the two ends, and that only becomes visible when both devices are in one fact pack.
+
+Three rules follow, all decidable from configuration alone:
+
+- `bgp-remote-as-mismatch` — one end expects an AS the other does not run. The OPEN is rejected
+  and both configs look reasonable read separately.
+- `bgp-session-one-sided` — A peers to B, B says nothing back. Silent when the peer is outside
+  the corpus, because an upstream provider is not in your config directory and is not a defect.
+- `bgp-peer-off-subnet` — a peer address on none of this device's subnets, skipped when
+  `update-source` or `ebgp-multihop` says the operator meant it.
+
+**Recognised-but-unread peer settings register the address anyway.** `maximum-routes`,
+`password`, `route-map` and friends carry no fact any tier reads yet, but a neighbour known only
+by those lines still has to appear as a peering, or the reciprocity rule would report a
+one-sided session that is nothing of the sort.
+
+**Scope:** EOS only. IOS and NX-OS parse their own BGP blocks into `unparsed_lines` still, which
+is visible rather than silent.
+
+**Reversal:** the schema types and the three rules are independent; either can be removed alone.
+
+---
+
 ## 2026-08-19 — Filter config the tool does not model, and strip banners
 
 **Context:** ran the tool against a config shaped like a real device dump rather than a tidy

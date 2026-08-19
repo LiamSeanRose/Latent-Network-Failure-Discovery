@@ -431,3 +431,81 @@ def test_a_router_declaring_no_vlans_is_not_flagged(tmp_path: Path) -> None:
     )
     pack, _ = build_fact_pack(tmp_path)
     assert "vlan-not-declared" not in rules_fired(pack)
+
+
+BGP_PAIR: Final = """hostname {name}
+interface Ethernet1
+   no switchport
+   ip address 10.0.0.{addr}/31
+router bgp {local_as}
+   router-id 10.255.0.{rid}
+{neighbors}"""
+
+
+def bgp_pair(
+    tmp_path: Path,
+    *,
+    a_neighbors: str = "   neighbor 10.0.0.1 remote-as 65001\n",
+    b_neighbors: str = "   neighbor 10.0.0.0 remote-as 65000\n",
+    b_as: str = "65001",
+) -> StaticFactPack:
+    (tmp_path / "r0.cfg").write_text(
+        BGP_PAIR.format(
+            name="r0", addr=0, local_as="65000", rid=1, neighbors=a_neighbors
+        )
+    )
+    (tmp_path / "r1.cfg").write_text(
+        BGP_PAIR.format(name="r1", addr=1, local_as=b_as, rid=2, neighbors=b_neighbors)
+    )
+    pack, _ = build_fact_pack(tmp_path)
+    return pack
+
+
+def test_reciprocated_bgp_session_is_silent(tmp_path: Path) -> None:
+    assert rules_fired(bgp_pair(tmp_path)) == set()
+
+
+def test_bgp_session_configured_on_one_side_only(tmp_path: Path) -> None:
+    """The session never establishes, and each config looks complete alone."""
+    pack = bgp_pair(tmp_path, b_neighbors="")
+    assert "bgp-session-one-sided" in rules_fired(pack)
+
+
+def test_bgp_remote_as_mismatch(tmp_path: Path) -> None:
+    pack = bgp_pair(tmp_path, b_as="65999")
+    findings = {f.rule: f for f in evaluate(pack)}
+    assert "bgp-remote-as-mismatch" in findings
+    assert "65999" in findings["bgp-remote-as-mismatch"].title
+
+
+def test_bgp_peer_not_on_any_local_subnet(tmp_path: Path) -> None:
+    pack = bgp_pair(tmp_path, a_neighbors="   neighbor 192.0.2.9 remote-as 65001\n")
+    assert "bgp-peer-off-subnet" in rules_fired(pack)
+
+
+def test_multihop_peer_off_subnet_is_intentional(tmp_path: Path) -> None:
+    """update-source or ebgp-multihop says the operator meant it."""
+    pack = bgp_pair(
+        tmp_path,
+        a_neighbors=(
+            "   neighbor 192.0.2.9 remote-as 65001\n"
+            "   neighbor 192.0.2.9 ebgp-multihop 2\n"
+        ),
+    )
+    assert "bgp-peer-off-subnet" not in rules_fired(pack)
+
+
+def test_peer_outside_the_corpus_is_not_a_one_sided_session(tmp_path: Path) -> None:
+    """An upstream provider is not in your config directory and is not a defect."""
+    (tmp_path / "edge.cfg").write_text(
+        "hostname edge\n"
+        "interface Ethernet1\n"
+        "   no switchport\n"
+        "   ip address 198.51.100.2/30\n"
+        "router bgp 65000\n"
+        "   neighbor 198.51.100.1 remote-as 64500\n"
+    )
+    pack, _ = build_fact_pack(tmp_path)
+    fired = rules_fired(pack)
+    assert "bgp-session-one-sided" not in fired
+    assert "bgp-remote-as-mismatch" not in fired

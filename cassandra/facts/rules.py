@@ -696,3 +696,137 @@ def vlan_used_but_not_declared(pack: StaticFactPack) -> Iterator[Finding]:
                     remedy=f"add `vlan {vlan_id}` to {device.id}, or point the "
                     f"interface at a VLAN that exists",
                 )
+
+
+def _address_owner(pack: StaticFactPack) -> dict[str, str]:
+    """Which device owns each configured address, for resolving peerings."""
+    return {
+        assignment.address: device.id
+        for device in pack.devices
+        for interface in device.interfaces
+        for assignment in interface.addresses
+    }
+
+
+@rule
+def bgp_session_configured_on_one_side(pack: StaticFactPack) -> Iterator[Finding]:
+    """A peering only one end knows about.
+
+    Decidable only when both devices are present, so it stays silent on a
+    single-device pack or a peer outside the corpus — an upstream provider is
+    not a defect.
+    """
+    owner = _address_owner(pack)
+    local_addresses = {
+        device.id: {a.address for i in device.interfaces for a in i.addresses}
+        for device in pack.devices
+    }
+    configured: dict[tuple[str, str], str] = {}
+    for process in pack.bgp:
+        for neighbor in process.neighbors:
+            configured[(process.device, neighbor.address)] = neighbor.address
+
+    for process in pack.bgp:
+        for neighbor in process.neighbors:
+            peer_device = owner.get(neighbor.address)
+            if peer_device is None or peer_device == process.device:
+                continue
+            reciprocated = any(
+                address in local_addresses[process.device]
+                for (device, address) in configured
+                if device == peer_device
+            )
+            if reciprocated:
+                continue
+            yield Finding(
+                rule="bgp-session-one-sided",
+                tier=Tier.FACTS,
+                severity=Severity.HIGH,
+                device=process.device,
+                title=f"BGP peering with {peer_device} is configured on one side only",
+                detail=f"{process.device} peers to {neighbor.address}, but "
+                f"{peer_device} has no neighbor statement back. The session "
+                f"never establishes and the config looks complete on this device",
+                evidence=(
+                    f"{process.device} AS {process.local_as} -> {neighbor.address}",
+                ),
+                remedy=f"add the reciprocal neighbor on {peer_device}, or remove "
+                f"this one",
+            )
+
+
+@rule
+def bgp_remote_as_disagrees(pack: StaticFactPack) -> Iterator[Finding]:
+    """One end expects an AS the other does not use."""
+    owner = _address_owner(pack)
+    local_as = {process.device: process.local_as for process in pack.bgp}
+
+    for process in pack.bgp:
+        for neighbor in process.neighbors:
+            peer_device = owner.get(neighbor.address)
+            if peer_device is None or neighbor.remote_as is None:
+                continue
+            actual = local_as.get(peer_device)
+            if actual is None or actual == neighbor.remote_as:
+                continue
+            yield Finding(
+                rule="bgp-remote-as-mismatch",
+                tier=Tier.FACTS,
+                severity=Severity.HIGH,
+                device=process.device,
+                title=f"BGP expects {peer_device} to be AS {neighbor.remote_as}, "
+                f"but it runs AS {actual}",
+                detail="the OPEN is rejected on AS mismatch, so the session stays "
+                "down while both configurations look reasonable in isolation",
+                evidence=(
+                    f"{process.device}: neighbor {neighbor.address} "
+                    f"remote-as {neighbor.remote_as}",
+                    f"{peer_device}: router bgp {actual}",
+                ),
+                remedy=f"correct the remote-as on {process.device} to {actual}, or "
+                f"the local AS on {peer_device}",
+            )
+
+
+@rule
+def bgp_peer_on_no_local_subnet(pack: StaticFactPack) -> Iterator[Finding]:
+    """A directly-connected peer address that is on none of this device's subnets.
+
+    Skipped when the peering is explicitly not directly connected — an
+    update-source or ebgp-multihop says the operator meant it.
+    """
+    for process in pack.bgp:
+        device = next((d for d in pack.devices if d.id == process.device), None)
+        if device is None:
+            continue
+        networks = [
+            net for interface in device.interfaces for net in _networks(interface)
+        ]
+        if not networks:
+            continue
+        for neighbor in process.neighbors:
+            if neighbor.update_source or neighbor.multihop or neighbor.shutdown:
+                continue
+            try:
+                address = ipaddress.ip_address(neighbor.address)
+            except ValueError:
+                continue
+            if any(address in net for net in networks):
+                continue
+            yield Finding(
+                rule="bgp-peer-off-subnet",
+                tier=Tier.FACTS,
+                severity=Severity.MEDIUM,
+                device=process.device,
+                title=f"BGP peer {neighbor.address} is not on any subnet "
+                f"{process.device} has",
+                detail="the peering is neither multihop nor sourced from a "
+                "loopback, so it is meant to be directly connected — and the "
+                "address is not reachable on any interface here",
+                evidence=(
+                    f"{process.device} AS {process.local_as}",
+                    *(f"local: {net}" for net in networks[:4]),
+                ),
+                remedy="correct the peer address, or add update-source / "
+                "ebgp-multihop if the peering really is not direct",
+            )
