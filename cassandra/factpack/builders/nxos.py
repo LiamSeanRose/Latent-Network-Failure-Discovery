@@ -41,16 +41,22 @@ from cassandra.factpack.builders.common import (
     BgpPeerSettings,
     FhrpRecord,
     ParsedDevice,
+    StpSettings,
     apply_bgp_peer_setting,
+    apply_bgp_process_timer,
     bgp_neighbors_from,
+    bgp_timer_records,
     declared_vlans_from,
     fhrp_instance,
     interface_kind,
     ipv6_assignment,
     ipv6_states_no_subnet,
     is_out_of_scope,
+    read_stp_line,
     register_bgp_peer,
     seconds_to_ms,
+    states_stp_timer,
+    stp_timer_records,
     strip_banners,
     unreadable_vlans,
     vlan_list,
@@ -58,6 +64,7 @@ from cassandra.factpack.builders.common import (
 from cassandra.factpack.schema import (
     AddressFamily,
     BgpProcess,
+    BgpTimers,
     Device,
     DeviceRole,
     FhrpMember,
@@ -67,6 +74,7 @@ from cassandra.factpack.schema import (
     InterfaceKind,
     IpAssignment,
     NosFamily,
+    StpTimers,
     SwitchportMode,
     TimerScope,
     TimerSource,
@@ -140,6 +148,8 @@ class NxosDevice(ParsedDevice):
     """
 
     bgp: tuple[BgpProcess, ...] = ()
+    bgp_timers: tuple[BgpTimers, ...] = ()
+    stp: tuple[StpTimers, ...] = ()
 
 
 def looks_like_nxos(text: str) -> bool:
@@ -215,12 +225,27 @@ def parse_device(text: str, *, device_id: str | None = None) -> NxosDevice:
     unparsed: list[str] = []
     declared_vlans: list[Vlan] = []
     bgp_processes: list[BgpProcess] = []
+    bgp_timers: list[BgpTimers] = []
+    stp = StpSettings()
 
     for block in _blocks(text.splitlines()):
         header = block.header
 
         if m := re.fullmatch(r"(?:hostname|switchname) (\S+)", header):
             hostname = m.group(1)
+            continue
+
+        # Spanning tree is otherwise out of scope, and the timer lines are the
+        # only part of it any tier reads. The rest of the domain — port types,
+        # priorities, the MST region block and its body — is absorbed here rather
+        # than reported, exactly as it was when the whole domain was filtered.
+        if header.startswith("spanning-tree "):
+            if not read_stp_line(stp, header, hello_in_ms=False) and states_stp_timer(
+                header
+            ):
+                # A line naming a timer this could not read is a timer the fact
+                # pack has lost, not one it chose not to keep.
+                unparsed.append(header)
             continue
 
         if m := re.fullmatch(r"vlan (\S+)", header):
@@ -255,8 +280,11 @@ def parse_device(text: str, *, device_id: str | None = None) -> NxosDevice:
             continue
 
         if m := re.fullmatch(r"router bgp (\S+)", header):
-            process, bgp_unparsed = _parse_router_bgp(hostname, m.group(1), block.body)
+            process, process_timers, bgp_unparsed = _parse_router_bgp(
+                hostname, m.group(1), block.body
+            )
             bgp_processes.append(process)
+            bgp_timers.extend(process_timers)
             unparsed.extend(bgp_unparsed)
             continue
 
@@ -288,6 +316,8 @@ def parse_device(text: str, *, device_id: str | None = None) -> NxosDevice:
         unparsed_lines=tuple(unparsed),
         vlans=tuple(declared_vlans),
         bgp=tuple(bgp_processes),
+        bgp_timers=tuple(bgp_timers),
+        stp=stp_timer_records(hostname, stp),
     )
 
 
@@ -321,7 +351,7 @@ def _parse_bgp_peer_block(settings: BgpPeerSettings, body: list[str]) -> list[st
 
 def _parse_router_bgp(
     device: str, asn: str, body: list[str]
-) -> tuple[BgpProcess, list[str]]:
+) -> tuple[BgpProcess, tuple[BgpTimers, ...], list[str]]:
     """`router bgp <asn>`, whose peers are sub-blocks rather than flat lines.
 
     The result is the same `BgpProcess` the other two dialects build, which is
@@ -334,6 +364,7 @@ def _parse_router_bgp(
     unparsed: list[str] = []
     peers: dict[str, BgpPeerSettings] = {}
     groups: dict[str, BgpPeerSettings] = {}
+    process_settings: BgpPeerSettings = {}
     router_id: str | None = None
 
     for block in _blocks(body):
@@ -341,6 +372,12 @@ def _parse_router_bgp(
 
         if m := re.fullmatch(r"router-id (\S+)", line):
             router_id = m.group(1)
+        elif apply_bgp_process_timer(process_settings, line):
+            # `timers bgp` and the graceful-restart timers are read here rather
+            # than left to `_BGP_PROCESS`, which still absorbs the rest of both
+            # families — `graceful-restart` on its own turns the capability on
+            # and states no duration.
+            pass
         elif m := re.fullmatch(r"template peer (\S+)", line):
             unparsed.extend(
                 _parse_bgp_peer_block(groups.setdefault(m.group(1), {}), block.body)
@@ -363,7 +400,17 @@ def _parse_router_bgp(
         router_id=router_id,
         neighbors=bgp_neighbors_from(device, peers, groups),
     )
-    return process, unparsed
+    return (
+        process,
+        bgp_timer_records(
+            device=device,
+            asn=asn,
+            process=process_settings,
+            peers=peers,
+            groups=groups,
+        ),
+        unparsed,
+    )
 
 
 def _parse_hsrp_group(

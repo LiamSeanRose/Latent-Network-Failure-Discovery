@@ -113,6 +113,41 @@ def test_timer_fields_carry_their_unit(cls: type) -> None:
                 )
 
 
+def test_stp_timers_scope_a_vlan_range_rather_than_one_vlan() -> None:
+    """Every dialect writes `spanning-tree vlan 1-100 hello-time 2` as one line.
+    A record per VLAN would put four thousand near-identical entries in the
+    inventory and say nothing the range does not, so the range is the record."""
+    timers = schema.StpTimers(
+        scope=schema.TimerScope(device="sw1"),
+        vlans=(10, 20),
+        hello_time_ms=2000,
+    )
+    assert timers.vlans == (10, 20)
+    assert schema.StpTimers(scope=schema.TimerScope(device="sw1")).vlans == ()
+
+
+def test_bgp_timers_are_scoped_to_a_process_or_to_one_peering() -> None:
+    """`TimerScope.neighbor` is what separates `timers bgp` from `neighbor <ip>
+    timers`, and `source` is what separates a peering that stated its own from
+    one running the process default."""
+    process = schema.BgpTimers(
+        scope=schema.TimerScope(device="agg-a", instance="65001"),
+        keepalive_ms=30_000,
+    )
+    peering = schema.BgpTimers(
+        scope=schema.TimerScope(
+            device="agg-a",
+            instance="65001",
+            neighbor="10.0.0.1",
+            source=schema.TimerSource.INHERITED,
+        ),
+        keepalive_ms=30_000,
+    )
+    assert process.scope.neighbor is None
+    assert peering.scope.neighbor == "10.0.0.1"
+    assert peering.scope.source is schema.TimerSource.INHERITED
+
+
 def test_timer_inventory_covers_every_record_type() -> None:
     inventory_fields = dataclasses.fields(schema.TimerInventory)
     assert len(inventory_fields) == len(TIMER_RECORDS)

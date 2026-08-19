@@ -23,6 +23,7 @@ incomplete capture, not a defect.
 
 from __future__ import annotations
 
+import ipaddress
 import itertools
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from typing import Final
 from cassandra.factpack.builders.common import fhrp_instance
 from cassandra.factpack.schema import (
     BfdTimers,
+    BgpTimers,
     DampeningProfile,
     FhrpTimers,
     IgpHelloTimers,
@@ -38,7 +40,9 @@ from cassandra.factpack.schema import (
     Milliseconds,
     Seconds,
     StaticFactPack,
+    StpTimers,
     TimerSource,
+    VlanId,
 )
 from cassandra.findings import Finding, Severity, Tier
 
@@ -70,6 +74,19 @@ DEFAULT_LIMITS: Final = Limits()
 # the floor every one of those defaults sits on or above, so it is not offered as
 # a limit for the user to move.
 MIN_HELLOS_BEFORE_DOWN: Final = 3
+
+# BGP is built the same way, and says so: RFC 4271 clause 10 sets the KeepaliveTimer
+# to a third of the negotiated hold time, which is the same three losses of
+# tolerance the IGP and every FHRP protocol allow. It is the protocol's own
+# arithmetic rather than a preference, so it is not offered as a limit either.
+MIN_KEEPALIVES_BEFORE_DOWN: Final = 3
+
+# IEEE 802.1D-1998 clause 8.10.2 makes the three spanning-tree timers one set rather
+# than three numbers: the max age has to fit inside the two forward-delay
+# intervals that follow it, and has to leave room for hellos to be missed
+# before it expires. Both bounds carry a one-second allowance for propagation
+# across the diameter of the network.
+STP_TIMER_ALLOWANCE_MS: Final = 1000
 
 Rule = Callable[[StaticFactPack, Limits], Iterator[Finding]]
 RULES: list[Rule] = []
@@ -194,6 +211,130 @@ def _fhrp_line(timers: FhrpTimers) -> str:
     if timers.hold_time_ms is not None:
         parts.append(f"hold {_ms(timers.hold_time_ms)}")
     return " ".join(parts)
+
+
+def _bgp_line(timers: BgpTimers) -> str:
+    """One BGP timer record, as the line that configured it would read.
+
+    A peering record names the peer and says whether the numbers were written
+    against it or inherited from the process, because that is what decides which
+    line someone has to change.
+    """
+    scope = timers.scope
+    head = f"{scope.device}  bgp {scope.instance or ''}".rstrip()
+    if scope.neighbor:
+        head = f"{head} neighbor {scope.neighbor}"
+    parts = [head]
+    if timers.keepalive_ms is not None:
+        parts.append(f"keepalive {_ms(timers.keepalive_ms)}")
+    if timers.hold_time_ms is not None:
+        parts.append(f"hold {_ms(timers.hold_time_ms)}")
+    if timers.graceful_restart_time_s is not None:
+        parts.append(f"restart-time {_duration(timers.graceful_restart_time_s)}")
+    if timers.stalepath_time_s is not None:
+        parts.append(f"stalepath-time {_duration(timers.stalepath_time_s)}")
+    if scope.source is TimerSource.INHERITED:
+        parts.append("(inherited from the process)")
+    return " ".join(parts)
+
+
+def _vlan_scope(vlans: tuple[VlanId, ...]) -> str:
+    """`vlan 1-100`, `vlan 10,20`, or the device-wide phrasing for no range.
+
+    Contiguous ids are collapsed back into the range the operator wrote, because
+    a finding that lists a hundred VLAN numbers is a finding nobody reads.
+    """
+    if not vlans:
+        return "every VLAN"
+    spans: list[tuple[int, int]] = []
+    for vlan in sorted(set(vlans)):
+        if spans and vlan == spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], vlan)
+        else:
+            spans.append((vlan, vlan))
+    return "vlan " + ",".join(
+        str(low) if low == high else f"{low}-{high}" for low, high in spans
+    )
+
+
+def _stp_line(timers: StpTimers) -> str:
+    parts = [f"{timers.scope.device}  {timers.mode.value} {_vlan_scope(timers.vlans)}"]
+    if timers.hello_time_ms is not None:
+        parts.append(f"hello-time {_ms(timers.hello_time_ms)}")
+    if timers.forward_delay_ms is not None:
+        parts.append(f"forward-time {_ms(timers.forward_delay_ms)}")
+    if timers.max_age_ms is not None:
+        parts.append(f"max-age {_ms(timers.max_age_ms)}")
+    return " ".join(parts)
+
+
+def _address(text: str) -> str:
+    """One spelling per address, so two configs that wrote it differently match."""
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return text
+
+
+def _bgp_peerings(pack: StaticFactPack) -> Iterator[tuple[BgpTimers, BgpTimers]]:
+    """Timer records for the two ends of every peering wholly inside the pack.
+
+    A peering is two one-sided statements, and only the pair says anything: the
+    record on one device names an address, and the device that owns that address
+    has to have a record naming an address back. A peer outside the collection —
+    a transit provider, a device whose config was not gathered — yields nothing,
+    because an incomplete capture is not a defect (§2.4 applies the same rule to
+    a control that never ran).
+
+    Each pair is yielded once, in device-name order, so a rule reporting on one
+    does not report on it again from the other side.
+    """
+    owner: dict[str, str] = {
+        _address(assignment.address): device.id
+        for device in pack.devices
+        for interface in device.interfaces
+        for assignment in interface.addresses
+    }
+    by_device: dict[str, list[BgpTimers]] = {}
+    for timers in pack.timers.bgp:
+        if timers.scope.neighbor is None:
+            continue
+        by_device.setdefault(timers.scope.device, []).append(timers)
+
+    for device, records in sorted(by_device.items()):
+        for here in records:
+            peer = owner.get(_address(here.scope.neighbor or ""))
+            if peer is None or peer <= device:
+                continue
+            for there in by_device.get(peer, []):
+                if owner.get(_address(there.scope.neighbor or "")) == device:
+                    yield here, there
+
+
+def _bgp_differences(
+    a: BgpTimers, b: BgpTimers
+) -> tuple[tuple[str, Milliseconds, Milliseconds], ...]:
+    """The session timers these two ends both state and state differently.
+
+    A value only one end has is not a disagreement: the other end is then on a
+    platform default this tool does not know, and calling that a mismatch would
+    invent the number it was compared against.
+    """
+    return tuple(
+        (label, left, right)
+        for label, left, right in (
+            ("keepalive", a.keepalive_ms, b.keepalive_ms),
+            ("hold time", a.hold_time_ms, b.hold_time_ms),
+        )
+        if left is not None and right is not None and left != right
+    )
+
+
+def _stated(timers: BgpTimers) -> str:
+    """How a finding says where one end's numbers were written."""
+    if timers.scope.source is TimerSource.INHERITED:
+        return "inherits"
+    return "states"
 
 
 def _igp_index(
@@ -796,6 +937,251 @@ def dampening_can_never_suppress(
             remedy=f"lower the suppress threshold below {ceiling:,.0f}, or "
             f"raise max-suppress-time or the reuse threshold until the ceiling "
             f"clears it",
+        )
+
+
+@rule
+def bgp_hold_time_leaves_too_few_keepalives(
+    pack: StaticFactPack, limits: Limits
+) -> Iterator[Finding]:
+    """A BGP hold time worth fewer than three keepalives drops healthy sessions.
+
+    RFC 4271 clause 10 has the session send a keepalive every third of the hold time
+    precisely so that two may go missing and the peering survives. Configure the
+    hold below three keepalives and that margin is gone: one keepalive lost to a
+    control-plane pause, a policy push or ordinary queueing takes the session
+    down, every prefix it carried is withdrawn, and the reconvergence that
+    follows was caused by the timer rather than by anything failing. It comes
+    back, so the only evidence left is a flap counter.
+
+    Both scopes are checked. A process-wide `timers bgp` sets this for every
+    peering that does not override it, and a peering that does override it can
+    get it wrong on its own. A peering that inherits is not reported again — the
+    numbers are the process's, the process record already carries them, and one
+    line wrongly configured should produce one finding rather than one per peer
+    that happens to be on it.
+
+    Silent when either number is missing, and silent when the hold time is zero
+    — that is the documented way to turn keepalives off altogether, which is a
+    different decision with different consequences and not this rule's subject.
+    """
+    del limits
+    for timers in pack.timers.bgp:
+        if timers.scope.source is TimerSource.INHERITED:
+            continue
+        keepalive = timers.keepalive_ms
+        hold = timers.hold_time_ms
+        if keepalive is None or hold is None or keepalive <= 0 or hold <= 0:
+            continue
+        if hold >= keepalive * MIN_KEEPALIVES_BEFORE_DOWN:
+            continue
+        where = timers.scope.neighbor or timers.scope.device
+        subject = (
+            f"the peering with {timers.scope.neighbor}"
+            if timers.scope.neighbor
+            else f"every peering of AS {timers.scope.instance}"
+        )
+        yield Finding(
+            rule="bgp-hold-under-three-keepalives",
+            tier=Tier.FACTS,
+            severity=Severity.MEDIUM,
+            device=timers.scope.device,
+            title=f"BGP on {timers.scope.device} holds {subject} for only "
+            f"{_hellos_before_down(keepalive, hold)} keepalives",
+            detail=f"keepalives are sent every {_ms(keepalive)} and the session "
+            f"is torn down after {_ms(hold)} of silence, so fewer than "
+            f"{MIN_KEEPALIVES_BEFORE_DOWN} may be lost before every prefix the "
+            f"peering carries is withdrawn. RFC 4271 derives the keepalive "
+            f"interval from the hold time as a third of it for exactly this "
+            f"margin, and it is not here.",
+            trigger=f"a single lost keepalive on the session with {where}",
+            evidence=(_bgp_line(timers),),
+            remedy=f"raise the hold time to at least "
+            f"{_ms(keepalive * MIN_KEEPALIVES_BEFORE_DOWN)}, or lower the "
+            f"keepalive interval to keep the detection time and regain the "
+            f"margin",
+        )
+
+
+@rule
+def bgp_timers_disagree_across_a_peering(
+    pack: StaticFactPack, limits: Limits
+) -> Iterator[Finding]:
+    """Two ends of a peering that asked for different session timing.
+
+    BGP does not refuse the session over this — it negotiates, and RFC 4271
+    clause 4.2 makes the hold time the smaller of the two values offered — which is
+    what makes it worth reporting rather than obvious. Nothing alarms, nothing
+    logs, and the end that asked for the longer hold silently runs the shorter
+    one. Every number derived from it downstream is then wrong on that end: the
+    convergence budget, the comparison against a BFD session covering the same
+    path, the length of a maintenance window somebody believed the session would
+    survive.
+
+    The finding names which end stated its values on the peering and which end
+    inherited them from `timers bgp` on the process, because those are different
+    lines to change and only one of them affects the other peerings too.
+
+    Reported low. The session comes up, carries traffic and stays up; what is
+    wrong is a belief, not the network. Silent when only one end of the peering
+    is in the collection, and silent for a value only one end states — the other
+    is then on a platform default this tool will not guess at.
+    """
+    del limits
+    for here, there in _bgp_peerings(pack):
+        differences = _bgp_differences(here, there)
+        if not differences:
+            continue
+        summary = ", ".join(
+            f"{label} {_ms(left)} against {_ms(right)}"
+            for label, left, right in differences
+        )
+        effective = min(
+            value
+            for value in (here.hold_time_ms, there.hold_time_ms)
+            if value is not None
+        )
+        yield Finding(
+            rule="bgp-timers-disagree",
+            tier=Tier.FACTS,
+            severity=Severity.LOW,
+            device=here.scope.device,
+            title=f"BGP timers on the {here.scope.device} to "
+            f"{there.scope.device} peering disagree",
+            detail=f"{summary}. The session negotiates the smaller hold time, "
+            f"so both ends run {_ms(effective)} whatever they asked for, and "
+            f"the end that configured the longer one is not getting it. "
+            f"{here.scope.device} {_stated(here)} its values and "
+            f"{there.scope.device} {_stated(there)} its own.",
+            evidence=(_bgp_line(here), _bgp_line(there)),
+            remedy=f"configure the same keepalive and hold time on both ends of "
+            f"the {here.scope.device} to {there.scope.device} peering, or "
+            f"accept {_ms(effective)} and write it down on both",
+        )
+
+
+@rule
+def graceful_restart_outlives_the_stalepath_timer(
+    pack: StaticFactPack, limits: Limits
+) -> Iterator[Finding]:
+    """A router that waits longer for a restarting peer than it will hold that
+    peer's routes.
+
+    The two timers are one mechanism. `restart-time` is how long the router is
+    willing to wait for a graceful-restart-capable peer to come back before
+    treating the session as genuinely gone; `stalepath-time` is how long it will
+    keep that peer's paths marked stale while it waits. Set the stalepath timer
+    shorter and the router deletes the routes it was waiting to reuse, part-way
+    through a restart it had already decided to tolerate — so the restart is
+    graceful for the first part of the window and a full withdrawal for the
+    rest, which is the outage graceful restart was configured to prevent.
+
+    The failure is invisible from steady state and from either timer alone. Both
+    are configured, both look reasonable, and the traffic loss only happens when
+    a restart runs longer than the shorter of the two.
+
+    Silent when either timer is absent. Every platform defaults the pair to a
+    combination that satisfies this, so a config stating neither is not
+    configured wrongly — it is not configured at all, and inventing the defaults
+    to check them against each other would be checking this tool's memory.
+    """
+    del limits
+    for timers in pack.timers.bgp:
+        restart = timers.graceful_restart_time_s
+        stalepath = timers.stalepath_time_s
+        if restart is None or stalepath is None or stalepath >= restart:
+            continue
+        yield Finding(
+            rule="bgp-stalepath-under-restart-time",
+            tier=Tier.FACTS,
+            severity=Severity.MEDIUM,
+            device=timers.scope.device,
+            title=f"graceful restart on {timers.scope.device} waits "
+            f"{_duration(restart)} for a peer whose routes it keeps for "
+            f"{_duration(stalepath)}",
+            detail=f"stale paths from a restarting peer are deleted after "
+            f"{_duration(stalepath)}, and the session is given "
+            f"{_duration(restart)} to come back. A restart that takes longer "
+            f"than {_duration(stalepath)} therefore loses the routes graceful "
+            f"restart exists to preserve, for the "
+            f"{_duration(restart - stalepath)} between the two timers, while "
+            f"the router is still waiting rather than reconverging.",
+            trigger=f"a peer restart lasting longer than {_duration(stalepath)}",
+            evidence=(_bgp_line(timers),),
+            remedy=f"raise stalepath-time above {_duration(restart)}, or lower "
+            f"restart-time to {_duration(stalepath)} so the router stops "
+            f"waiting when it stops holding",
+        )
+
+
+@rule
+def stp_timers_break_the_standard_relationship(
+    pack: StaticFactPack, limits: Limits
+) -> Iterator[Finding]:
+    """Spanning-tree timers that the standard's own inequalities reject.
+
+    IEEE 802.1D-1998 clause 8.10.2 does not treat the three timers as independent
+    knobs. It requires `2 x (forward delay - 1s) >= max age` and
+    `max age >= 2 x (hello time + 1s)`, and each bound protects against a
+    different failure. Break the first and a port can finish listening and
+    learning and start forwarding while a stale topology somewhere else in the
+    network has not yet aged out — a forwarding loop, on a broadcast domain,
+    which is the failure mode that takes a whole site down rather than a link.
+    Break the second and a bridge ages out a root it is still hearing from,
+    reconverging the tree over ordinary packet loss.
+
+    The timers a VLAN runs are the root bridge's, not each bridge's own, so this
+    is reported medium rather than high: it takes this device winning the
+    election for its numbers to govern anything. That is also exactly why it
+    survives review — the values are harmless while some other bridge is root,
+    and become the network's the moment that bridge is replaced or reloaded.
+
+    Silent unless all three timers are stated for the same scope. The standard's
+    defaults satisfy both inequalities, and filling an unstated timer in from
+    them would be checking a value this tool supplied rather than one the
+    operator did.
+    """
+    del limits
+    for timers in pack.timers.stp:
+        hello = timers.hello_time_ms
+        forward = timers.forward_delay_ms
+        max_age = timers.max_age_ms
+        if hello is None or forward is None or max_age is None:
+            continue
+        forward_bound = 2 * (forward - STP_TIMER_ALLOWANCE_MS)
+        hello_bound = 2 * (hello + STP_TIMER_ALLOWANCE_MS)
+        broken = []
+        if max_age > forward_bound:
+            broken.append(
+                f"a max age of {_ms(max_age)} needs a forward delay of at least "
+                f"{_ms(max_age // 2 + STP_TIMER_ALLOWANCE_MS)}, not {_ms(forward)}"
+            )
+        if max_age < hello_bound:
+            broken.append(
+                f"a hello time of {_ms(hello)} needs a max age of at least "
+                f"{_ms(hello_bound)}, not {_ms(max_age)}"
+            )
+        if not broken:
+            continue
+        scope = _vlan_scope(timers.vlans)
+        yield Finding(
+            rule="stp-timers-outside-the-standard",
+            tier=Tier.FACTS,
+            severity=Severity.MEDIUM,
+            device=timers.scope.device,
+            title=f"spanning-tree timers on {timers.scope.device} for {scope} "
+            f"break the relationship the standard requires",
+            detail=f"{'; and '.join(broken)}. IEEE 802.1D ties the three "
+            f"together so that a port cannot begin forwarding before stale "
+            f"information elsewhere has aged out, and so that a bridge cannot "
+            f"age out a root it is still hearing from. These values are the "
+            f"whole network's whenever {timers.scope.device} is the root "
+            f"bridge for {scope}.",
+            trigger=f"{timers.scope.device} winning the root election for {scope}",
+            evidence=(_stp_line(timers),),
+            remedy="set the three timers as one set — the standard's own "
+            "2s / 15s / 20s satisfies both bounds, and any tuning has to keep "
+            "them satisfied",
         )
 
 

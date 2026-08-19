@@ -32,6 +32,7 @@ from cassandra.factpack.builders.common import ParsedDevice, assemble_fhrp_group
 from cassandra.factpack.schema import (
     BfdTimers,
     BgpProcess,
+    BgpTimers,
     DampeningProfile,
     Device,
     FactPackMeta,
@@ -41,6 +42,7 @@ from cassandra.factpack.schema import (
     IgpHelloTimers,
     Interface,
     StaticFactPack,
+    StpTimers,
     TimerInventory,
     Vlan,
 )
@@ -94,6 +96,8 @@ def build_fact_pack(
     bfd_timers: list[BfdTimers] = []
     igp_timers: list[IgpHelloTimers] = []
     dampening: list[DampeningProfile] = []
+    bgp_timers: list[BgpTimers] = []
+    stp_timers: list[StpTimers] = []
     vlans: list[Vlan] = []
     bgp: list[BgpProcess] = []
     unparsed: dict[str, tuple[str, ...]] = {}
@@ -128,6 +132,8 @@ def build_fact_pack(
         bfd_timers.extend(getattr(parsed, "bfd", ()))
         igp_timers.extend(getattr(parsed, "igp_hello", ()))
         dampening.extend(getattr(parsed, "dampening", ()))
+        bgp_timers.extend(getattr(parsed, "bgp_timers", ()))
+        stp_timers.extend(getattr(parsed, "stp", ()))
         vlans.extend(parsed.vlans)
         bgp.extend(getattr(parsed, "bgp", ()))
         unparsed[parsed.device.id] = parsed.unparsed_lines
@@ -157,6 +163,8 @@ def build_fact_pack(
             bfd=tuple(bfd_timers),
             igp_hello=tuple(igp_timers),
             dampening=tuple(dampening),
+            bgp=tuple(bgp_timers),
+            stp=tuple(stp_timers),
         ),
     )
     return pack, unparsed
@@ -256,7 +264,7 @@ def _renamed(parsed: ParsedDevice, device_id: str) -> ParsedDevice:
             for record in parsed.fhrp_records
         ),
     }
-    for family in ("bfd", "igp_hello", "dampening"):
+    for family in ("bfd", "igp_hello", "dampening", "bgp_timers", "stp"):
         records = getattr(parsed, family, ())
         if records:
             changes[family] = tuple(_rescoped(record, device_id) for record in records)
@@ -278,9 +286,9 @@ def _member_of(member: FhrpMember, device_id: str) -> FhrpMember:
     )
 
 
-def _rescoped[T: (BfdTimers, DampeningProfile, FhrpTimers, IgpHelloTimers)](
-    record: T, device_id: str
-) -> T:
+def _rescoped[
+    T: (BfdTimers, BgpTimers, DampeningProfile, FhrpTimers, IgpHelloTimers, StpTimers)
+](record: T, device_id: str) -> T:
     return replace(record, scope=replace(record.scope, device=device_id))
 
 

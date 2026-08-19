@@ -17,7 +17,9 @@ from typing import Final
 from cassandra.factpack.schema import (
     AddressFamily,
     BgpNeighbor,
+    BgpTimers,
     Device,
+    DeviceId,
     FhrpGroup,
     FhrpMember,
     FhrpProtocol,
@@ -27,8 +29,14 @@ from cassandra.factpack.schema import (
     InterfaceName,
     IpAddress,
     IpAssignment,
+    Milliseconds,
+    StpMode,
+    StpTimers,
+    TimerScope,
+    TimerSource,
     TrackedObject,
     Vlan,
+    VlanId,
 )
 
 _KINDS: Final = (
@@ -602,6 +610,8 @@ def apply_bgp_peer_setting(settings: BgpPeerSettings, setting: str) -> bool:
         settings["peer_group"] = m.group(1)
     elif _BGP_PEER_BFD.fullmatch(setting):
         settings["bfd"] = True
+    elif _BGP_PEER_TIMERS.fullmatch(setting):
+        _read_bgp_timers(settings, setting)
     elif _BGP_PEER_UNREAD.fullmatch(setting):
         pass
     else:
@@ -667,3 +677,317 @@ def bgp_neighbors_from(
 def _text(value: str | bool | None) -> str | None:
     """Settings are accumulated as `str | bool`; the schema wants only the strings."""
     return value if isinstance(value, str) else None
+
+
+# --------------------------------------------------------------------------
+# BGP timers
+#
+# All three dialects state the session timers with the same words. The process
+# default is `timers bgp <keepalive> <holdtime> [min-holdtime]` and a peering
+# overrides it with `timers <keepalive> <holdtime> [min-holdtime]` — flat after
+# `neighbor <ip>` on IOS and EOS, indented inside the peer's block on NX-OS.
+# Graceful restart differs only in a prefix: IOS writes `bgp graceful-restart
+# restart-time 300` where the other two leave the `bgp` off.
+#
+# The vocabulary is therefore shared even though the nesting is not, which is
+# the same seam `apply_bgp_peer_setting` is drawn on.
+# --------------------------------------------------------------------------
+
+# The keys an accumulated settings dict uses for the timers it read. Seconds,
+# because that is the unit every one of these commands is written in; the
+# conversion to the schema's milliseconds happens once, in `bgp_timer_records`.
+BGP_KEEPALIVE_KEY: Final = "keepalive_s"
+BGP_HOLD_KEY: Final = "hold_s"
+BGP_MIN_HOLD_KEY: Final = "min_hold_s"
+BGP_RESTART_TIME_KEY: Final = "restart_time_s"
+BGP_STALEPATH_TIME_KEY: Final = "stalepath_time_s"
+
+_BGP_TIMER_KEYS: Final = (BGP_KEEPALIVE_KEY, BGP_HOLD_KEY, BGP_MIN_HOLD_KEY)
+_BGP_PROCESS_TIMER_KEYS: Final = (
+    *_BGP_TIMER_KEYS,
+    BGP_RESTART_TIME_KEY,
+    BGP_STALEPATH_TIME_KEY,
+)
+
+_BGP_PEER_TIMERS: Final = re.compile(r"timers (\d+) (\d+)(?: (\d+))?")
+
+
+def _read_bgp_timers(settings: BgpPeerSettings, setting: str) -> None:
+    """`timers <keepalive> <hold> [min-hold]` -> the three keys, in seconds."""
+    m = _BGP_PEER_TIMERS.fullmatch(setting)
+    if m is None:
+        return
+    settings[BGP_KEEPALIVE_KEY] = m.group(1)
+    settings[BGP_HOLD_KEY] = m.group(2)
+    if m.group(3) is not None:
+        settings[BGP_MIN_HOLD_KEY] = m.group(3)
+
+
+def apply_bgp_process_timer(settings: BgpPeerSettings, line: str) -> bool:
+    """Fold one process-wide BGP timer into `settings`; False if it is not one.
+
+    IOS prefixes the graceful-restart timers with `bgp`; EOS and NX-OS do not,
+    and all three write `timers bgp <keepalive> <holdtime>` identically. False
+    for anything else, so the caller decides what an unread line under `router
+    bgp` means — for two dialects that is "already absorbed by the process-level
+    filter", and for the third it is "report it".
+    """
+    if m := re.fullmatch(r"timers bgp (\d+) (\d+)(?: (\d+))?", line):
+        settings[BGP_KEEPALIVE_KEY] = m.group(1)
+        settings[BGP_HOLD_KEY] = m.group(2)
+        if m.group(3) is not None:
+            settings[BGP_MIN_HOLD_KEY] = m.group(3)
+        return True
+    if m := re.fullmatch(r"(?:bgp )?graceful-restart restart-time (\d+)", line):
+        settings[BGP_RESTART_TIME_KEY] = m.group(1)
+        return True
+    if m := re.fullmatch(r"(?:bgp )?graceful-restart stalepath-time (\d+)", line):
+        settings[BGP_STALEPATH_TIME_KEY] = m.group(1)
+        return True
+    return False
+
+
+def bgp_timer_records(
+    *,
+    device: DeviceId,
+    asn: str,
+    process: Mapping[str, str | bool],
+    peers: Mapping[str, BgpPeerSettings],
+    groups: Mapping[str, BgpPeerSettings] | None = None,
+) -> tuple[BgpTimers, ...]:
+    """Accumulated BGP settings -> timer records, at both scopes.
+
+    The process record is what `timers bgp` and the graceful-restart timers set
+    for every peering. A peering gets its own record when the numbers it runs
+    are knowable: either it states them, or the process states them and the
+    peering does not — the second case is marked `INHERITED`, so a rule
+    comparing two ends of a session can say which end actually wrote the value
+    down rather than reporting a disagreement against a number nobody chose.
+
+    A peer-group's timers count as stated. They are written for the peering by
+    an operator who chose them for it, and the only thing the peering not
+    restating them changes is which line has to be edited — which the evidence
+    carries, not the provenance.
+
+    Peerings with nothing stated anywhere get no record at all. A record whose
+    every value is `None` says only that the parser ran.
+    """
+    resolved = groups or {}
+    out: list[BgpTimers] = []
+    scope = TimerScope(device=device, instance=asn, source=TimerSource.CONFIGURED)
+
+    if any(process.get(key) is not None for key in _BGP_PROCESS_TIMER_KEYS):
+        out.append(
+            BgpTimers(
+                scope=scope,
+                keepalive_ms=seconds_to_ms(_text(process.get(BGP_KEEPALIVE_KEY))),
+                hold_time_ms=seconds_to_ms(_text(process.get(BGP_HOLD_KEY))),
+                min_hold_time_ms=seconds_to_ms(_text(process.get(BGP_MIN_HOLD_KEY))),
+                graceful_restart_time_s=_number(process.get(BGP_RESTART_TIME_KEY)),
+                stalepath_time_s=_number(process.get(BGP_STALEPATH_TIME_KEY)),
+            )
+        )
+
+    for address, settings in sorted(peers.items()):
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            # A peer-group holds settings for its members rather than running a
+            # session of its own, so it is resolved into them and never recorded.
+            continue
+        inherited = settings.get("peer_group")
+        merged: BgpPeerSettings = dict(
+            resolved.get(inherited, {}) if isinstance(inherited, str) else {}
+        )
+        merged.update(settings)
+        stated = any(merged.get(key) is not None for key in _BGP_TIMER_KEYS)
+        source: Mapping[str, str | bool] = merged if stated else process
+        if not any(source.get(key) is not None for key in _BGP_TIMER_KEYS):
+            continue
+        out.append(
+            BgpTimers(
+                scope=replace(
+                    scope,
+                    neighbor=address,
+                    source=TimerSource.CONFIGURED if stated else TimerSource.INHERITED,
+                ),
+                keepalive_ms=seconds_to_ms(_text(source.get(BGP_KEEPALIVE_KEY))),
+                hold_time_ms=seconds_to_ms(_text(source.get(BGP_HOLD_KEY))),
+                min_hold_time_ms=seconds_to_ms(_text(source.get(BGP_MIN_HOLD_KEY))),
+            )
+        )
+    return tuple(out)
+
+
+def _number(value: str | bool | None) -> int | None:
+    text = _text(value)
+    return None if text is None else int(text)
+
+
+# --------------------------------------------------------------------------
+# Spanning tree
+#
+# Every dialect writes the same three timers and scopes them three ways: for the
+# whole device, for a range of VLANs, or for an MST region. The words are shared,
+# so the reading is; the units are not, which is the one argument a dialect
+# passes in.
+# --------------------------------------------------------------------------
+
+STP_MODES: Final[dict[str, StpMode]] = {
+    "stp": StpMode.STP,
+    "rstp": StpMode.RSTP,
+    "pvst": StpMode.PVST,
+    "pvst+": StpMode.PVST,
+    "rapid-pvst": StpMode.RAPID_PVST,
+    "rapid-pvst+": StpMode.RAPID_PVST,
+    "mst": StpMode.MST,
+    "mstp": StpMode.MST,
+    "none": StpMode.NONE,
+}
+
+# The three timers, and the field each one fills. `forward-time` is the delay a
+# port spends in listening and again in learning, which the schema calls
+# `forward_delay_ms` after the standard rather than after the command.
+_STP_FIELDS: Final[dict[str, str]] = {
+    "hello-time": "hello_time_ms",
+    "forward-time": "forward_delay_ms",
+    "max-age": "max_age_ms",
+}
+
+# `spanning-tree vlan 1-100 hello-time 2` on IOS and NX-OS; EOS spells the same
+# scope `vlan-id`. Both are accepted everywhere: reading one extra spelling
+# costs nothing and mis-scoping a timer to the whole device would be a fact
+# stated about VLANs the operator never named.
+_STP_VLAN_TIMER: Final = re.compile(
+    r"spanning-tree vlan(?:-id)? (\S+) (hello-time|forward-time|max-age) (\d+)"
+)
+_STP_MST_TIMER: Final = re.compile(
+    r"spanning-tree mst (hello-time|forward-time|max-age) (\d+)"
+)
+_STP_TIMER: Final = re.compile(r"spanning-tree (hello-time|forward-time|max-age) (\d+)")
+_STP_MODE: Final = re.compile(r"spanning-tree mode (\S+)")
+
+# What one `spanning-tree` line scopes its timers to: an MST region name, or a
+# set of VLAN ids. `(None, ())` is the device-wide line.
+type StpKey = tuple[str | None, tuple[VlanId, ...]]
+
+
+@dataclass(slots=True)
+class StpSettings:
+    """Every spanning-tree timer one config states, by what it scopes them to.
+
+    Accumulated rather than emitted line by line because the three timers are
+    written on three separate lines that mean one set of values, and because a
+    per-VLAN line overrides only the timer it names — the rest of that VLAN's
+    timing is whatever the device-wide lines said.
+    """
+
+    mode: StpMode = StpMode.NONE
+    values: dict[StpKey, dict[str, Milliseconds]] = field(default_factory=dict)
+
+    def set(self, key: StpKey, field_name: str, value: Milliseconds) -> None:
+        self.values.setdefault(key, {})[field_name] = value
+
+
+def read_stp_line(settings: StpSettings, line: str, *, hello_in_ms: bool) -> bool:
+    """Fold one top-level `spanning-tree` line in; False if it states no timer.
+
+    `hello_in_ms` is the one thing the dialects disagree about: EOS states the
+    hello time in milliseconds and its two siblings state it in seconds, while
+    all three state the forward delay and the max age in seconds. Reading the
+    wrong unit would put a two-second hello in the inventory as two
+    milliseconds, and every ratio computed from it would be a thousand times
+    wrong.
+
+    A mode line returns True as well. It states no timer of its own, but it says
+    which protocol the timers belong to, and losing it would leave every record
+    claiming a mode the device is not running.
+    """
+    if m := _STP_MODE.fullmatch(line):
+        mode = STP_MODES.get(m.group(1))
+        if mode is None:
+            return False
+        settings.mode = mode
+        return True
+    if m := _STP_VLAN_TIMER.fullmatch(line):
+        vlans = vlan_list(m.group(1))
+        if not vlans:
+            return False
+        settings.set(
+            (None, vlans),
+            _STP_FIELDS[m.group(2)],
+            _stp_ms(m.group(2), m.group(3), hello_in_ms),
+        )
+        return True
+    if m := _STP_MST_TIMER.fullmatch(line):
+        settings.set(
+            ("mst", ()),
+            _STP_FIELDS[m.group(1)],
+            _stp_ms(m.group(1), m.group(2), hello_in_ms),
+        )
+        return True
+    if m := _STP_TIMER.fullmatch(line):
+        settings.set(
+            (None, ()),
+            _STP_FIELDS[m.group(1)],
+            _stp_ms(m.group(1), m.group(2), hello_in_ms),
+        )
+        return True
+    return False
+
+
+def states_stp_timer(line: str) -> bool:
+    """True for a `spanning-tree` line naming one of the three timers.
+
+    The separator between "absorbed on purpose" and "dropped by accident". The
+    rest of the spanning-tree domain carries no fact any tier reads and is
+    filtered wholesale, but a line that names a timer and that `read_stp_line`
+    could not read is a timer this parser lost — a VLAN range it could not
+    expand, a value it could not parse — and belongs in `unparsed_lines` where
+    someone will see it.
+    """
+    return any(f" {name} " in f"{line} " for name in _STP_FIELDS)
+
+
+def _stp_ms(name: str, value: str, hello_in_ms: bool) -> Milliseconds:
+    if name == "hello-time" and hello_in_ms:
+        return int(value)
+    return int(value) * 1000
+
+
+def stp_timer_records(device: DeviceId, settings: StpSettings) -> tuple[StpTimers, ...]:
+    """Accumulated spanning-tree settings -> one record per scope they name.
+
+    A scoped record carries the device-wide values it does not override, because
+    that is what the VLANs it names actually run: `spanning-tree vlan 1-100
+    max-age 20` changes the max age for those VLANs and leaves their hello time
+    and forward delay exactly where the device-wide lines put them. A rule
+    checking the relationship between the three needs the set that is in effect,
+    not the subset one line happened to restate.
+
+    Only scopes with a timer in them are recorded. A device that states a mode
+    and no timing has told the inventory nothing to inventory.
+    """
+    device_wide = settings.values.get((None, ()), {})
+    out: list[StpTimers] = []
+    for (instance, vlans), values in sorted(
+        settings.values.items(), key=lambda item: (item[0][0] or "", item[0][1])
+    ):
+        merged = (
+            {**device_wide, **values} if (instance, vlans) != (None, ()) else values
+        )
+        if not merged:
+            continue
+        out.append(
+            StpTimers(
+                scope=TimerScope(
+                    device=device, instance=instance, source=TimerSource.CONFIGURED
+                ),
+                vlans=vlans,
+                mode=settings.mode,
+                hello_time_ms=merged.get("hello_time_ms"),
+                forward_delay_ms=merged.get("forward_delay_ms"),
+                max_age_ms=merged.get("max_age_ms"),
+            )
+        )
+    return tuple(out)

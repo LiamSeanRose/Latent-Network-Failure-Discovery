@@ -169,6 +169,14 @@ class TimerSource(StrEnum):
     A platform default that happens to race with a configured timer reads very
     differently from two values an operator chose, and only one of them is worth
     writing a scenario about.
+
+    `INHERITED` is the third case, and the one a cross-device comparison turns
+    on: the value was written down, but somewhere other than the record it now
+    sits on. A BGP peering that states no timers of its own runs the process
+    default from `timers bgp`, which is a number an operator chose and a rule
+    may legitimately compare against — while still needing to say that the
+    peering itself is silent about it, because that is the line someone has to
+    change.
     """
 
     CONFIGURED = "configured"
@@ -514,6 +522,21 @@ class BfdTimers:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BgpTimers:
+    """BGP session timing, at whichever of the two scopes stated it.
+
+    A process record has `scope.neighbor` unset and `scope.instance` naming the
+    local AS: it is what `timers bgp` and the graceful-restart timers set for
+    every peering the process has. A peering record names the peer in
+    `scope.neighbor`, and `scope.source` says whether the peering stated the
+    values itself or inherited them from the process — the difference between
+    "this end asked for a nine-second hold" and "this end never mentioned one",
+    which is the first thing a reader of a disagreement wants to know.
+
+    Graceful-restart timers stay on the process record. They are stated once and
+    are not per-peering on any of the three dialects, so repeating them onto
+    every peering would invent a scope the configuration does not have.
+    """
+
     scope: TimerScope
     keepalive_ms: Milliseconds | None = None
     hold_time_ms: Milliseconds | None = None
@@ -583,7 +606,21 @@ class CarrierDelayTimers:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StpTimers:
+    """Spanning-tree timing, and the VLANs the line that stated it applies to.
+
+    `vlans` is here rather than one record per VLAN because that is what the
+    configuration states: every dialect writes one line scoping a set of timers
+    to a range — `spanning-tree vlan 1-100 hello-time 2` — and expanding it
+    would put four thousand near-identical records in the inventory for a line
+    the operator wrote once. Empty means the record is the device-wide one,
+    which is what a VLAN not named by any range runs.
+
+    `scope.instance` names an MST region where the timers are the region's
+    rather than a VLAN range's, and is unset otherwise.
+    """
+
     scope: TimerScope
+    vlans: tuple[VlanId, ...] = ()
     mode: StpMode = StpMode.NONE
     hello_time_ms: Milliseconds | None = None
     forward_delay_ms: Milliseconds | None = None

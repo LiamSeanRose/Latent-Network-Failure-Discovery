@@ -310,7 +310,7 @@ def _report_coverage(pack: StaticFactPack, wanted: str | None, *, quiet: bool) -
     """Say which checks had something to look at, after saying what they found.
 
     After, because the findings are what the user came for. The coverage line is
-    the caveat on them — thirty of forty-one checks inert is a different result
+    the caveat on them — thirty of forty-five checks inert is a different result
     from a clean run, and it is not visible in a report that says nothing.
 
     Goes to stderr alongside the JSON, so a pipeline parsing the findings is not

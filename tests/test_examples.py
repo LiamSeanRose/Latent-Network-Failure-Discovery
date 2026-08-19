@@ -264,17 +264,22 @@ def test_the_two_oscillations_differ_in_trigger_and_in_remedy() -> None:
     assert a.remedy != b.remedy
 
 
-def test_thirteen_of_forty_one_checks_are_inert_on_this_corpus() -> None:
+def test_seventeen_of_forty_five_checks_are_inert_on_this_corpus() -> None:
     """Section 8 quotes both numbers and names what the inert ones wanted."""
     pack, _ = build_fact_pack(CORPUS)
     assessed = coverage.assess(pack)
-    assert len(assessed) == 41
-    assert len(coverage.inert(assessed)) == 13
+    assert len(assessed) == 45
+    assert len(coverage.inert(assessed)) == 17
     # Nothing here configures BFD, so every check that reads a BFD timer is
     # inert for that reason and not because a device happened to be clean.
     inert = {c.rule: c.reason for c in coverage.inert(assessed)}
     assert inert["bfd-no-clients"] == "no BFD timers in these configs"
     assert "mtu-mismatch" in inert
+    # The BGP and spanning-tree checks are inert for the same kind of reason,
+    # and section 8's argument is that this corpus says nothing about them
+    # rather than that it is clean of them.
+    assert inert["bgp-timers-disagree"] == "no BGP timers in these configs"
+    assert inert["stp-timers-outside-the-standard"] == "no STP timers in these configs"
 
 
 def test_the_corpus_is_six_devices_across_a_nested_tree() -> None:

@@ -330,6 +330,12 @@ def test_the_corpus_still_produces_no_timers_it_does_not_configure(
     pack, _ = built
     assert pack.timers.bfd == ()
     assert pack.timers.dampening == ()
+    # Neither BGP session timing nor spanning-tree timing is stated anywhere in
+    # this corpus. The corpus is pinned by digest and by finding set, so a
+    # parser that started inventing either would change what the scenario is
+    # evidence of without changing a line of it.
+    assert pack.timers.bgp == ()
+    assert pack.timers.stp == ()
 
 
 REUSED_GROUP: Final = """hostname {name}

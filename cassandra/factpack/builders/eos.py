@@ -19,9 +19,14 @@ from dataclasses import dataclass, replace
 from typing import Final
 
 from cassandra.factpack.builders.common import (
+    BGP_HOLD_KEY,
+    BGP_KEEPALIVE_KEY,
     FhrpRecord,
     ParsedDevice,
     Stanza,
+    StpSettings,
+    apply_bgp_process_timer,
+    bgp_timer_records,
     configured_families,
     declared_vlans_from,
     fhrp_instance,
@@ -29,8 +34,11 @@ from cassandra.factpack.builders.common import (
     ipv6_assignment,
     ipv6_states_no_subnet,
     is_out_of_scope,
+    read_stp_line,
     seconds_to_ms,
     stanzas,
+    states_stp_timer,
+    stp_timer_records,
     strip_banners,
     unreadable_vlans,
     vlan_list,
@@ -40,6 +48,7 @@ from cassandra.factpack.schema import (
     BfdTimers,
     BgpNeighbor,
     BgpProcess,
+    BgpTimers,
     DampeningKind,
     DampeningProfile,
     Device,
@@ -52,6 +61,7 @@ from cassandra.factpack.schema import (
     Interface,
     IpAssignment,
     NosFamily,
+    StpTimers,
     SwitchportMode,
     TimerScope,
     TimerSource,
@@ -109,6 +119,8 @@ class EosDevice(ParsedDevice):
     bfd: tuple[BfdTimers, ...] = ()
     igp_hello: tuple[IgpHelloTimers, ...] = ()
     bgp: tuple[BgpProcess, ...] = ()
+    bgp_timers: tuple[BgpTimers, ...] = ()
+    stp: tuple[StpTimers, ...] = ()
     dampening: tuple[DampeningProfile, ...] = ()
 
 
@@ -149,13 +161,28 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
     # by subnet, and `bfd default` names every session on the device.
     bgp_bfd_neighbors: list[str] = []
     bgp_processes: list[BgpProcess] = []
+    bgp_timers: list[BgpTimers] = []
     device_wide_bfd_clients: set[str] = set()
+    stp = StpSettings()
 
     for stanza in stanzas(text):
         header = stanza.header
 
         if m := re.fullmatch(r"hostname (\S+)", header):
             hostname = m.group(1)
+            continue
+
+        # Spanning tree is otherwise out of scope, and the timer lines are the
+        # only part of it any tier reads. The rest of the domain — port types,
+        # priorities, the MST region block and its body — is absorbed here rather
+        # than reported, exactly as it was when the whole domain was filtered.
+        if header.startswith("spanning-tree "):
+            if not read_stp_line(stp, header, hello_in_ms=True) and states_stp_timer(
+                header
+            ):
+                # A line naming a timer this could not read is a timer the fact
+                # pack has lost, not one it chose not to keep.
+                unparsed.append(header)
             continue
 
         if m := re.fullmatch(r"vlan (\S+)", header):
@@ -198,13 +225,14 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
             continue
 
         if m := re.fullmatch(r"router bgp (\S+)", header):
-            profiles, neighbors, bgp_unparsed, process = _parse_router_bgp(
-                hostname, m.group(1), stanza.body
+            profiles, neighbors, bgp_unparsed, process, process_timers = (
+                _parse_router_bgp(hostname, m.group(1), stanza.body)
             )
             dampening.extend(profiles)
             bgp_bfd_neighbors.extend(neighbors)
             unparsed.extend(bgp_unparsed)
             bgp_processes.append(process)
+            bgp_timers.extend(process_timers)
             continue
 
         if m := re.fullmatch(r"router (ospf|isis) (\S+)", header):
@@ -263,6 +291,8 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
         unparsed_lines=tuple(unparsed),
         vlans=tuple(declared_vlans),
         bgp=tuple(bgp_processes),
+        bgp_timers=tuple(bgp_timers),
+        stp=stp_timer_records(hostname, stp),
         bfd=tuple(bfd),
         igp_hello=tuple(igp_hello),
         dampening=tuple(dampening),
@@ -288,7 +318,9 @@ def _bgp_clients(
 
 def _parse_router_bgp(
     device: str, asn: str, body: list[str]
-) -> tuple[list[DampeningProfile], list[str], list[str], BgpProcess]:
+) -> tuple[
+    list[DampeningProfile], list[str], list[str], BgpProcess, tuple[BgpTimers, ...]
+]:
     profiles: list[DampeningProfile] = []
     neighbors: list[str] = []
     unparsed: list[str] = []
@@ -297,6 +329,7 @@ def _parse_router_bgp(
     # Peer settings arrive on separate lines, so they accumulate per address and
     # the neighbour is assembled at the end.
     peers: dict[str, dict[str, str | bool]] = {}
+    process_settings: dict[str, str | bool] = {}
     router_id: str | None = None
 
     def peer(address: str) -> dict[str, str | bool]:
@@ -317,6 +350,15 @@ def _parse_router_bgp(
             peer(m.group(1))["shutdown"] = True
         elif m := re.fullmatch(r"neighbor (\S+) peer group (\S+)", line):
             peer(m.group(1))["peer_group"] = m.group(2)
+        elif m := re.fullmatch(r"neighbor (\S+) timers (\d+) (\d+)", line):
+            settings = peer(m.group(1))
+            settings[BGP_KEEPALIVE_KEY] = m.group(2)
+            settings[BGP_HOLD_KEY] = m.group(3)
+        elif apply_bgp_process_timer(process_settings, line):
+            # `graceful-restart` and `graceful-restart-helper` on their own turn
+            # the capability on and state no duration, so they fall through to
+            # `_UNINTERESTING` rather than being recorded as timers.
+            pass
         elif m := re.fullmatch(
             r"neighbor (\S+) (?:maximum-routes|password|send-community|"
             r"next-hop-self|route-map|allowas-in|soft-reconfiguration|"
@@ -365,7 +407,23 @@ def _parse_router_bgp(
             for address, settings in sorted(peers.items())
         ),
     )
-    return profiles, neighbors, unparsed, process
+    return (
+        profiles,
+        neighbors,
+        unparsed,
+        process,
+        # This dialect accumulates a peer group's settings in the same mapping
+        # as the peerings', keyed by its name rather than by an address, so the
+        # one dict serves as both halves: the record builder reads addresses as
+        # peerings and resolves names as the groups they inherit from.
+        bgp_timer_records(
+            device=device,
+            asn=asn,
+            process=process_settings,
+            peers=peers,
+            groups=peers,
+        ),
+    )
 
 
 def _dampening_profile(

@@ -570,19 +570,20 @@ them. It changes nothing about the findings and appends a summary underneath the
 ```
 $ uv run cassandra check /tmp/tutorial --coverage
 ...
-coverage: 28 of 41 checks had something to look at. 13 were inert:
+coverage: 28 of 45 checks had something to look at. 17 were inert:
   bfd-multiplier-of-one (no BFD timers in these configs)
   dampening-exceeds-sla (no dampening profile in these configs)
   fhrp-hold-under-peer-hello (no FHRP timers in these configs sets hold time)
-  and 10 more — `--coverage full` lists every check and what it was missing
+  and 14 more — `--coverage full` lists every check and what it was missing
 ```
 
 The findings above the summary are the ones section 2 already printed; they are trimmed here.
 
-Thirteen of forty-one checks never ran on this corpus, and none of them ran because a *fact* was
-absent, not because a device was clean. Nothing in these configs sets a BFD timer, an OSPF hello,
-an MTU, a native VLAN or a dampening profile, so every check that reads one of those had nothing
-to decide. `--coverage full` names each one and what it was missing:
+Seventeen of forty-five checks never ran on this corpus, and none of them ran because a *fact*
+was absent, not because a device was clean. Nothing in these configs sets a BFD timer, an OSPF
+hello, a BGP or spanning-tree timer, an MTU, a native VLAN or a dampening profile, so every check
+that reads one of those had nothing to decide. `--coverage full` names each one and what it was
+missing:
 
 ```
 $ uv run cassandra check /tmp/tutorial --coverage full
@@ -592,6 +593,9 @@ INERT  bfd-multiplier-of-one              no BFD timers in these configs
 INERT  bfd-no-clients                     no BFD timers in these configs
 INERT  bfd-no-faster-than-igp             no IGP hello timers in these configs
                                           no BFD timers in these configs
+INERT  bgp-hold-under-three-keepalives    no BGP timers in these configs
+INERT  bgp-stalepath-under-restart-time   no BGP timers in these configs
+INERT  bgp-timers-disagree                no BGP timers in these configs
 INERT  dampening-exceeds-sla              no dampening profile in these configs
 INERT  dampening-never-suppresses         no dampening profile in these configs
 INERT  fhrp-hold-under-peer-hello         no FHRP timers in these configs sets hold time
@@ -600,6 +604,7 @@ INERT  igp-dead-not-a-multiple-of-hello   no IGP hello timers in these configs
 INERT  igp-dead-under-three-hellos        no IGP hello timers in these configs
 INERT  mtu-mismatch                       no interface in these configs sets MTU bytes
 INERT  ospf-timers-disagree               no IGP hello timers in these configs
+INERT  stp-timers-outside-the-standard    no STP timers in these configs
 INERT  trunk-native-vlan-not-allowed      no interface in these configs sets native VLAN
 ```
 
@@ -609,7 +614,8 @@ which is the useful half — those are the checks that looked at your configs an
 
 Two things this is good for. The first is calibrating a clean run: on a corpus like this one,
 "no findings" is a statement about VLANs, addressing, BGP adjacency and FHRP, and says nothing
-whatever about BFD or IGP timers, because there are none to say anything about. The second is
+whatever about BFD, IGP, BGP session or spanning-tree timers, because there are none to say
+anything about. The second is
 catching a parser gap. If a check is inert for want of a fact you know is in your files —
 `mtu-mismatch` reporting no interface sets an MTU when half of them do — the fact did not survive
 parsing, and `cassandra facts` will show you what did.
