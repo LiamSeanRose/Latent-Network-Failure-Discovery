@@ -105,7 +105,28 @@ Two things remain outside this, and neither is a permission gate:
   without being asked. Judgement, not paperwork.
 
 Everything else: decide, do it, write it down.
-### 7.3 The decision log
+### 7.3 Fan out by default
+
+**When the next work splits into independent pieces, run them in parallel rather than in
+sequence.** This is the default, not an optimisation to consider later. A parser, a rule set, a
+view and a packaging change touch different files and have no ordering between them; doing them
+one after another wastes most of the available throughput.
+
+The coordination rule that makes it safe is **exclusive file ownership**: every parallel worker
+is given the exact list of files it may create or edit, and no two lists overlap. Shared files —
+the CLI, the spec, this document — are integrated afterwards by whoever is coordinating, never
+edited concurrently. Workers do not commit; the coordinator runs the full suite and commits once
+the pieces fit together.
+
+Workers cannot message each other. Anything one needs from another goes through the coordinator,
+so a task that depends on another's output is sequenced, not parallelised. Split on independence,
+not on convenience.
+
+**When not to fan out:** work with tight coupling between the pieces, and work whose bottleneck
+is a slow external signal. Several workers guessing blindly against a five-minute CI loop is not
+five times the progress; it is five times the guessing.
+
+### 7.4 The decision log
 
 Every decision that a future reader might otherwise have to reverse-engineer goes in
 `docs/DECISIONS.md`, newest first:
@@ -122,7 +143,7 @@ This is not ceremony. It is what makes an unattended loop auditable: the owner c
 log and see not just what was built but what was traded away, and disagree with any of it
 after the fact rather than being asked in advance.
 
-### 7.4 Reporting honestly
+### 7.5 Reporting honestly
 
 The loop reports what it did, including what it broke, skipped, or could not verify. An
 iteration that discovered a flaw in earlier work and fixed it is a good iteration and should

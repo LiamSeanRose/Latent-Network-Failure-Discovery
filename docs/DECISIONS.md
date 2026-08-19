@@ -1,6 +1,6 @@
 # Decision log
 
-Newest first. Format and purpose: `CONVENTIONS.md` §7.3.
+Newest first. Format and purpose: `CONVENTIONS.md` §7.4.
 
 Every non-trivial choice the build loop makes is recorded here with its reasoning and what
 reversing it would cost, so the repository owner can audit and overrule after the fact rather
@@ -51,6 +51,31 @@ pushing a throwaway non-default branch succeeded and deleting that same branch r
 HTTP 403, which rules out the default-branch explanation. The GitHub tool surface available
 here has `create_branch` and `list_branches` but no delete-branch or repository-settings
 operation, so there is no second route.
+
+---
+
+## 2026-08-19 — Build the project in parallel; this should have been the default
+
+**Context:** the owner asked repeatedly why the work was not being done by several specialised
+workers at once. It should have been. Nothing ever justified building it serially.
+
+**The confusion worth untangling:** two separate things had been conflated. The *product's*
+discovery layer (§7 of the spec — conjecture generation at volume) was deferred for reasons
+about runtime economics at one-person scale, and those reasons still hold. How the project gets
+*built* was never deferred at all; it simply was not done, which was a straightforward mistake.
+
+**Chosen:** fan out by default, recorded as `CONVENTIONS.md` §7.3. Exclusive file ownership per
+worker is what makes it safe without a message bus — workers cannot talk to each other, so
+anything crossing a boundary is sequenced through the coordinator, and shared files are
+integrated afterwards rather than edited concurrently.
+
+**Where it does not help, stated so it is not applied blindly:** tightly coupled work, and work
+whose bottleneck is a slow external signal. The FRR validation failure earlier the same day
+would not have been solved faster by five workers; it needed one machine that could boot the
+lab, not more parallel guessing.
+
+**Reversal:** none needed; it is a working practice, and a coordinator can always choose to
+sequence.
 
 ---
 
