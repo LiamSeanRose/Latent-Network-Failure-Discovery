@@ -1422,3 +1422,49 @@ def test_no_rule_suggests_a_change_it_cannot_state(tmp_path: Path) -> None:
         head = finding.change[0]
         assert head.startswith(("interface ", "router bgp ")), head
         assert len(finding.change) > 1, finding.rule
+
+
+def test_the_two_ways_of_not_preempting_read_differently(tmp_path: Path) -> None:
+    """A line that says `no preempt` and a protocol that defaults it off are
+    the same flag and two different situations.
+
+    The first is a decision somebody made and this reports it so the decision is
+    visible. The second is a default nobody looked at, and the priorities were
+    very likely written by someone who believed the higher one would win — which
+    is a different remedy and the commoner of the two. The flag alone cannot
+    tell them apart, which is what `preempt_source` is for.
+    """
+    hsrp = (
+        "hostname {name}\n!\nvlan 14\n!\ninterface Vlan14\n"
+        " ip address 198.51.100.{host} 255.255.255.0\n"
+        " standby 14 ip 198.51.100.1\n"
+        " standby 14 priority {priority}\n{extra}!\n"
+    )
+
+    def build(extra: str) -> Finding:
+        directory = tmp_path / ("off" if extra else "default")
+        directory.mkdir()
+        (directory / "dist-1.cfg").write_text(
+            hsrp.format(name="dist-1", host=2, priority=120, extra=extra)
+        )
+        (directory / "dist-2.cfg").write_text(
+            hsrp.format(name="dist-2", host=3, priority=100, extra="")
+        )
+        pack, _ = build_fact_pack(directory)
+        found = [f for f in evaluate(pack) if f.rule == "fhrp-no-preempt-on-preferred"]
+        assert len(found) == 1, f"expected one finding, got {found}"
+        return found[0]
+
+    inherited = build("")
+    deliberate = build(" no standby 14 preempt\n")
+
+    assert "defaults it off" in inherited.detail
+    assert "turned off on it" in deliberate.detail
+    assert inherited.remedy != deliberate.remedy
+    assert "lower this device's priority" in (inherited.remedy or "")
+    # The suggested change is the same either way, and correctly so: the
+    # positive form of the command is what cancels the negative one on every
+    # dialect here, so it is the edit for a group that turned preempt off as
+    # much as for one that never turned it on. Only the sentence moves.
+    assert deliberate.change == inherited.change
+    assert inherited.change[-1].strip().endswith("preempt")

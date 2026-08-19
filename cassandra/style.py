@@ -207,7 +207,7 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
   stroke-linecap: round; fill: none; opacity: 0;
   animation: split-in .5s ease-out .95s forwards; }
 
-/* Facts the pack states that no check reads. A list rather than a table: the
+/* Facts in the pack which nothing opened. A list rather than a table: the
    labels are generated and vary in length, and a column of them ragged against
    a path column reads worse than a sentence per line. */
 .unread-facts ul { margin: .3rem 0 .2rem; padding-left: 1.1rem; }

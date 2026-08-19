@@ -1017,15 +1017,17 @@ The highest-priority member has preempt off, so it never takes back.
 
 After the first failover the group stays on the backup for good. That is a legitimate choice — it avoids a second interruption to move back — but it means the priorities in the configuration no longer describe where traffic is, and the next person to read them will be wrong about the current state.
 
-Low severity because it is a defensible configuration. It is reported so the choice is visible rather than assumed.
+How it got that way changes what the finding means, and `preempt_source` carries the difference. A line that says `no preempt` is a decision somebody made, and this reports it so the decision is visible rather than assumed. An HSRP group that simply never turned preemption on inherited the protocol's default, and the priorities were very likely written by somebody who believed the higher one would win — which is a different sentence, a different remedy, and the commoner of the two.
+
+Low either way. The group works; what is wrong is a belief about where it will be. Raising the second case would be claiming to know which of the two the operator meant, and the configuration does not say.
 
 Silent when the top priority is shared. There is then no preferred master to fail to reclaim — firing once per tied member would state, twice and contradictorily, that each of them is the preferred one. `fhrp-priority-tie` is the finding for that group.
 
 **Reports:** {…} will not return to its preferred master
 
-**Detail:** {…} has the highest priority ({…}) but preempt is off, so after any failover the group stays on the backup indefinitely
+**Detail:** {…} has the highest priority ({…}) but {…}, so after any failover the group stays on the backup indefinitely{…}
 
-**Remedy:** enable preempt, or accept the placement is not deterministic
+**Remedy:** {…}
 
 **Stays silent when:**
 

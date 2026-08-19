@@ -34,6 +34,7 @@ from cassandra import art, baseline, coverage, visuals
 from cassandra.catalogue import RuleDoc, catalogue
 from cassandra.coverage import RuleCoverage
 from cassandra.factpack.builders.common import fhrp_instance
+from cassandra.factpack.schema import TimerSource
 from cassandra.findings import Finding, Severity, Tier
 from cassandra.style import STYLE
 
@@ -1068,10 +1069,13 @@ def _unread_html(unread: tuple[coverage.UnreadFact, ...], config_dir: str) -> st
     where = html.escape(config_dir) if config_dir else "these configs"
     return (
         f'<details class="device-group unread-facts"><summary>'
-        f"{len(unread)} facts read out of {where} that no check consults"
+        f"{len(unread)} facts read out of {where} that no check read"
         "</summary>"
-        f'<p class="cap">Each was parsed into the fact pack and no rule opens '
-        f"it. The number is how many records state it.</p>"
+        f'<p class="cap">Each was parsed into the fact pack and nothing above '
+        f"opened it on this run — either because no rule reads it at all, which "
+        f"is a check nobody has written, or because the only rule that does "
+        f"returned before it got there. The number is how many records state "
+        f"it.</p>"
         f"<ul>{items}</ul></details>"
     )
 
@@ -1136,6 +1140,11 @@ def _group_rows(pack: StaticFactPack, device: str) -> str:
             preempt = "no"
             if member.preempt:
                 preempt = f"after {delay // 1000}s" if delay else "immediately"
+            # A flag nobody wrote down reads the same as one somebody chose
+            # until the provenance is beside it, and the two are different
+            # things to be looking at when a group is not where it should be.
+            if member.preempt_source is not TimerSource.CONFIGURED:
+                preempt += f" ({member.preempt_source.value})"
             tracks = (
                 ", ".join(
                     f"{t.target or t.id} \u2212{t.decrement}"

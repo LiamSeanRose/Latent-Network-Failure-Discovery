@@ -20,7 +20,12 @@ from cassandra.app import analyse, compare_with, serve
 from cassandra.catalogue import catalogue, render_text
 from cassandra.factpack import discovery
 from cassandra.factpack.builders import build_fact_pack
-from cassandra.factpack.schema import StaticFactPack, TimerInventory, TimerScope
+from cassandra.factpack.schema import (
+    StaticFactPack,
+    TimerInventory,
+    TimerScope,
+    TimerSource,
+)
 from cassandra.facts import rules
 from cassandra.findings import Finding, Severity, locate
 from cassandra.report import as_json, render
@@ -155,13 +160,19 @@ def _timer_lines(timers: TimerInventory) -> list[str]:
     for heading, records, values_of in families:
         if not records:
             continue
+        # A record that states none of the values this prints is a record the
+        # parser made because something named the scope, and printing it as a
+        # scope with a source and nothing between them says only that the
+        # parser ran.
+        said = [(record, values_of(record)) for record in records]
+        said = [(record, stated) for record, stated in said if stated]
+        if not said:
+            continue
         lines.append(heading)
-        for record in records:
-            stated = values_of(record)
-            lines.append(
-                f"  {_scope(record.scope)}  {stated}  "
-                f"source={record.scope.source.value}".replace("   ", "  ")
-            )
+        lines += [
+            f"  {_scope(record.scope)}  {stated}  source={record.scope.source.value}"
+            for record, stated in said
+        ]
         lines.append("")
     return lines or ["no timers in these configs"]
 
@@ -206,9 +217,16 @@ def render_facts(pack: StaticFactPack, unparsed: dict[str, tuple[str, ...]]) -> 
             tracked = ", ".join(
                 f"{t.id}->{t.target} -{t.decrement}" for t in member.tracked_objects
             )
+            # Whether the flag was written down or inherited from the
+            # protocol's own default. A yes that nobody typed and a yes
+            # somebody chose are the same yes to a rule and two different
+            # sentences to a reader, which is why the pack carries both.
+            preempt = "yes" if member.preempt else "no"
+            if member.preempt_source is not TimerSource.CONFIGURED:
+                preempt += f"({member.preempt_source.value})"
             lines.append(
                 f"  {member.device}:{member.interface}  priority={member.priority}"
-                f"  preempt={'yes' if member.preempt else 'no'}"
+                f"  preempt={preempt}"
                 + (f"  tracks={tracked}" if tracked else "  tracks=none")
             )
     lines.append("")

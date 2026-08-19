@@ -689,11 +689,11 @@ def test_the_unread_list_reaches_the_full_report(
     whole_corpus: coverage.Assessment,
 ) -> None:
     rendered = coverage.render_text(whole_corpus.rules, whole_corpus.unread)
-    assert "read by no check" in rendered
+    assert "that no check read" in rendered
     assert "l2_segments" in rendered
     # And is absent from the report that was not asked for it, because the two
     # answer different questions and only one of them was requested.
-    assert "read by no check" not in coverage.render_text(whole_corpus.rules)
+    assert "that no check read" not in coverage.render_text(whole_corpus.rules)
 
 
 def test_assess_still_returns_only_the_rule_verdicts(

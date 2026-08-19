@@ -25,6 +25,7 @@ from cassandra.factpack.schema import (
     InterfaceKind,
     StaticFactPack,
     SwitchportMode,
+    TimerSource,
     TrackedObjectKind,
     VlanId,
     VrfName,
@@ -462,8 +463,17 @@ def preferred_master_will_not_reclaim(pack: StaticFactPack) -> Iterator[Finding]
     means the priorities in the configuration no longer describe where traffic
     is, and the next person to read them will be wrong about the current state.
 
-    Low severity because it is a defensible configuration. It is reported so the
-    choice is visible rather than assumed.
+    How it got that way changes what the finding means, and `preempt_source`
+    carries the difference. A line that says `no preempt` is a decision
+    somebody made, and this reports it so the decision is visible rather than
+    assumed. An HSRP group that simply never turned preemption on inherited the
+    protocol's default, and the priorities were very likely written by somebody
+    who believed the higher one would win — which is a different sentence, a
+    different remedy, and the commoner of the two.
+
+    Low either way. The group works; what is wrong is a belief about where it
+    will be. Raising the second case would be claiming to know which of the two
+    the operator meant, and the configuration does not say.
 
     Silent when the top priority is shared. There is then no preferred master to
     fail to reclaim — firing once per tied member would state, twice and
@@ -477,21 +487,44 @@ def preferred_master_will_not_reclaim(pack: StaticFactPack) -> Iterator[Finding]
         if sum(1 for m in group.members if m.priority == top) > 1:
             continue
         for member in group.members:
-            if member.priority == top and not member.preempt:
-                yield Finding(
-                    rule="fhrp-no-preempt-on-preferred",
-                    tier=Tier.FACTS,
-                    severity=Severity.LOW,
-                    device=member.device,
-                    change=dialect.fhrp_change(pack, group, member.device, "preempt"),
-                    title=f"{group.label} will not return to its preferred master",
-                    detail=f"{member.device} has the highest priority ({top}) but "
-                    f"preempt is off, so after any failover the group stays on the "
-                    f"backup indefinitely",
-                    evidence=(f"{member.device}:{member.interface}",),
-                    remedy="enable preempt, or accept the placement is not "
-                    "deterministic",
+            if member.priority != top or member.preempt:
+                continue
+            deliberate = member.preempt_source is TimerSource.CONFIGURED
+            how = (
+                "preempt is turned off on it"
+                if deliberate
+                else f"nothing turns preempt on and {group.protocol.value.upper()} "
+                f"defaults it off"
+            )
+            yield Finding(
+                rule="fhrp-no-preempt-on-preferred",
+                tier=Tier.FACTS,
+                severity=Severity.LOW,
+                device=member.device,
+                change=dialect.fhrp_change(pack, group, member.device, "preempt"),
+                title=f"{group.label} will not return to its preferred master",
+                detail=f"{member.device} has the highest priority ({top}) but "
+                f"{how}, so after any failover the group stays on the backup "
+                f"indefinitely"
+                + (
+                    ""
+                    if deliberate
+                    else " — the priorities say which device was meant to hold "
+                    "it and nothing makes that happen"
+                ),
+                evidence=(f"{member.device}:{member.interface}",),
+                # The same edit either way, because the positive form of the
+                # command is what cancels the negative one on every dialect
+                # here — so the suggested change is right in both cases and
+                # only the sentence around it moves.
+                remedy=(
+                    "accept that the placement is not deterministic, or turn "
+                    "preempt back on"
                 )
+                if deliberate
+                else "enable preempt, or lower this device's priority to the "
+                "one that is actually going to hold the group",
+            )
 
 
 # --------------------------------------------------------------------------

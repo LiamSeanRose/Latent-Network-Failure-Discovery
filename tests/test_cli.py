@@ -382,3 +382,52 @@ def test_the_help_text_names_the_commands_that_exist() -> None:
     assert "Phase 1" not in described
     for command in ("facts", "check", "report", "rules", "serve"):
         assert command in described
+
+
+def test_facts_says_whether_preempt_was_written_down(tmp_path: Path) -> None:
+    """`preempt=yes` for a flag somebody typed and for one the protocol
+    supplied is one word covering two situations.
+
+    They are the same yes to a rule that reads the flag and two different things
+    to be looking at when a group is not where the priorities say it should be,
+    so the pack carries the provenance and this prints it.
+    """
+    (tmp_path / "dist-1.cfg").write_text(
+        "hostname dist-1\n!\nvlan 14\n!\ninterface Vlan14\n"
+        " ip address 198.51.100.2 255.255.255.0\n"
+        " standby 14 ip 198.51.100.1\n"
+        " standby 14 priority 120\n!\n"
+    )
+    (tmp_path / "dist-2.cfg").write_text(
+        "hostname dist-2\n!\nvlan 14\n!\ninterface Vlan14\n"
+        " ip address 198.51.100.3 255.255.255.0\n"
+        " standby 14 ip 198.51.100.1\n"
+        " standby 14 priority 100\n"
+        " standby 14 preempt\n!\n"
+    )
+    pack, unparsed = build_fact_pack(tmp_path)
+    rendered = render_facts(pack, unparsed)
+    assert "preempt=no(platform-default)" in rendered
+    # The one that was written down carries no qualifier: the unadorned form is
+    # the configuration, and every annotation on it is something this tool
+    # supplied.
+    assert "preempt=yes\n" in rendered or "preempt=yes " in rendered
+    assert "preempt=yes(" not in rendered
+
+
+def test_facts_omits_a_timer_family_that_states_nothing(tmp_path: Path) -> None:
+    """A record whose every printed value is unset says only that the parser
+    ran, and a heading over a list of scopes with nothing beside them reads as
+    a family this tool failed at rather than one nobody configured."""
+    (tmp_path / "dist-1.cfg").write_text(
+        "hostname dist-1\n!\nvlan 14\n!\ninterface Vlan14\n"
+        " ip address 198.51.100.2 255.255.255.0\n"
+        " standby 14 ip 198.51.100.1\n"
+        " standby 14 priority 120\n!\n"
+    )
+    pack, unparsed = build_fact_pack(tmp_path)
+    assert pack.timers.fhrp, "the fixture no longer exercises the case"
+    assert not any(timer.hello_interval_ms for timer in pack.timers.fhrp)
+    rendered = render_facts(pack, unparsed)
+    assert "fhrp timers" not in rendered
+    assert "no timers in these configs" in rendered

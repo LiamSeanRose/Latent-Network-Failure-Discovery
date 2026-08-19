@@ -1119,7 +1119,7 @@ def test_the_catalogue_names_facts_no_check_consults(base_url: str) -> None:
     """
     examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
     body = get(f"{base_url}/rules?dir={quote(str(examples))}")[1]
-    assert "no check consults" in body
+    assert "that no check read" in body
     assert "l2_segments" in body
 
 
@@ -1130,5 +1130,5 @@ def test_the_catalogue_without_a_pack_claims_nothing_about_any_configs(
     unread, and a heading promising a list of them would be a claim about
     configs that were never opened."""
     body = get(f"{base_url}/rules")[1]
-    assert "no check consults" not in body
+    assert "that no check read" not in body
     assert "had something to look at" not in body

@@ -1099,13 +1099,19 @@ def _catalogued() -> tuple[RuleDoc, ...]:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class UnreadFact:
-    """One thing the parsers put in the pack that no rule ever looked at.
+    """One thing the parsers put in the pack that no rule read on this run.
 
     The rule side of this report answers "did this check have an input". This is
-    the same question from the other end — "does anything read this input" — and
+    the same question from the other end — "did anything read this input" — and
     the two are not the same. A pack can hand every rule something to look at and
     still carry a field that was parsed, tested, documented, and consulted by
     nothing, which is a check nobody has written yet rather than a check that ran.
+
+    Measured per run rather than declared, which is what makes it honest and
+    also what makes it narrower than it first reads. A field only one rule
+    consults, on a run where that rule returned before reaching it, is on this
+    list — correctly, because nothing looked at it, and the rule side of the
+    report is where that rule explains why.
     """
 
     path: str
@@ -1393,11 +1399,14 @@ def render_text(
         # wide one.
         labelled = max(len(fact.label) for fact in unread_facts)
         tail += [
-            f"{len(unread_facts)} facts these configs state are read by no check:",
+            f"{len(unread_facts)} facts these configs state that no check read:",
             *(f"  {fact.label:<{labelled}}  {fact.path}" for fact in unread_facts),
             "",
-            "Each is parsed, tested and in the pack, and no rule consults it. That",
-            "is a check nobody has written rather than a check that passed.",
+            "Each is parsed and in the pack, and nothing above opened it on this",
+            "run. Some are read by no rule at all — a check nobody has written",
+            "rather than a check that passed. Others are read only by a rule that",
+            "did not get far enough to ask, which is the line above saying the",
+            "same thing from the other end.",
             "",
         ]
     return "\n".join([*lines, *tail, summary(coverage)])
