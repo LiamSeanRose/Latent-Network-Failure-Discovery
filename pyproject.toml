@@ -4,6 +4,8 @@ version = "0.0.0"
 description = "Proactive discovery of latent, timing-dependent network failure modes"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = []
 keywords = [
     "network",

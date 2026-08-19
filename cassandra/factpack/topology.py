@@ -19,6 +19,9 @@ Derived here:
   that a cable joins them. Without layer-1 data it cannot distinguish two
   trunks facing each other from two trunks three hops apart, and it does not
   survive VLAN-id reuse across fabrics that are not connected to each other.
+  It is also pairwise, so a flat VLAN spanning n trunks produces n²/2 of them
+  and the `L2Segment` for that VLAN says the same thing in n. Ask the segment
+  who is in a broadcast domain; ask these pairs only who faces whom.
 
 Refused here, because config text does not contain it:
 
@@ -202,19 +205,23 @@ def _l2_adjacencies(devices: Sequence[Device]) -> tuple[L2Adjacency, ...]:
     Both ends must state an allowed list. A trunk that states none is the
     ambiguous case described in the module docstring and pairs with nothing.
     """
-    trunks = [
-        (ref, interface)
-        for ref, interface in _live(devices)
-        if interface.switchport_mode is SwitchportMode.TRUNK and interface.allowed_vlans
-    ]
+    trunks = sorted(
+        (
+            (ref, interface, frozenset(interface.allowed_vlans))
+            for ref, interface in _live(devices)
+            if interface.switchport_mode is SwitchportMode.TRUNK
+            and interface.allowed_vlans
+        ),
+        key=lambda trunk: _ref_key(trunk[0]),
+    )
     adjacencies: list[L2Adjacency] = []
-    for left, right in itertools.combinations(trunks, 2):
-        (a_ref, a), (b_ref, b) = sorted(
-            (left, right), key=lambda pair: _ref_key(pair[0])
-        )
+    # Every pair is considered, so the VLAN sets are built once each rather than
+    # once per pair, and sorting the trunks first means `combinations` already
+    # yields each pair in (a, b) order.
+    for (a_ref, a, a_vlans), (b_ref, b, b_vlans) in itertools.combinations(trunks, 2):
         if a_ref.device == b_ref.device:
             continue
-        shared = tuple(sorted(set(a.allowed_vlans) & set(b.allowed_vlans)))
+        shared = tuple(sorted(a_vlans & b_vlans))
         if not shared:
             continue
         adjacencies.append(
