@@ -386,3 +386,48 @@ def test_widened_rules_all_carry_a_remedy(tmp_path: Path) -> None:
         assert finding.remedy, f"{finding.rule} has no remedy"
         assert finding.tier is Tier.FACTS
         assert finding.device
+
+
+def test_access_vlan_not_declared_on_the_device(tmp_path: Path) -> None:
+    """The rule the fact pack could not previously support: VLANs were parsed
+    and thrown away, so nothing could check what a port referenced."""
+    (tmp_path / "sw.cfg").write_text(
+        "hostname sw\n"
+        "vlan 10\n"
+        "interface Ethernet1\n"
+        "   switchport mode access\n"
+        "   switchport access vlan 99\n"
+    )
+    pack, _ = build_fact_pack(tmp_path)
+    findings = {f.rule: f for f in evaluate(pack)}
+    assert "vlan-not-declared" in findings
+    assert "99" in findings["vlan-not-declared"].title
+
+
+def test_declared_access_vlan_is_silent(tmp_path: Path) -> None:
+    (tmp_path / "sw.cfg").write_text(
+        "hostname sw\n"
+        "vlan 10,99\n"
+        "interface Ethernet1\n"
+        "   switchport mode access\n"
+        "   switchport access vlan 99\n"
+    )
+    pack, _ = build_fact_pack(tmp_path)
+    assert "vlan-not-declared" not in rules_fired(pack)
+
+
+def test_svi_without_a_declared_vlan(tmp_path: Path) -> None:
+    (tmp_path / "sw.cfg").write_text(
+        "hostname sw\nvlan 10\ninterface Vlan20\n   ip address 10.20.0.1/24\n"
+    )
+    pack, _ = build_fact_pack(tmp_path)
+    assert "vlan-not-declared" in rules_fired(pack)
+
+
+def test_a_router_declaring_no_vlans_is_not_flagged(tmp_path: Path) -> None:
+    """A pure L3 device declares no VLANs and is doing nothing wrong."""
+    (tmp_path / "r.cfg").write_text(
+        "hostname r\ninterface Ethernet1\n   no switchport\n   ip address 10.0.0.1/31\n"
+    )
+    pack, _ = build_fact_pack(tmp_path)
+    assert "vlan-not-declared" not in rules_fired(pack)

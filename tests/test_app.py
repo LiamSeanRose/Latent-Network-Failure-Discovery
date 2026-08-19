@@ -116,8 +116,12 @@ def test_analyse_directory_is_the_same_engine_as_the_cli() -> None:
     assert {f.tier.value for f in findings} == {"timing"}
 
 
+# VLAN 99 is declared but carried by no trunk: exactly one planted defect.
+# It previously declared only VLAN 20, which meant the SVI also tripped
+# `vlan-not-declared` — a second, unintended finding that made the counts below
+# ambiguous about which defect they were counting.
 MIXED_EXTRA: Final = """hostname edge1
-vlan 20
+vlan 20,99
 interface Ethernet1
    switchport mode trunk
    switchport trunk allowed vlan 20

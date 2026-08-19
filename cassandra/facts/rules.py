@@ -653,3 +653,46 @@ def evaluate(pack: StaticFactPack) -> list[Finding]:
 
 def group_summary(group: FhrpGroup) -> str:
     return f"{group.protocol.value} {group.group_number}"
+
+
+@rule
+def vlan_used_but_not_declared(pack: StaticFactPack) -> Iterator[Finding]:
+    """A port assigned to a VLAN the device never creates.
+
+    On most platforms the port stays down or blackholes rather than erroring, so
+    the config reads as correct and the traffic goes nowhere. Only devices that
+    declare VLANs at all are checked — a pure L3 router declares none and is not
+    doing anything wrong.
+    """
+    for device in pack.devices:
+        declared = {vlan.vlan_id for vlan in pack.vlans if vlan.device == device.id}
+        if not declared:
+            continue
+        for interface in device.interfaces:
+            used: list[tuple[int, str]] = []
+            if interface.access_vlan is not None:
+                used.append((interface.access_vlan, "access VLAN"))
+            if interface.name.startswith("Vlan"):
+                suffix = interface.name.removeprefix("Vlan")
+                if suffix.isdigit():
+                    used.append((int(suffix), "SVI"))
+            for vlan_id, kind in used:
+                if vlan_id in declared:
+                    continue
+                yield Finding(
+                    rule="vlan-not-declared",
+                    tier=Tier.FACTS,
+                    severity=Severity.HIGH,
+                    device=device.id,
+                    title=f"{interface.name} uses VLAN {vlan_id}, which "
+                    f"{device.id} does not declare",
+                    detail=f"the {kind} references a VLAN that is not created on "
+                    f"this device, so the port does not forward and the "
+                    f"configuration still reads as correct",
+                    evidence=(
+                        f"{device.id}:{interface.name}",
+                        "declared: " + ", ".join(str(v) for v in sorted(declared)),
+                    ),
+                    remedy=f"add `vlan {vlan_id}` to {device.id}, or point the "
+                    f"interface at a VLAN that exists",
+                )

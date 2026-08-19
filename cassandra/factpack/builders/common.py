@@ -18,6 +18,7 @@ from cassandra.factpack.schema import (
     FhrpTimers,
     InterfaceKind,
     TrackedObject,
+    Vlan,
 )
 
 _KINDS: Final = (
@@ -103,3 +104,22 @@ class ParsedDevice:
     tracked: tuple[TrackedObject, ...]
     timers: tuple[FhrpTimers, ...]
     unparsed_lines: tuple[str, ...]
+    vlans: tuple[Vlan, ...] = ()
+
+
+def declared_vlans_from(device: str, stanza: Stanza) -> list[Vlan]:
+    """`vlan 10,20` plus an optional indented `name`, which only binds when the
+    stanza declares exactly one id."""
+    ids = vlan_list(stanza.header.split(None, 1)[1])
+    name = next(
+        (
+            line.split(None, 1)[1]
+            for line in stanza.body
+            if line.startswith("name ") and len(line.split(None, 1)) == 2
+        ),
+        None,
+    )
+    return [
+        Vlan(device=device, vlan_id=vid, name=name if len(ids) == 1 else None)
+        for vid in ids
+    ]

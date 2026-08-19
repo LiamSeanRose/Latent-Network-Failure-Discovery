@@ -34,6 +34,7 @@ from typing import Final
 
 from cassandra.factpack.builders.common import (
     ParsedDevice,
+    declared_vlans_from,
     interface_kind,
     seconds_to_ms,
     vlan_list,
@@ -54,6 +55,7 @@ from cassandra.factpack.schema import (
     TimerSource,
     TrackedObject,
     TrackedObjectKind,
+    Vlan,
 )
 
 # An indented `hsrp <n>` block header is the decisive marker: neither IOS nor EOS
@@ -145,6 +147,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
     fhrp: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
     timers: list[FhrpTimers] = []
     unparsed: list[str] = []
+    declared_vlans: list[Vlan] = []
 
     for block in _blocks(text.splitlines()):
         header = block.header
@@ -154,7 +157,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
             continue
 
         if m := re.fullmatch(r"vlan (\S+)", header):
-            vlan_list(m.group(1))
+            declared_vlans.extend(declared_vlans_from(hostname, block))
             continue
 
         # `track 1 interface Ethernet1/1 line-protocol`
@@ -200,6 +203,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
         tracked=tuple(tracked),
         timers=tuple(timers),
         unparsed_lines=tuple(unparsed),
+        vlans=tuple(declared_vlans),
     )
 
 

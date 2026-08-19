@@ -16,6 +16,7 @@ import re
 
 from cassandra.factpack.builders.common import (
     ParsedDevice,
+    declared_vlans_from,
     interface_kind,
     netmask_to_prefix_length,
     seconds_to_ms,
@@ -37,6 +38,7 @@ from cassandra.factpack.schema import (
     TimerSource,
     TrackedObject,
     TrackedObjectKind,
+    Vlan,
 )
 
 # `standby` is the giveaway; so is a netmask-form address. Either is enough to
@@ -66,6 +68,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
     fhrp: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
     timers: list[FhrpTimers] = []
     unparsed: list[str] = []
+    declared_vlans: list[Vlan] = []
 
     for stanza in stanzas(text):
         header = stanza.header
@@ -75,7 +78,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
             continue
 
         if m := re.fullmatch(r"vlan (\S+)", header):
-            vlan_list(m.group(1))
+            declared_vlans.extend(declared_vlans_from(hostname, stanza))
             continue
 
         # `track 1 interface GigabitEthernet0/0 line-protocol`
@@ -119,6 +122,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> ParsedDevice:
         tracked=tuple(tracked),
         timers=tuple(timers),
         unparsed_lines=tuple(unparsed),
+        vlans=tuple(declared_vlans),
     )
 
 

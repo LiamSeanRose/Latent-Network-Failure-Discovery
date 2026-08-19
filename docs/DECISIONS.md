@@ -54,6 +54,31 @@ operation, so there is no second route.
 
 ---
 
+## 2026-08-19 — VLAN declarations reach the fact pack
+
+**Context:** all three parsers matched `vlan 10,20` and threw the result away. IOS and NX-OS
+called `vlan_list()` and discarded the return value outright — a no-op the linter had no reason
+to flag. `StaticFactPack.vlans` had existed since the schema was written and was never once
+populated, so any rule about VLAN membership was unwritable. A parallel worker hit exactly that
+wall and said so.
+
+**Chosen:** capture declarations in `common.declared_vlans_from()`, shared by all three
+dialects, including the indented `name` when a stanza declares a single id. Collected into the
+pack alongside the timer families.
+
+**What it unlocked immediately:** `vlan-not-declared` — a port or SVI referencing a VLAN its own
+device never creates. The port does not forward and the configuration still reads as correct,
+which is the shape of defect this tool exists for.
+
+**It found one on its first run.** The web view's own test fixture declared VLAN 20 and carried
+an SVI for VLAN 99, so the rule fired on a fixture that claimed to contain exactly one planted
+defect. The fixture was corrected rather than the count, because a fixture that quietly holds
+two defects makes every assertion about it ambiguous.
+
+**Reversal:** the capture is one helper and one field; the rule is independent of it.
+
+---
+
 ## 2026-08-19 — FHRP groups are keyed by subnet, not by number alone
 
 **Context:** found by one of the parallel workers while writing rules, and confirmed by

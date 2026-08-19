@@ -20,6 +20,7 @@ from typing import Final
 
 from cassandra.factpack.builders.common import (
     ParsedDevice,
+    declared_vlans_from,
     interface_kind,
     seconds_to_ms,
     stanzas,
@@ -45,6 +46,7 @@ from cassandra.factpack.schema import (
     TimerSource,
     TrackedObject,
     TrackedObjectKind,
+    Vlan,
 )
 
 SCHEMA_VERSION: Final = 1
@@ -124,7 +126,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
     igp_hello: list[IgpHelloTimers] = []
     dampening: list[DampeningProfile] = []
     unparsed: list[str] = []
-    vlans: set[int] = set()
+    declared_vlans: list[Vlan] = []
 
     # Resolved once every interface is known: a BGP peer address names a session
     # by subnet, and `bfd default` names every session on the device.
@@ -139,7 +141,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
             continue
 
         if m := re.fullmatch(r"vlan (\S+)", header):
-            vlans.update(vlan_list(m.group(1)))
+            declared_vlans.extend(declared_vlans_from(hostname, stanza))
             continue
 
         # EOS: `track <name> interface <intf> line-protocol`
@@ -228,6 +230,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
         tracked=tuple(tracked),
         timers=tuple(timers),
         unparsed_lines=tuple(unparsed),
+        vlans=tuple(declared_vlans),
         bfd=tuple(bfd),
         igp_hello=tuple(igp_hello),
         dampening=tuple(dampening),

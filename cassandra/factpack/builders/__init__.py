@@ -31,6 +31,7 @@ from cassandra.factpack.schema import (
     StaticFactPack,
     TimerInventory,
     TrackedObject,
+    Vlan,
 )
 
 SCHEMA_VERSION: Final = 1
@@ -73,6 +74,7 @@ def build_fact_pack(
     bfd_timers: list[BfdTimers] = []
     igp_timers: list[IgpHelloTimers] = []
     dampening: list[DampeningProfile] = []
+    vlans: list[Vlan] = []
     unparsed: dict[str, tuple[str, ...]] = {}
     digest = hashlib.sha256()
 
@@ -85,6 +87,7 @@ def build_fact_pack(
         bfd_timers.extend(getattr(parsed, "bfd", ()))
         igp_timers.extend(getattr(parsed, "igp_hello", ()))
         dampening.extend(getattr(parsed, "dampening", ()))
+        vlans.extend(parsed.vlans)
         unparsed[parsed.device.id] = parsed.unparsed_lines
 
         # Tracked objects are defined at top level; join them to the groups that
@@ -126,6 +129,7 @@ def build_fact_pack(
             device_count=len(devices),
         ),
         devices=tuple(devices),
+        vlans=tuple(vlans),
         fhrp_groups=tuple(
             FhrpGroup(
                 id=_group_id(key, groups),
