@@ -280,3 +280,30 @@ def test_a_knife_edge_result_does_not_survive_perturbation() -> None:
     for finding in sequences.analyse(pack):
         if finding.rule == "fhrp-divergence":
             assert "held in 3 of 3" in " ".join(finding.evidence)
+
+
+def test_two_groups_chasing_say_why_their_triggers_differ() -> None:
+    """Two oscillation findings on one device differ only by a number in the
+    trigger, which reads as the same finding printed twice.
+
+    The reason they differ is each group's own preempt delay, so each finding
+    names it.
+    """
+    pack, _ = build_fact_pack(CORPUS)
+    chasing = [f for f in sequences.analyse(pack) if f.rule == "fhrp-oscillation"]
+    assert len(chasing) >= 2, "the corpus should produce more than one"
+    assert any("no preempt delay" in f.detail for f in chasing)
+    assert any("waits 90s before preempting" in f.detail for f in chasing)
+
+
+def test_the_fix_does_not_tell_you_to_add_what_you_have() -> None:
+    """Telling someone to add a preempt delay they already configured is the
+    fastest way to lose them."""
+    pack, _ = build_fact_pack(CORPUS)
+    for finding in sequences.analyse(pack):
+        if finding.rule != "fhrp-oscillation":
+            continue
+        if "waits" in finding.detail:
+            assert "raise the preempt delay" in (finding.remedy or "")
+        else:
+            assert "add a preempt delay" in (finding.remedy or "")

@@ -978,11 +978,13 @@ Reported past MIN_TRANSITIONS, which is high enough that the one handover a genu
 
 Silent unless the chasing survives the flap interval being twenty percent either side, and silent if the group moves that often with no events at all.
 
+The finding names the group's own preempt delay, because two groups on one device can both chase and need different flap intervals to do it — and without the delays written down, two findings whose only visible difference is a number in the trigger look like the same finding printed twice.
+
 **Reports:** {…} changes master {…} times under a single flap sequence
 
-**Detail:** each transition is a forwarding interruption for everything using that gateway
+**Detail:** each transition is a forwarding interruption for everything using that gateway{…}
 
-**Remedy:** add a preempt delay so the group does not chase a flapping interface
+**Remedy:** {…}
 
 **Stays silent when:**
 

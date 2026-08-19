@@ -193,6 +193,7 @@ def _oscillation(
     trigger: str,
     events: tuple[Event, ...],
     held: int = PERTURBED_RUNS,
+    delay_ms: int = 0,
 ) -> Finding:
     """A group that changes master repeatedly while one interface flaps.
 
@@ -207,6 +208,11 @@ def _oscillation(
 
     Silent unless the chasing survives the flap interval being twenty percent
     either side, and silent if the group moves that often with no events at all.
+
+    The finding names the group's own preempt delay, because two groups on one
+    device can both chase and need different flap intervals to do it — and
+    without the delays written down, two findings whose only visible difference
+    is a number in the trigger look like the same finding printed twice.
     """
     return Finding(
         rule="fhrp-oscillation",
@@ -216,10 +222,24 @@ def _oscillation(
         title=f"{labels[group_id]} changes master {moves} times under a single "
         f"flap sequence",
         detail="each transition is a forwarding interruption for everything "
-        "using that gateway",
+        "using that gateway"
+        + (
+            f"; this group waits {delay_ms // 1000}s before preempting, so it "
+            f"chases flaps spaced further apart than that"
+            if delay_ms
+            else "; this group has no preempt delay, so it follows the "
+            "interface immediately"
+        ),
         trigger=trigger,
         evidence=(*(e.describe() for e in events), _control_note(held)),
-        remedy="add a preempt delay so the group does not chase a flapping interface",
+        remedy=(
+            f"raise the preempt delay past {delay_ms // 1000}s, or damp the "
+            f"interface so it stops flapping"
+            if delay_ms
+            # Telling someone to add a delay they already have is the fastest
+            # way to lose them.
+            else "add a preempt delay so the group does not chase a flapping interface"
+        ),
     )
 
 
@@ -233,6 +253,27 @@ def _intervals_around(up_ms: int) -> tuple[int, ...]:
     low = max(DEFAULT_ADVERT_MS, round(up_ms * (1 - PERTURBATION)))
     high = round(up_ms * (1 + PERTURBATION))
     return (up_ms, low, high)
+
+
+def _preempt_delays(pack: StaticFactPack) -> dict[str, int]:
+    """The longest preempt delay configured on each group, in milliseconds.
+
+    Group ids are per subnet; timer records are per device and interface. The
+    longest wins because it is the one that decides how far apart flaps have to
+    be before the group stops chasing them.
+    """
+    by_interface: dict[tuple[str, str | None], int] = {}
+    for timer in pack.timers.fhrp:
+        if timer.preempt_delay_ms:
+            key = (timer.scope.device, timer.scope.interface)
+            by_interface[key] = max(by_interface.get(key, 0), timer.preempt_delay_ms)
+    delays: dict[str, int] = {}
+    for group in pack.fhrp_groups:
+        for member in group.members:
+            found = by_interface.get((member.device, member.interface))
+            if found:
+                delays[group.id] = max(delays.get(group.id, 0), found)
+    return delays
 
 
 def _run(
@@ -283,6 +324,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
         for group in pack.fhrp_groups
     }
     on_device = _groups_by_device(pack)
+    delays = _preempt_delays(pack)
 
     for device, interfaces in sorted(_tracked_interfaces(pack).items()):
         # Only groups this device is a member of can move when this device's
@@ -368,6 +410,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                                 trigger=trigger,
                                 events=events,
                                 held=held,
+                                delay_ms=delays.get(group_id, 0),
                             )
                         )
     return findings
