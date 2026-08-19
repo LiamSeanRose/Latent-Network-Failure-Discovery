@@ -380,10 +380,7 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
     """
     findings: list[Finding] = []
     seen: set[tuple[str, str, str]] = set()
-    labels = {
-        group.id: f"{group.protocol.value.upper()} {group.group_number}"
-        for group in pack.fhrp_groups
-    }
+    labels = {group.id: group.label for group in pack.fhrp_groups}
     on_device = _groups_by_device(pack)
     delays = _preempt_delays(pack)
     interfaces_of = _device_interfaces(pack)

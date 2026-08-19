@@ -28,14 +28,13 @@ from typing import Final
 # import order load-bearing.
 from cassandra.factpack import discovery, topology
 from cassandra.factpack.builders import eos, ios, nxos
-from cassandra.factpack.builders.common import ParsedDevice
+from cassandra.factpack.builders.common import ParsedDevice, assemble_fhrp_groups
 from cassandra.factpack.schema import (
     BfdTimers,
     BgpProcess,
     DampeningProfile,
     Device,
     FactPackMeta,
-    FhrpGroup,
     FhrpMember,
     FhrpProtocol,
     FhrpTimers,
@@ -43,7 +42,6 @@ from cassandra.factpack.schema import (
     Interface,
     StaticFactPack,
     TimerInventory,
-    TrackedObject,
     Vlan,
 )
 
@@ -89,14 +87,7 @@ def build_fact_pack(
     Returns the pack and, per device, the lines no parser accounted for.
     """
     devices: list[Device] = []
-    # Keyed by subnet as well as number. An FHRP group number is scoped to its
-    # segment: VRRP 1 on 10.10.0.0/24 and VRRP 1 on 10.20.0.0/24 are different
-    # groups, and merging them loses one virtual address and invents members,
-    # which produced false "virtual address outside its own subnet" findings on
-    # entirely valid configuration.
-    GroupKey = tuple[FhrpProtocol, int, str]
-    groups: dict[GroupKey, list[FhrpMember]] = {}
-    virtuals: dict[GroupKey, str | None] = {}
+    parsed_devices: list[ParsedDevice] = []
     fhrp_timers: list[FhrpTimers] = []
     # Dialects attach these on their own record type; getattr keeps the
     # collector working for any dialect that does not carry a given family.
@@ -132,6 +123,7 @@ def build_fact_pack(
 
     for parsed in _with_unique_ids(parsed_files, notes):
         devices.append(parsed.device)
+        parsed_devices.append(parsed)
         fhrp_timers.extend(parsed.timers)
         bfd_timers.extend(getattr(parsed, "bfd", ()))
         igp_timers.extend(getattr(parsed, "igp_hello", ()))
@@ -139,36 +131,6 @@ def build_fact_pack(
         vlans.extend(parsed.vlans)
         bgp.extend(getattr(parsed, "bgp", ()))
         unparsed[parsed.device.id] = parsed.unparsed_lines
-
-        # Tracked objects are defined at top level; join them to the groups that
-        # reference them, or a decrement has nothing to watch.
-        targets = {tracked.id: tracked.target for tracked in parsed.tracked}
-        subnets = {
-            interface.name: _first_network(interface)
-            for interface in parsed.device.interfaces
-        }
-        for number, protocol, member, interface_name, virtual in parsed.fhrp:
-            key: GroupKey = (protocol, number, subnets.get(interface_name) or "")
-            groups.setdefault(key, []).append(
-                FhrpMember(
-                    device=member.device,
-                    interface=member.interface,
-                    priority=member.priority,
-                    preempt=member.preempt,
-                    tracked_objects=tuple(
-                        TrackedObject(
-                            id=obj.id,
-                            device=obj.device,
-                            kind=obj.kind,
-                            target=targets.get(obj.id, ""),
-                            decrement=obj.decrement,
-                        )
-                        for obj in member.tracked_objects
-                    ),
-                    config_line=member.config_line,
-                )
-            )
-            virtuals.setdefault(key, virtual)
 
     for note in notes:
         warnings.warn(note, discovery.ConfigDiscoveryWarning, stacklevel=2)
@@ -186,20 +148,10 @@ def build_fact_pack(
         vlans=tuple(vlans),
         **topology.derive(devices, vlans),
         bgp=tuple(bgp),
-        fhrp_groups=tuple(
-            FhrpGroup(
-                id=_group_id(key, groups),
-                protocol=key[0],
-                group_number=key[1],
-                members=tuple(members),
-                virtual_ipv4=virtuals[key],
-                subnet=key[2] or None,
-            )
-            for key, members in sorted(
-                groups.items(),
-                key=lambda item: (item[0][0].value, item[0][1], item[0][2]),
-            )
-        ),
+        # Assembly lives with the parsers because it is a parsing concern: a
+        # group's identity includes its address family, and only the record the
+        # parser produced knows which family a membership belongs to.
+        fhrp_groups=assemble_fhrp_groups(parsed_devices),
         timers=TimerInventory(
             fhrp=tuple(fhrp_timers),
             bfd=tuple(bfd_timers),
@@ -296,9 +248,12 @@ def _renamed(parsed: ParsedDevice, device_id: str) -> ParsedDevice:
         ),
         "timers": tuple(_rescoped(timer, device_id) for timer in parsed.timers),
         "vlans": tuple(replace(vlan, device=device_id) for vlan in parsed.vlans),
-        "fhrp": tuple(
-            (number, protocol, _member_of(member, device_id), interface, virtual)
-            for number, protocol, member, interface, virtual in parsed.fhrp
+        # The membership carries the device id, and so does every tracked
+        # object hanging off it. A half-renamed device leaves its groups
+        # answering to a name it no longer has.
+        "fhrp_records": tuple(
+            replace(record, member=_member_of(record.member, device_id))
+            for record in parsed.fhrp_records
         ),
     }
     for family in ("bfd", "igp_hello", "dampening"):

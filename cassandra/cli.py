@@ -52,10 +52,7 @@ def render_facts(pack: StaticFactPack, unparsed: dict[str, tuple[str, ...]]) -> 
         lines.append("")
 
     for group in pack.fhrp_groups:
-        lines.append(
-            f"fhrp {group.protocol.value} group={group.group_number} "
-            f"virtual={group.virtual_ipv4}"
-        )
+        lines.append(f"fhrp {group.label} virtual={group.virtual_address}")
         for member in group.members:
             tracked = ", ".join(
                 f"{t.id}->{t.target} -{t.decrement}" for t in member.tracked_objects

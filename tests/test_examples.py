@@ -20,10 +20,10 @@ from typing import Final
 
 import pytest
 
-from cassandra import baseline
+from cassandra import baseline, coverage
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.facts import rules
-from cassandra.findings import Finding, Severity, Tier
+from cassandra.findings import Finding, Severity, Tier, locate
 from cassandra.timing import sequences, timer_rules
 
 CORPUS: Final = Path(__file__).resolve().parents[1] / "examples" / "two-site"
@@ -47,9 +47,17 @@ EXPECTED_TOTAL: Final = 7
 
 
 def evaluate(config_dir: Path) -> list[Finding]:
-    """Every tier, in the order `cassandra check` runs them."""
+    """Every tier, in the order `cassandra check` runs them.
+
+    `locate` is part of that order: the `source:` line the tutorial explains is
+    attached here rather than by the rules, so a test that skipped it would be
+    checking something the reader never sees.
+    """
     pack, _ = build_fact_pack(config_dir)
-    return rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack)
+    findings = (
+        rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack)
+    )
+    return locate(findings, pack)
 
 
 def identities(findings: list[Finding]) -> set[tuple[str, str, Severity]]:
@@ -60,12 +68,21 @@ def rules_fired(findings: list[Finding]) -> set[str]:
     return {f.rule for f in findings}
 
 
-def edit(path: Path, before: str, after: str) -> None:
-    """Apply one of the tutorial's edits, or fail saying which one drifted."""
+def edit(path: Path, before: str, after: str, *, occurrences: int = 1) -> None:
+    """Apply one of the tutorial's edits, or fail saying which one drifted.
+
+    `occurrences` is checked rather than assumed. A reader following the
+    tutorial edits the stanza in front of them; a blind `str.replace` reaches
+    every match, and an anchor that quietly starts matching one line too many
+    builds a config nobody was told to write. That happened once already —
+    `interface Vlan20` also matches `passive-interface Vlan20` — and it took an
+    `unparsed` line to notice, so the count is asserted here instead.
+    """
     text = path.read_text()
-    assert before in text, (
-        f"{path.name} no longer contains the text docs/TUTORIAL.md tells the "
-        f"reader to change:\n{before}"
+    found = text.count(before)
+    assert found == occurrences, (
+        f"{path.name} contains {found} copies of the text docs/TUTORIAL.md "
+        f"tells the reader to change, not {occurrences}:\n{before}"
     )
     path.write_text(text.replace(before, after))
 
@@ -84,6 +101,7 @@ def fix_the_trunk(corpus: Path) -> None:
         corpus / "north" / "north-acc1.cfg",
         "   switchport trunk allowed vlan 10,99",
         "   switchport trunk allowed vlan 10,20,99",
+        occurrences=2,
     )
 
 
@@ -115,10 +133,12 @@ def add_the_new_vlan(corpus: Path) -> None:
         # Anchored to column zero: the same digits appear in the trunk lines,
         # and this edit must reach only the VLAN declaration.
         edit(path, "\nvlan 10,20,99\n", "\nvlan 10,20,21,99\n")
+        # The leading `!` is load-bearing: `interface Vlan20` on its own also
+        # matches the `passive-interface Vlan20` line in the OSPF stanza.
         edit(
             path,
-            "interface Vlan20\n",
-            "interface Vlan21\n"
+            "!\ninterface Vlan20\n",
+            "!\ninterface Vlan21\n"
             "   description second voice range\n"
             f"   ip address 10.21.0.{last_octet}/24\n"
             "!\n"
@@ -134,6 +154,7 @@ def trunk_the_new_vlan(corpus: Path) -> None:
             path,
             "   switchport trunk allowed vlan 10,20,99",
             "   switchport trunk allowed vlan 10,20,21,99",
+            occurrences=2,
         )
     edit(
         corpus / "north" / "north-acc1.cfg",
@@ -167,6 +188,70 @@ def test_every_line_of_the_corpus_is_understood() -> None:
     """Section 1 tells the reader this corpus has no `unparsed` section."""
     _, unparsed = build_fact_pack(CORPUS)
     assert not {device: rest for device, rest in unparsed.items() if rest}
+
+
+def test_the_tutorials_edits_leave_a_corpus_that_still_parses(corpus: Path) -> None:
+    """Every state the reader is walked through, checked for unparsed lines.
+
+    A tutorial edit that lands in the wrong stanza can still produce the
+    findings the document quotes and leave a config nobody was told to write.
+    The only trace is a line the parser could not place, so that is what this
+    looks for, after each edit rather than only at the end.
+    """
+    for step in (
+        fix_the_trunk,
+        fix_the_bgp_session,
+        fix_the_divergence,
+        add_the_new_vlan,
+        trunk_the_new_vlan,
+    ):
+        step(corpus)
+        _, unparsed = build_fact_pack(corpus)
+        leftovers = {device: rest for device, rest in unparsed.items() if rest}
+        assert not leftovers, f"{step.__name__} left {leftovers}"
+
+
+def test_every_finding_says_which_file_it_came_from() -> None:
+    """Section 3 explains the `source:` line, so every finding must have one."""
+    findings = evaluate(CORPUS)
+    assert all(f.source is not None for f in findings)
+    by_rule = {f.rule: f.source for f in findings}
+    # The document quotes this one with a line number and explains that a
+    # finding about two devices at once carries a file and no line.
+    assert by_rule["access-vlan-not-trunked"].file == "north/north-acc1.cfg"
+    assert by_rule["access-vlan-not-trunked"].line is not None
+    assert by_rule["bgp-session-one-sided"].line is None
+
+
+def test_every_timing_finding_records_the_falsification_controls() -> None:
+    """Section 6 reads the last evidence line as a claim about the controls."""
+    timing = [f for f in evaluate(CORPUS) if f.tier is Tier.TIMING]
+    assert timing
+    for found in timing:
+        assert found.evidence[-1].startswith("held in 3 of 3 runs at")
+        assert "absent with no events" in found.evidence[-1]
+
+
+def test_the_two_oscillations_differ_in_trigger_and_in_remedy() -> None:
+    """Section 6 makes a point of the two not being one finding twice."""
+    a, b = [f for f in evaluate(CORPUS) if f.rule == "fhrp-oscillation"]
+    assert a.title != b.title
+    assert a.trigger != b.trigger
+    assert a.detail != b.detail
+    assert a.remedy != b.remedy
+
+
+def test_thirteen_of_forty_one_checks_are_inert_on_this_corpus() -> None:
+    """Section 8 quotes both numbers and names what the inert ones wanted."""
+    pack, _ = build_fact_pack(CORPUS)
+    assessed = coverage.assess(pack)
+    assert len(assessed) == 41
+    assert len(coverage.inert(assessed)) == 13
+    # Nothing here configures BFD, so every check that reads a BFD timer is
+    # inert for that reason and not because a device happened to be clean.
+    inert = {c.rule: c.reason for c in coverage.inert(assessed)}
+    assert inert["bfd-no-clients"] == "no BFD timers in these configs"
+    assert "mtu-mismatch" in inert
 
 
 def test_the_corpus_is_six_devices_across_a_nested_tree() -> None:
@@ -250,3 +335,30 @@ def test_the_new_vlan_is_two_new_findings_against_a_baseline(
     assert len(healed.unchanged) == 4
     # The configs did change, which is the distinction the diff footer draws.
     assert trunked.meta.config_digest != before.digest
+
+
+def test_the_fixed_direction_against_the_shipped_corpus(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """Section 7's last run: what a baseline taken before the fixes reports."""
+    shipped, _ = build_fact_pack(CORPUS)
+    recorded = tmp_path / "shipped.json"
+    baseline.save(evaluate(CORPUS), shipped, recorded)
+
+    fix_the_trunk(corpus)
+    fix_the_bgp_session(corpus)
+    fix_the_divergence(corpus)
+    add_the_new_vlan(corpus)
+    trunk_the_new_vlan(corpus)
+
+    pack, _ = build_fact_pack(corpus)
+    diff = baseline.compare(
+        baseline.load(recorded), baseline.snapshot(evaluate(corpus), pack)
+    )
+    assert not diff.new
+    assert {f.rule for f in diff.fixed} == {
+        "access-vlan-not-trunked",
+        "bgp-session-one-sided",
+        "fhrp-divergence",
+    }
+    assert len(diff.unchanged) == 4

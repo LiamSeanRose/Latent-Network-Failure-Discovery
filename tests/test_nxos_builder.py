@@ -151,7 +151,19 @@ def parsed() -> ParsedDevice:
 
 
 def group(parsed: ParsedDevice, number: int) -> tuple:
-    return next(entry for entry in parsed.fhrp if entry[0] == number)
+    """One group's record, in the positional shape these tests read.
+
+    The parsers carry an `FhrpRecord` now, because a group's identity includes
+    its address family. This keeps the tests below reading the way they did.
+    """
+    record = next(entry for entry in parsed.fhrp_records if entry.number == number)
+    return (
+        record.number,
+        record.protocol,
+        record.member,
+        record.interface,
+        record.virtual,
+    )
 
 
 def hsrp(body: str, *, interface: str = "Vlan14") -> ParsedDevice:
@@ -297,7 +309,7 @@ def test_bare_switchport_is_an_access_port() -> None:
 
 
 def test_hsrp_is_read_out_of_its_sub_block(parsed: ParsedDevice) -> None:
-    numbers = {entry[0] for entry in parsed.fhrp}
+    numbers = {record.number for record in parsed.fhrp_records}
     assert numbers == {14, 24}
 
     _, protocol, member, interface, virtual = group(parsed, 14)
@@ -365,7 +377,9 @@ def test_two_groups_on_one_interface_stay_separate() -> None:
         "  hsrp 14\n    ip 10.14.0.1\n    priority 110\n"
         "  hsrp 15\n    ip 10.14.0.9\n    priority 90\n"
     )
-    priorities = {entry[0]: entry[2].priority for entry in parsed.fhrp}
+    priorities = {
+        record.number: record.member.priority for record in parsed.fhrp_records
+    }
     assert priorities == {14: 110, 15: 90}
     assert parsed.unparsed_lines == ()
 

@@ -79,7 +79,7 @@ def test_the_facts_still_come_through_the_noise() -> None:
     assert [v.vlan_id for v in parsed.vlans] == [10]
     names = {i.name for i in parsed.device.interfaces}
     assert "Vlan10" in names
-    assert parsed.fhrp, "the VRRP group was lost in the noise"
+    assert parsed.fhrp_records, "the VRRP group was lost in the noise"
 
 
 def test_an_unrecognised_interface_line_is_still_reported() -> None:

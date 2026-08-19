@@ -19,10 +19,15 @@ from dataclasses import dataclass, replace
 from typing import Final
 
 from cassandra.factpack.builders.common import (
+    FhrpRecord,
     ParsedDevice,
     Stanza,
+    configured_families,
     declared_vlans_from,
+    fhrp_instance,
     interface_kind,
+    ipv6_assignment,
+    ipv6_states_no_subnet,
     is_out_of_scope,
     seconds_to_ms,
     stanzas,
@@ -81,9 +86,10 @@ _DAMPENING_KEYS: Final = {
 # Lines that carry no fact this tool reads. Matched to keep `unparsed_lines`
 # meaningful — a long list of `end` and `!` would hide the constructs that matter.
 _UNINTERESTING: Final = re.compile(
-    r"^(end|!.*|no ip routing|ip routing|spanning-tree portfast|"
+    r"^(end|!.*|(no )?ip routing|(no )?ipv6 unicast-routing|spanning-tree portfast|"
     r"router ospf .*|\s*(network|router-id|passive-interface|max-lsa) .*|"
-    r"\s*ip ospf network .*|\s*description .*|\s*no switchport)$"
+    r"\s*ip ospf network .*|\s*description .*|\s*no switchport|"
+    r"\s*(no )?ipv6 enable|\s*ipv6 nd .*)$"
 )
 
 
@@ -128,7 +134,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
     hostname = device_id or "unknown"
     interfaces: list[Interface] = []
     tracked: list[TrackedObject] = []
-    fhrp: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
+    fhrp: list[FhrpRecord] = []
     timers: list[FhrpTimers] = []
     bfd: list[BfdTimers] = []
     igp_hello: list[IgpHelloTimers] = []
@@ -248,7 +254,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
     )
     return EosDevice(
         device=device,
-        fhrp=tuple(fhrp),
+        fhrp_records=tuple(fhrp),
         tracked=tuple(tracked),
         timers=tuple(timers),
         unparsed_lines=tuple(unparsed),
@@ -403,7 +409,7 @@ def _parse_interface(
     device: str, name: str, stanza: Stanza
 ) -> tuple[
     Interface,
-    list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]],
+    list[FhrpRecord],
     list[FhrpTimers],
     list[BfdTimers],
     list[IgpHelloTimers],
@@ -462,6 +468,11 @@ def _parse_interface(
                     secondary=bool(m.group(3)),
                 )
             )
+        elif m := re.fullmatch(r"ipv6 address (.+)", line):
+            if assignment := ipv6_assignment(m.group(1)):
+                addresses.append(assignment)
+            elif not ipv6_states_no_subnet(m.group(1)):
+                unparsed.append(line)
         # `bfd interval 300 min_rx 300 multiplier 3`
         elif m := re.fullmatch(
             r"bfd interval (\d+) min[_-]rx (\d+) multiplier (\d+)", line
@@ -496,6 +507,13 @@ def _parse_interface(
                 group_tracks.setdefault(group, []).append((t.group(1), int(t.group(2))))
             elif t := re.fullmatch(r"ipv4 (\S+)", rest):
                 settings["virtual_ipv4"] = t.group(1)
+            elif t := re.fullmatch(r"ipv6 (\S+)", rest):
+                # EOS writes one `vrrp <vrid>` block for both families and gives
+                # each its own virtual address. Everything else in the block —
+                # priority, preempt, tracking, advertisement interval — is stated
+                # once and applies to both, which is why the settings dict is
+                # shared and only the virtual addresses are split apart.
+                settings["virtual_ipv6"] = t.group(1)
             elif t := re.fullmatch(r"priority-level (\d+)", rest):
                 settings["priority"] = t.group(1)
             elif rest == "preempt":
@@ -567,15 +585,9 @@ def _parse_interface(
             )
         )
 
-    members: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
+    members: list[FhrpRecord] = []
     timers: list[FhrpTimers] = []
     for group, settings in sorted(groups.items()):
-        group_scope = TimerScope(
-            device=device,
-            interface=name,
-            instance=str(group),
-            source=TimerSource.CONFIGURED,
-        )
         member = FhrpMember(
             device=device,
             interface=name,
@@ -595,22 +607,37 @@ def _parse_interface(
             ),
             config_line=group_lines.get(group),
         )
-        members.append(
-            (group, FhrpProtocol.VRRP, member, name, settings.get("virtual_ipv4"))
-        )
-        timers.append(
-            FhrpTimers(
-                scope=group_scope,
-                protocol=FhrpProtocol.VRRP,
-                hello_interval_ms=seconds_to_ms(
-                    settings.get("advertisement_interval_s")
-                ),
-                preempt_delay_ms=seconds_to_ms(settings.get("preempt_delay_minimum_s")),
-                preempt_delay_reload_ms=seconds_to_ms(
-                    settings.get("preempt_delay_reload_s")
-                ),
+        for family, virtual in configured_families(settings):
+            members.append(
+                FhrpRecord(
+                    number=group,
+                    protocol=FhrpProtocol.VRRP,
+                    family=family,
+                    member=member,
+                    interface=name,
+                    virtual=virtual,
+                )
             )
-        )
+            timers.append(
+                FhrpTimers(
+                    scope=TimerScope(
+                        device=device,
+                        interface=name,
+                        instance=fhrp_instance(group, family),
+                        source=TimerSource.CONFIGURED,
+                    ),
+                    protocol=FhrpProtocol.VRRP,
+                    hello_interval_ms=seconds_to_ms(
+                        settings.get("advertisement_interval_s")
+                    ),
+                    preempt_delay_ms=seconds_to_ms(
+                        settings.get("preempt_delay_minimum_s")
+                    ),
+                    preempt_delay_reload_ms=seconds_to_ms(
+                        settings.get("preempt_delay_reload_s")
+                    ),
+                )
+            )
     return interface, members, timers, bfd_timers, igp_timers, unparsed
 
 

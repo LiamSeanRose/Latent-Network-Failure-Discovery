@@ -25,7 +25,7 @@ def test_facts_renders_the_corpus(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     for expected in (
         "device agg-a",
-        "fhrp vrrp group=14 virtual=10.14.0.1",
+        "fhrp VRRP 14 virtual=10.14.0.1",
         "priority=110",
         "tracks=UPLINK->Ethernet1 -40",
         "preempt-delay=90000ms",

@@ -366,11 +366,19 @@ class FhrpGroup:
     independently is not answerable from this object alone — it depends on
     priorities, tracked objects, preempt, and the timers in `TimerInventory`.
     That is precisely what a scenario in the sense of §2.1 exists to answer.
+
+    `family` is part of the group's identity, not a label on it. VRRPv3 runs a
+    separate virtual router per address family, so VRRP 14 for IPv4 and VRRP 14
+    for IPv6 on one interface are two groups that elect separately, hold
+    different virtual addresses and can sit on different devices. Folding them
+    into one record would put both devices' members in a single group and
+    report a device as contending with itself.
     """
 
     id: GroupId
     protocol: FhrpProtocol
     group_number: int
+    family: AddressFamily = AddressFamily.IPV4_UNICAST
     members: tuple[FhrpMember, ...] = ()
     virtual_ipv4: IpAddress | None = None
     virtual_ipv6: IpAddress | None = None
@@ -379,6 +387,34 @@ class FhrpGroup:
     vrf: VrfName | None = None
     l2_segment: SegmentId | None = None
     l3_adjacency_prefix: IpPrefix | None = None
+
+    @property
+    def virtual_address(self) -> IpAddress | None:
+        """The virtual address of the family this group serves.
+
+        A group is one address family's virtual router, so exactly one of the
+        two fields is its own. Reading `virtual_ipv4` unconditionally makes
+        every IPv6 group look like a group with no virtual address at all, and
+        every rule that checks one silently skips it — which is why this lives
+        on the record rather than in whichever module happened to need it first.
+        """
+        if self.family is AddressFamily.IPV6_UNICAST:
+            return self.virtual_ipv6
+        return self.virtual_ipv4
+
+    @property
+    def label(self) -> str:
+        """How output names this group: `VRRP 14`, or `VRRP 14 IPv6`.
+
+        The family is named only where it disambiguates. A dual-stack interface
+        carries two groups numbered 14 that elect separately, and naming only
+        the number would say the same thing twice about two different
+        elections; a network with no IPv6 on it reads exactly as it did before.
+        """
+        label = f"{self.protocol.value.upper()} {self.group_number}"
+        if self.family is AddressFamily.IPV6_UNICAST:
+            return f"{label} IPv6"
+        return label
 
 
 # --------------------------------------------------------------------------

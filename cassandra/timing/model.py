@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
+from cassandra.factpack.builders.common import fhrp_instance
 from cassandra.factpack.schema import (
     AddressFamily,
     FhrpGroup,
@@ -235,7 +236,11 @@ def _members(group: FhrpGroup, pack: StaticFactPack) -> list[_MemberState]:
             base_priority=member.priority,
             preempt=member.preempt,
             preempt_delay_ms=delays.get(
-                (member.device, str(group.group_number), group.protocol),
+                (
+                    member.device,
+                    fhrp_instance(group.group_number, group.family),
+                    group.protocol,
+                ),
                 DEFAULT_PREEMPT_DELAY_MS,
             ),
             # A9: every tracked object is treated as an interface track,

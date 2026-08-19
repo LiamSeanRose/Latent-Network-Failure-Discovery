@@ -100,7 +100,7 @@ def reading(text: str) -> Reading:
     parsed = parse(text, device_id="agg-a")
     return (
         dataclasses.asdict(parsed.device),
-        parsed.fhrp,
+        parsed.fhrp_records,
         parsed.timers,
         parsed.vlans,
         parsed.unparsed_lines,
@@ -279,9 +279,7 @@ def test_the_line_ending_comparison_is_actually_comparing_something() -> None:
         "Ethernet2",
         "Vlan14",
     ]
-    assert [(number, virtual) for number, _p, _m, _i, virtual in fhrp] == [
-        (14, "10.10.14.1")
-    ]
+    assert [(record.number, record.virtual) for record in fhrp] == [(14, "10.10.14.1")]
     assert [vlan.vlan_id for vlan in vlans] == [10, 20, 30, 31, 32]
     assert unparsed == ()
     assert device["hostname"] == "agg-a"

@@ -22,12 +22,18 @@ from typing import Final
 
 from cassandra.factpack.builders.common import (
     BgpPeerSettings,
+    FhrpRecord,
     ParsedDevice,
     Stanza,
     apply_bgp_peer_setting,
     bgp_neighbors_from,
+    configured_families,
     declared_vlans_from,
+    fhrp_instance,
     interface_kind,
+    ipv6_assignment,
+    ipv6_states_no_subnet,
+    is_link_local_v6,
     is_out_of_scope,
     netmask_to_prefix_length,
     register_bgp_peer,
@@ -71,10 +77,31 @@ MARKERS = (
 
 _UNINTERESTING = re.compile(
     r"^(end|!.*|version .*|service .*|ip cef|no ip domain.lookup|"
+    r"(no )?ipv6 unicast-routing|(no )?ipv6 cef|"
     r"line (con|vty) .*|\s*(login|transport input|exec-timeout|logging|"
     r"negotiation auto|duplex .*|speed .*|no shutdown|description .*|"
     r"delay (up|down) \d+)\s*.*|router ospf .*|\s*network .*|\s*router-id .*|"
-    r"\s*passive-interface .*|spanning-tree .*|\s*spanning-tree .*)$"
+    r"\s*passive-interface .*|spanning-tree .*|\s*spanning-tree .*|"
+    r"\s*(no )?ipv6 enable|\s*ipv6 nd .*)$"
+)
+
+
+# What identifies one FHRP group configured on an interface. The address family
+# is in it because VRRPv3 runs a separate virtual router per family — `vrrp 14
+# address-family ipv4` and `vrrp 14 address-family ipv6` are two elections — and
+# because HSRP's IPv6 groups derive their own virtual MAC from the same number.
+type _GroupKey = tuple[FhrpProtocol, int, AddressFamily]
+
+# The commands that only exist inside a `vrrp <n> address-family <af>` block.
+# `common.stanzas` strips indentation, so a sub-mode line arrives looking like an
+# interface line; where the config indents the block — `show running-config`
+# always does — the indentation decides, and this is the fallback for one that
+# does not. `shutdown` and `description` are deliberately absent: both mean
+# something at the interface level too, and mistaking an interface `shutdown` for
+# a group one would report a live device as isolated.
+_VRRP_SUBMODE: Final = re.compile(
+    r"(?:no )?(?:address .*|priority \d+|preempt(?: delay minimum \d+)?|"
+    r"timers advertise .*|track .*|vrrs .*|match-address)"
 )
 
 
@@ -117,7 +144,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> IosDevice:
     hostname = device_id or "unknown"
     interfaces: list[Interface] = []
     tracked: list[TrackedObject] = []
-    fhrp: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
+    fhrp: list[FhrpRecord] = []
     timers: list[FhrpTimers] = []
     unparsed: list[str] = []
     declared_vlans: list[Vlan] = []
@@ -189,7 +216,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> IosDevice:
             interfaces=tuple(interfaces),
             config_line_count=len(text.splitlines()),
         ),
-        fhrp=tuple(fhrp),
+        fhrp_records=tuple(fhrp),
         tracked=tuple(tracked),
         timers=tuple(timers),
         unparsed_lines=tuple(unparsed),
@@ -246,12 +273,7 @@ def _parse_router_bgp(
 
 def _parse_interface(
     device: str, name: str, stanza: Stanza
-) -> tuple[
-    Interface,
-    list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]],
-    list[FhrpTimers],
-    list[str],
-]:
+) -> tuple[Interface, list[FhrpRecord], list[FhrpTimers], list[str]]:
     description: str | None = None
     enabled = True
     mtu: int | None = None
@@ -260,13 +282,50 @@ def _parse_interface(
     allowed: tuple[int, ...] = ()
     addresses: list[IpAssignment] = []
     unparsed: list[str] = []
-    groups: dict[int, dict[str, str]] = {}
-    group_tracks: dict[int, list[tuple[str, int]]] = {}
+
+    # HSRP accumulates per group number rather than per family: `standby 14 ip`
+    # and `standby 14 ipv6` are one block of settings serving two virtual
+    # addresses, and which families it ended up naming is only known once every
+    # line has been read. VRRPv3 states the family on the block header and gives
+    # each one its own priority, preempt and timers, so it accumulates per group.
+    standby: dict[int, dict[str, str]] = {}
+    standby_tracks: dict[int, list[tuple[str, int]]] = {}
     # group -> the first line that configures it, which is where a reader looking
     # for the group should be sent. The later lines are the same group.
-    group_lines: dict[int, int] = {}
+    standby_lines: dict[int, int] = {}
+    vrrp: dict[_GroupKey, dict[str, str]] = {}
+    vrrp_tracks: dict[_GroupKey, list[tuple[str, int]]] = {}
+    vrrp_lines: dict[_GroupKey, int] = {}
 
-    for number, line in zip(stanza.body_lines, stanza.body, strict=True):
+    # The `vrrp <n> address-family <af>` block currently open, and the column its
+    # header started in.
+    open_group: _GroupKey | None = None
+    open_indent = 0
+
+    for number, indent, line in zip(
+        stanza.body_lines, stanza.body_indents, stanza.body, strict=True
+    ):
+        if m := re.fullmatch(r"vrrp (\d+) address-family (ipv4|ipv6)", line):
+            open_group = (
+                FhrpProtocol.VRRP,
+                int(m.group(1)),
+                AddressFamily.IPV6_UNICAST
+                if m.group(2) == "ipv6"
+                else AddressFamily.IPV4_UNICAST,
+            )
+            open_indent = indent
+            vrrp.setdefault(open_group, {})
+            vrrp_tracks.setdefault(open_group, [])
+            vrrp_lines.setdefault(open_group, number)
+            continue
+        if open_group is not None and (
+            indent > open_indent or _VRRP_SUBMODE.fullmatch(line)
+        ):
+            if not _vrrp_setting(vrrp[open_group], vrrp_tracks[open_group], line):
+                unparsed.append(line)
+            continue
+        open_group = None
+
         if m := re.fullmatch(r"description (.+)", line):
             description = m.group(1)
         elif line == "shutdown":
@@ -289,7 +348,8 @@ def _parse_interface(
                 # the operator forgot, and the next rule blames them for it.
                 unparsed.append(f"{line}  [unreadable: {', '.join(rejected)}]")
         elif m := re.fullmatch(
-            r"ip address (\d+\.\d+\.\d+\.\d+) (\d+\.\d+\.\d+\.\d+)( secondary)?", line
+            r"ip address (\d+\.\d+\.\d+\.\d+) (\d+\.\d+\.\d+\.\d+)( secondary)?",
+            line,
         ):
             length = netmask_to_prefix_length(m.group(2))
             if length is None:
@@ -303,36 +363,18 @@ def _parse_interface(
                         secondary=bool(m.group(3)),
                     )
                 )
+        elif m := re.fullmatch(r"ipv6 address (.+)", line):
+            if assignment := ipv6_assignment(m.group(1)):
+                addresses.append(assignment)
+            elif not ipv6_states_no_subnet(m.group(1)):
+                unparsed.append(line)
         elif m := re.fullmatch(r"standby (\d+) (.+)", line):
             group = int(m.group(1))
-            rest = m.group(2)
-            settings = groups.setdefault(group, {})
-            group_lines.setdefault(group, number)
-            if t := re.fullmatch(r"track (\S+)( decrement (\d+))?", rest):
-                decrement = t.group(3)
-                group_tracks.setdefault(group, []).append(
-                    (
-                        t.group(1),
-                        DEFAULT_TRACK_DECREMENT
-                        if decrement is None
-                        else int(decrement),
-                    )
-                )
-            elif t := re.fullmatch(r"ip (\S+)( secondary)?", rest):
-                settings.setdefault("virtual_ipv4", t.group(1))
-            elif t := re.fullmatch(r"priority (\d+)", rest):
-                settings["priority"] = t.group(1)
-            elif rest == "preempt":
-                settings["preempt"] = "true"
-            elif t := re.fullmatch(r"preempt delay minimum (\d+)", rest):
-                settings["preempt_delay_minimum_s"] = t.group(1)
-            elif t := re.fullmatch(r"preempt delay reload (\d+)", rest):
-                settings["preempt_delay_reload_s"] = t.group(1)
-            elif t := re.fullmatch(r"timers (\d+) (\d+)", rest):
-                settings["hello_s"], settings["hold_s"] = t.group(1), t.group(2)
-            elif re.fullmatch(r"(name|authentication|version|mac-address) .*", rest):
-                continue
-            else:
+            settings = standby.setdefault(group, {})
+            standby_lines.setdefault(group, number)
+            if not _standby_setting(
+                settings, standby_tracks.setdefault(group, []), m.group(2)
+            ):
                 unparsed.append(line)
         elif not _UNINTERESTING.fullmatch(line):
             unparsed.append(line)
@@ -351,44 +393,168 @@ def _parse_interface(
         config_line=stanza.line or None,
     )
 
-    members: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
+    members: list[FhrpRecord] = []
     timers: list[FhrpTimers] = []
-    for group, settings in sorted(groups.items()):
-        member = FhrpMember(
+    for group, settings in sorted(standby.items()):
+        for family, virtual in configured_families(settings):
+            record, timer = _group_facts(
+                device=device,
+                interface=name,
+                protocol=FhrpProtocol.HSRP,
+                number=group,
+                family=family,
+                settings=settings,
+                tracks=standby_tracks.get(group, []),
+                config_line=standby_lines.get(group),
+                virtual=virtual,
+            )
+            members.append(record)
+            timers.append(timer)
+    for (protocol, group, family), settings in sorted(
+        vrrp.items(), key=lambda item: (item[0][1], item[0][2].value)
+    ):
+        record, timer = _group_facts(
             device=device,
             interface=name,
-            priority=int(settings.get("priority", "100")),
-            preempt=any(key.startswith("preempt") for key in settings),
-            tracked_objects=tuple(
-                TrackedObject(
-                    id=track_id,
-                    device=device,
-                    kind=TrackedObjectKind.INTERFACE,
-                    target="",
-                    decrement=decrement,
-                )
-                for track_id, decrement in group_tracks.get(group, [])
-            ),
-            config_line=group_lines.get(group),
+            protocol=protocol,
+            number=group,
+            family=family,
+            settings=settings,
+            tracks=vrrp_tracks.get((protocol, group, family), []),
+            config_line=vrrp_lines.get((protocol, group, family)),
+            virtual=settings.get("virtual"),
         )
-        members.append(
-            (group, FhrpProtocol.HSRP, member, name, settings.get("virtual_ipv4"))
-        )
-        timers.append(
-            FhrpTimers(
-                scope=TimerScope(
-                    device=device,
-                    interface=name,
-                    instance=str(group),
-                    source=TimerSource.CONFIGURED,
-                ),
-                protocol=FhrpProtocol.HSRP,
-                hello_interval_ms=seconds_to_ms(settings.get("hello_s")),
-                hold_time_ms=seconds_to_ms(settings.get("hold_s")),
-                preempt_delay_ms=seconds_to_ms(settings.get("preempt_delay_minimum_s")),
-                preempt_delay_reload_ms=seconds_to_ms(
-                    settings.get("preempt_delay_reload_s")
-                ),
+        members.append(record)
+        timers.append(timer)
+    return interface, members, timers, unparsed
+
+
+def _standby_setting(
+    settings: dict[str, str], tracks: list[tuple[str, int]], rest: str
+) -> bool:
+    """Fold one `standby <n> ...` setting into `settings`; False if unrecognised.
+
+    `ipv6` is a second virtual address on the same group rather than a second
+    group's worth of settings — priority, preempt and timers are stated once —
+    so it is recorded beside the IPv4 one and `configured_families` splits the
+    two out. `ipv6 autoconfig` names the family with no address: the virtual
+    address is derived from the interface prefix and the group's virtual MAC, so
+    it is marked as configured rather than dropped.
+    """
+    if m := re.fullmatch(r"track (\S+)( decrement (\d+))?", rest):
+        decrement = m.group(3)
+        tracks.append(
+            (
+                m.group(1),
+                DEFAULT_TRACK_DECREMENT if decrement is None else int(decrement),
             )
         )
-    return interface, members, timers, unparsed
+    elif m := re.fullmatch(r"ip (\S+)( secondary)?", rest):
+        settings.setdefault("virtual_ipv4", m.group(1))
+    elif rest == "ipv6 autoconfig":
+        settings["ipv6"] = "true"
+    elif m := re.fullmatch(r"ipv6 (\S+)", rest):
+        settings.setdefault("virtual_ipv6", m.group(1))
+    elif m := re.fullmatch(r"priority (\d+)", rest):
+        settings["priority"] = m.group(1)
+    elif rest == "preempt":
+        settings["preempt"] = "true"
+    elif m := re.fullmatch(r"preempt delay minimum (\d+)", rest):
+        settings["preempt_delay_minimum_s"] = m.group(1)
+    elif m := re.fullmatch(r"preempt delay reload (\d+)", rest):
+        settings["preempt_delay_reload_s"] = m.group(1)
+    elif m := re.fullmatch(r"timers (\d+) (\d+)", rest):
+        settings["hello_s"], settings["hold_s"] = m.group(1), m.group(2)
+    elif not re.fullmatch(r"(name|authentication|version|mac-address) .*", rest):
+        return False
+    return True
+
+
+def _vrrp_setting(
+    settings: dict[str, str], tracks: list[tuple[str, int]], line: str
+) -> bool:
+    """Fold one line of a `vrrp <n> address-family <af>` block in; False if unread.
+
+    An IPv6 group states two addresses: a link-local one, which RFC 5798 makes
+    the primary because that is what hosts point their default route at, and
+    usually a global one as well. The global one is kept in preference because
+    it is the one that can be checked against the subnet the interface is on —
+    every interface is on fe80::/10 whether anyone configured it or not, so a
+    link-local virtual address is not a claim about which segment the group
+    serves.
+    """
+    if m := re.fullmatch(r"address (\S+)( primary| secondary)?", line):
+        held = settings.get("virtual")
+        if held is None or (
+            is_link_local_v6(held) and not is_link_local_v6(m.group(1))
+        ):
+            settings["virtual"] = m.group(1)
+    elif m := re.fullmatch(r"priority (\d+)", line):
+        settings["priority"] = m.group(1)
+    elif line == "preempt":
+        settings["preempt"] = "true"
+    elif m := re.fullmatch(r"preempt delay minimum (\d+)", line):
+        settings["preempt_delay_minimum_s"] = m.group(1)
+    elif m := re.fullmatch(r"timers advertise (\d+)", line):
+        settings["hello_s"] = m.group(1)
+    elif m := re.fullmatch(r"track (\S+) decrement (\d+)", line):
+        tracks.append((m.group(1), int(m.group(2))))
+    elif m := re.fullmatch(r"track (\S+)( shutdown)?", line):
+        tracks.append((m.group(1), DEFAULT_TRACK_DECREMENT))
+    elif not re.fullmatch(r"(vrrs .*|match-address|no preempt)", line):
+        return False
+    return True
+
+
+def _group_facts(
+    *,
+    device: str,
+    interface: str,
+    protocol: FhrpProtocol,
+    number: int,
+    family: AddressFamily,
+    settings: dict[str, str],
+    tracks: list[tuple[str, int]],
+    config_line: int | None,
+    virtual: str | None,
+) -> tuple[FhrpRecord, FhrpTimers]:
+    """One group's membership record and its timer record, from its settings."""
+    member = FhrpMember(
+        device=device,
+        interface=interface,
+        priority=int(settings.get("priority", "100")),
+        preempt=any(key.startswith("preempt") for key in settings),
+        tracked_objects=tuple(
+            TrackedObject(
+                id=track_id,
+                device=device,
+                kind=TrackedObjectKind.INTERFACE,
+                target="",
+                decrement=decrement,
+            )
+            for track_id, decrement in tracks
+        ),
+        config_line=config_line,
+    )
+    record = FhrpRecord(
+        number=number,
+        protocol=protocol,
+        family=family,
+        member=member,
+        interface=interface,
+        virtual=virtual,
+    )
+    timer = FhrpTimers(
+        scope=TimerScope(
+            device=device,
+            interface=interface,
+            instance=fhrp_instance(number, family),
+            source=TimerSource.CONFIGURED,
+        ),
+        protocol=protocol,
+        hello_interval_ms=seconds_to_ms(settings.get("hello_s")),
+        hold_time_ms=seconds_to_ms(settings.get("hold_s")),
+        preempt_delay_ms=seconds_to_ms(settings.get("preempt_delay_minimum_s")),
+        preempt_delay_reload_ms=seconds_to_ms(settings.get("preempt_delay_reload_s")),
+    )
+    return record, timer

@@ -107,11 +107,11 @@ HIGH  north-agg1  VRRP 10 and VRRP 20 can end up on different devices
         trigger: flap north-agg1:Ethernet1 1x (10s down, 20s up)
 
 MED   north-agg1  VRRP 10 changes master 5 times under a single flap sequence
-        each transition is a forwarding interruption for everything using that gateway
+        each transition is a forwarding interruption for everything using that gateway; this group has no preempt delay, so it follows the interface immediately
         trigger: flap north-agg1:Ethernet1 3x (10s down, 20s up)
 
 MED   north-agg1  VRRP 20 changes master 5 times under a single flap sequence
-        each transition is a forwarding interruption for everything using that gateway
+        each transition is a forwarding interruption for everything using that gateway; this group waits 60s before preempting, so it chases flaps spaced further apart than that
         trigger: flap north-agg1:Ethernet1 3x (10s down, 90s up)
 
 MED   south-agg1  VRRP 30 has only 1 member
@@ -127,9 +127,10 @@ run with --explain for evidence, fixes and rule ids
 The exit status is 1, because there are findings. That is the whole interface for a hook or a
 pipeline: nothing has to parse the text.
 
-`--explain` adds three lines to each finding — the evidence it was derived from, the change that
-would remove it, and the rule id so you can look the check up with `cassandra rules <id>`. The
-sections below quote the `--explain` form of one finding at a time.
+`--explain` adds four kinds of line to each finding: where in your files to go, the evidence it
+was derived from, the change that would remove it, and the rule id so you can look the check up
+with `cassandra rules <id>`. The sections below quote the `--explain` form of one finding at a
+time.
 
 ## 3. A VLAN that leaves on no trunk
 
@@ -138,6 +139,7 @@ $ uv run cassandra check /tmp/tutorial --explain
 ...
 HIGH  north-acc1  Ethernet4 is in VLAN 20, which leaves north-acc1 on no trunk
         VLAN 20 is terminated on north-agg1, north-agg2, but no trunk on north-acc1 permits it and there is no SVI for it here, so anything on Ethernet4 is confined to this switch and has no route to its gateway
+        source: north/north-acc1.cfg:24
         evidence: north-acc1:Ethernet4 access vlan 20
         evidence: north-acc1:Ethernet1 allowed 10,99
         evidence: north-acc1:Ethernet2 allowed 10,99
@@ -146,6 +148,12 @@ HIGH  north-acc1  Ethernet4 is in VLAN 20, which leaves north-acc1 on no trunk
 ```
 
 One finding excerpted from the full run.
+
+`source: north/north-acc1.cfg:24` is where to go: the path relative to the directory you pointed
+at, and the line that declares the thing the rule objected to — here `interface Ethernet4`. A
+finding about a VRRP group points at that group's first line rather than the interface header,
+and a finding that is a statement about two devices at once names the file without a line,
+because there is no single line to blame.
 
 The three evidence lines are the whole argument: a port in VLAN 20, and the only two trunks on
 that switch permitting 10 and 99. A phone on Ethernet4 comes up, gets a link light, learns
@@ -190,6 +198,7 @@ Trimmed after the second finding; the rest of the list is unchanged.
 ```
 HIGH  edge1  BGP peering with south-agg1 is configured on one side only
         edge1 peers to 10.0.20.1, but south-agg1 has no neighbor statement back. The session never establishes and the config looks complete on this device
+        source: edge/edge1.cfg
         evidence: edge1 AS 65010 -> 10.0.20.1
         fix: add the reciprocal neighbor on south-agg1, or remove this one
         rule: bgp-session-one-sided (facts)
@@ -231,11 +240,13 @@ Trimmed to the first finding and the count line.
 ```
 MED   south-agg1  VRRP 30 has only 1 member
         a redundancy group with one member provides no redundancy
+        source: south/south-agg1.cfg:24
         fix: configure the group on the peer device, or remove it
         rule: fhrp-no-redundancy (facts)
 
 INFO  south-agg1  Vlan30 is the only interface on 10.30.0.0/24
         no other device in these configs is addressed in this subnet, so nothing here can be an IGP, BFD or FHRP peer of it
+        source: south/south-agg1.cfg:21
         evidence: south-agg1:Vlan30
         fix: confirm the far end is outside these configs; if it is not, check the address for a wrong octet or prefix length
         rule: l3-interface-isolated (facts)
@@ -260,8 +271,10 @@ This is the finding the tool exists for, and it is the one to be most careful wi
 HIGH  north-agg1  VRRP 10 and VRRP 20 can end up on different devices
         they share a device pair but respond to the same event differently, leaving the gateways split for about 60s
         trigger: flap north-agg1:Ethernet1 1x (10s down, 20s up)
+        source: north/north-agg1.cfg
         evidence: t=0s north-agg1:Ethernet1 down
         evidence: t=10s north-agg1:Ethernet1 up
+        evidence: held in 3 of 3 runs at ±20% of the interval; absent with no events
         fix: make tracking and preempt delay consistent across groups on the same pair
         rule: fhrp-divergence (timing)
 ```
@@ -288,18 +301,24 @@ That is why the two `fhrp-oscillation` findings in the first run carry different
 `3x (10s down, 20s up)` for group 10 and `3x (10s down, 90s up)` for group 20. Ninety seconds is
 group 20's sixty-second preempt delay plus the settle time — the candidate interval that lets it
 finish preempting before the next flap takes the group away again. Twenty seconds would not have
-exposed anything on group 20, and ninety was never needed for group 10. Compare the triggers
-before concluding that two findings say the same thing.
+exposed anything on group 20, and ninety was never needed for group 10.
+
+Each of those two findings says which of the two it is in its own detail line — group 10 *has no
+preempt delay, so it follows the interface immediately*, group 20 *waits 60s before preempting,
+so it chases flaps spaced further apart than that* — and they carry different fixes for the same
+reason. Two timing findings with the same title are rarely the same finding; the trigger and the
+detail are where they differ.
 
 ### Why the evidence matters
 
 ```
         evidence: t=0s north-agg1:Ethernet1 down
         evidence: t=10s north-agg1:Ethernet1 up
+        evidence: held in 3 of 3 runs at ±20% of the interval; absent with no events
 ```
 
-The evidence is the event log the model was advanced through, on the model's own clock. It exists
-so you can disagree with it. A FACTS finding is decidable from the configuration — if one is
+The first two lines are the event log the model was advanced through, on the model's own clock.
+They exist so you can disagree with them. A FACTS finding is decidable from the configuration — if one is
 wrong, it is a bug in the tool. A TIMING finding is the output of a model of timer interaction
 (PROJECT.md §2.2), and the honest thing it can do is show its working.
 
@@ -311,7 +330,16 @@ through `north-agg1` and traffic for VLAN 20 leaves through `north-agg2`. A stat
 NAT table or an asymmetric-path check that assumes one default gateway per site sees that minute
 and then the network heals, which is exactly why it is so hard to find after the fact.
 
-The web view in section 9 draws that run as bands, which is the fastest way to check the
+The third line is a different kind of evidence: it says the finding survived two attempts to
+kill it (PROJECT.md §2.4). The sequence was run three times — at the interval printed in the
+trigger, and at a fifth below and a fifth above it — and the divergence appeared in all three.
+Then the same configs were run with no events in them at all, and it did not appear. A result
+that shows up only at one exact interval is an artifact of the model's one-second grid rather
+than a property of your configuration; a result that also shows up when nothing happens was
+never caused by the trigger and belongs to the FACTS tier. Neither is true here, and this line
+is where you would see it if it were.
+
+The web view in section 10 draws that run as bands, which is the fastest way to check the
 arithmetic yourself.
 
 ### What you should not conclude from it
@@ -359,15 +387,17 @@ interface Vlan10
 ```
 $ uv run cassandra check /tmp/tutorial --explain
 MED   north-agg1  VRRP 10 changes master 5 times under a single flap sequence
-        each transition is a forwarding interruption for everything using that gateway
+        each transition is a forwarding interruption for everything using that gateway; this group waits 60s before preempting, so it chases flaps spaced further apart than that
         trigger: flap north-agg1:Ethernet1 3x (10s down, 90s up)
+        source: north/north-agg1.cfg:36
         evidence: t=0s north-agg1:Ethernet1 down
         evidence: t=10s north-agg1:Ethernet1 up
         evidence: t=100s north-agg1:Ethernet1 down
         evidence: t=110s north-agg1:Ethernet1 up
         evidence: t=200s north-agg1:Ethernet1 down
         evidence: t=210s north-agg1:Ethernet1 up
-        fix: add a preempt delay so the group does not chase a flapping interface
+        evidence: held in 3 of 3 runs at ±20% of the interval; absent with no events
+        fix: raise the preempt delay past 60s, or damp the interface so it stops flapping
         rule: fhrp-oscillation (timing)
 ...
 medium=3  info=1   (facts=2, timing=2)
@@ -378,12 +408,17 @@ Trimmed to the first finding and the count line.
 The divergence is gone: `timing=3` became `timing=2` and no `HIGH` is left. Both groups now move
 together, which is what the finding asked for.
 
-What remains is worth noticing. Group 10 still oscillates, and its trigger has changed from
-`3x (10s down, 20s up)` to `3x (10s down, 90s up)` — the same shape as group 20's, because the
-groups now share a preempt delay and the interval that defeats it is the same for both. Removing
-a divergence does not remove the underlying fact that both groups chase a flapping uplink. Fixing
-*that* means either a longer delay than any plausible flap interval, or no preempt at all on the
-groups that do not need it.
+What remains is worth noticing. Group 10 still oscillates, and everything about that finding has
+changed except its title. Its trigger moved from `3x (10s down, 20s up)` to
+`3x (10s down, 90s up)`, its detail line went from *no preempt delay, so it follows the interface
+immediately* to *waits 60s before preempting*, and its fix went from "add a preempt delay" to
+"raise the preempt delay past 60s, or damp the interface". The two oscillation findings are now
+identical apart from the group number and the line they point at, which is the tool saying the
+two groups have become the same shape of problem.
+
+Removing a divergence does not remove the underlying fact that both groups chase a flapping
+uplink. Fixing *that* means either a delay longer than any plausible flap interval, or no preempt
+at all on the groups that do not need it.
 
 ## 7. Did I break something?
 
@@ -407,7 +442,7 @@ no new findings since baseline
 
 4 unchanged
 
-baseline taken 2026-08-19 05:14Z
+baseline taken 2026-08-19 06:24Z
 configs unchanged since baseline — any difference above is a
 change in the checks, not in the network
 run with --explain for evidence, fixes and rule ids
@@ -445,7 +480,7 @@ MED   north-agg2  Vlan21 has no trunk carrying VLAN 21
 
 4 unchanged
 
-baseline taken 2026-08-19 05:14Z
+baseline taken 2026-08-19 06:24Z
 configs changed since baseline (04d19e9e47f7 -> 9831133f8815)
 run with --explain for evidence, fixes and rule ids
 ```
@@ -473,14 +508,99 @@ no new findings since baseline
 
 4 unchanged
 
-baseline taken 2026-08-19 05:14Z
+baseline taken 2026-08-19 06:24Z
 configs changed since baseline (04d19e9e47f7 -> fe10a7c21168)
 run with --explain for evidence, fixes and rule ids
 ```
 
 Exit status 0. The configs changed, the digest says so, and nothing new broke.
 
-## 8. In CI
+`--since` reports the other direction too. Record a baseline on the corpus as it ships and
+compare your fixed copy against it, and everything you removed comes back under `fixed`:
+
+```
+$ uv run cassandra check examples/two-site --save-baseline /tmp/shipped.json
+$ uv run cassandra check /tmp/tutorial --since /tmp/shipped.json
+no new findings since baseline
+
+3 fixed since baseline
+
+HIGH  edge1  BGP peering with south-agg1 is configured on one side only
+        edge1 peers to 10.0.20.1, but south-agg1 has no neighbor statement back. The session never establishes and the config looks complete on this device
+
+HIGH  north-acc1  Ethernet4 is in VLAN 20, which leaves north-acc1 on no trunk
+        VLAN 20 is terminated on north-agg1, north-agg2, but no trunk on north-acc1 permits it and there is no SVI for it here, so anything on Ethernet4 is confined to this switch and has no route to its gateway
+
+HIGH  north-agg1  VRRP 10 and VRRP 20 can end up on different devices
+        they share a device pair but respond to the same event differently, leaving the gateways split for about 60s
+        trigger: flap north-agg1:Ethernet1 1x (10s down, 20s up)
+
+4 unchanged
+
+baseline taken 2026-08-19 06:25Z
+configs changed since baseline (cd6b8292e4eb -> fe10a7c21168)
+run with --explain for evidence, fixes and rule ids
+```
+
+The `--save-baseline` line printed `baseline written to /tmp/shipped.json` on stderr, which is
+trimmed here. Those three are the sections above, in the order you fixed them, and they are the
+baseline's copies rather than the current run's — a finding that no longer occurs has no current
+copy left to print. That is also why the exit status is 0: fixing things is not a regression.
+
+## 8. What the run did not check
+
+A run that reports nothing has two possible meanings, and they are very different: the checks
+looked and found nothing wrong, or the checks had nothing to look at. `--coverage` separates
+them. It changes nothing about the findings and appends a summary underneath them:
+
+```
+$ uv run cassandra check /tmp/tutorial --coverage
+...
+coverage: 28 of 41 checks had something to look at. 13 were inert:
+  bfd-multiplier-of-one (no BFD timers in these configs)
+  dampening-exceeds-sla (no dampening profile in these configs)
+  fhrp-hold-under-peer-hello (no FHRP timers in these configs sets hold time)
+  and 10 more — `--coverage full` lists every check and what it was missing
+```
+
+The findings above the summary are the ones section 2 already printed; they are trimmed here.
+
+Thirteen of forty-one checks never ran on this corpus, and none of them ran because a *fact* was
+absent, not because a device was clean. Nothing in these configs sets a BFD timer, an OSPF hello,
+an MTU, a native VLAN or a dampening profile, so every check that reads one of those had nothing
+to decide. `--coverage full` names each one and what it was missing:
+
+```
+$ uv run cassandra check /tmp/tutorial --coverage full
+...
+INERT  bfd-detection-below-floor          no BFD timers in these configs
+INERT  bfd-multiplier-of-one              no BFD timers in these configs
+INERT  bfd-no-clients                     no BFD timers in these configs
+INERT  bfd-no-faster-than-igp             no IGP hello timers in these configs
+                                          no BFD timers in these configs
+INERT  dampening-exceeds-sla              no dampening profile in these configs
+INERT  dampening-never-suppresses         no dampening profile in these configs
+INERT  fhrp-hold-under-peer-hello         no FHRP timers in these configs sets hold time
+INERT  fhrp-hold-under-three-hellos       no FHRP timers in these configs sets hold time
+INERT  igp-dead-not-a-multiple-of-hello   no IGP hello timers in these configs
+INERT  igp-dead-under-three-hellos        no IGP hello timers in these configs
+INERT  mtu-mismatch                       no interface in these configs sets MTU bytes
+INERT  ospf-timers-disagree               no IGP hello timers in these configs
+INERT  trunk-native-vlan-not-allowed      no interface in these configs sets native VLAN
+```
+
+Trimmed: the twenty-eight `ran` lines above these, and the summary repeated below them, are
+omitted. A `ran` line says either how many findings the check produced or `nothing to report`,
+which is the useful half — those are the checks that looked at your configs and were satisfied.
+
+Two things this is good for. The first is calibrating a clean run: on a corpus like this one,
+"no findings" is a statement about VLANs, addressing, BGP adjacency and FHRP, and says nothing
+whatever about BFD or IGP timers, because there are none to say anything about. The second is
+catching a parser gap. If a check is inert for want of a fact you know is in your files —
+`mtu-mismatch` reporting no interface sets an MTU when half of them do — the fact did not survive
+parsing, and `cassandra facts` will show you what did.
+
+## 9. In CI
 
 Exit status is the verdict, so nothing has to parse the output. Plain `check` exits 1 on any
 finding, which is right once a repository is clean and wrong on the day you adopt the tool.
@@ -498,11 +618,11 @@ above `MED` is left:
 ```
 $ uv run cassandra check /tmp/tutorial --fail-on high
 MED   north-agg1  VRRP 10 changes master 5 times under a single flap sequence
-        each transition is a forwarding interruption for everything using that gateway
+        each transition is a forwarding interruption for everything using that gateway; this group waits 60s before preempting, so it chases flaps spaced further apart than that
         trigger: flap north-agg1:Ethernet1 3x (10s down, 90s up)
 
 MED   north-agg1  VRRP 20 changes master 5 times under a single flap sequence
-        each transition is a forwarding interruption for everything using that gateway
+        each transition is a forwarding interruption for everything using that gateway; this group waits 60s before preempting, so it chases flaps spaced further apart than that
         trigger: flap north-agg1:Ethernet1 3x (10s down, 90s up)
 
 MED   south-agg1  VRRP 30 has only 1 member
@@ -555,7 +675,7 @@ $ uv run cassandra check examples/two-site --json
 
 Trimmed after the first finding.
 
-## 9. The web view
+## 10. The web view
 
 ```
 $ uv run cassandra serve /tmp/tutorial
@@ -574,7 +694,7 @@ whose config did not parse the way you expected. A device with findings carries 
 colour of its worst one and is a link to them, so "which of these is the problem" is one click.
 
 **A picture of the cause.** Under the map, one row per FHRP group showing its preempt delay and
-its tracked decrement. The timeline further down draws the effect; this draws the reason. Two
+its tracked decrement. The timeline further down draws the effect; this draws the cause. Two
 rows that do not match are two groups that will answer the same event at different speeds, which
 on this corpus is the entire divergence finding in one glance.
 
@@ -595,10 +715,12 @@ $ curl -s "http://127.0.0.1:8765/findings.json?dir=/tmp/tutorial&severity=high"
 ```
 
 **A baseline comparison.** Put a saved baseline in the second box, or pass `&since=/tmp/base.json`,
-and every finding arrives tagged `new` or `known`, with the ones that stopped being reported in
-their own section. If the configs are byte-identical to the baseline and the findings are not,
-it says so outright — that means the checks changed, not the network, and nobody works that out
-unprompted.
+and the page gains a line reading `0 new  1 fixed  6 unchanged`, every finding arrives tagged
+`new` or `known`, and the ones that stopped being reported get their own *no longer
+reported* section. The CLI prints the same three numbers; the page keeps them in front of you
+while you filter, so a `new` tag is visible on the finding rather than in a header three screens
+up. When the configs are byte-identical to the baseline it says so in as many words, which is
+what makes a difference in the findings attributable to the checks rather than to the network.
 
 The server also answers `/rules` (every check and when each stays quiet), `/rules.json`, and
 `/report.html`, which downloads a standalone file. The same file comes out of the CLI:
@@ -615,7 +737,7 @@ email works on a laptop with no network, and anyone can read its source before o
 ## Cleaning up
 
 ```sh
-rm -rf /tmp/tutorial /tmp/base.json /tmp/out.html
+rm -rf /tmp/tutorial /tmp/base.json /tmp/shipped.json /tmp/out.html
 ```
 
 The corpus under `examples/two-site/` was never touched, and `tests/test_examples.py` asserts it

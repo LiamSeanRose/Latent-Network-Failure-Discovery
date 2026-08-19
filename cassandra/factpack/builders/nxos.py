@@ -39,11 +39,15 @@ from typing import Final
 
 from cassandra.factpack.builders.common import (
     BgpPeerSettings,
+    FhrpRecord,
     ParsedDevice,
     apply_bgp_peer_setting,
     bgp_neighbors_from,
     declared_vlans_from,
+    fhrp_instance,
     interface_kind,
+    ipv6_assignment,
+    ipv6_states_no_subnet,
     is_out_of_scope,
     register_bgp_peer,
     seconds_to_ms,
@@ -75,7 +79,7 @@ from cassandra.factpack.schema import (
 # writes FHRP that way. `feature <name>` and the `9.3(10)` version form are
 # NX-OS-only too, and appear in configs that happen to have no FHRP at all.
 MARKERS: Final = (
-    re.compile(r"^\s+hsrp \d+\s*$", re.M),
+    re.compile(r"^\s+hsrp \d+( ipv6)?\s*$", re.M),
     re.compile(r"^(no )?feature \S+\s*$", re.M),
     re.compile(r"^version \d+\.\d+\(\d+\)", re.M),
 )
@@ -89,7 +93,8 @@ _UNINTERESTING: Final = re.compile(
     r"(no )?ip domain-lookup|(no )?ip routing|spanning-tree .*|"
     r"router ospf .*|router-id \S+|log-adjacency-changes|passive-interface .*|"
     r"medium \S+|(speed|duplex) \S+|logging event .*|"
-    r"no ip(v6)? redirects|ip (router ospf|ospf) .*)$"
+    r"no ip(v6)? redirects|ip (router ospf|ospf) .*|"
+    r"ipv6 link-local \S+|ipv6 nd .*)$"
 )
 
 # NX-OS decrements a tracked group's priority by 10 when `decrement` is omitted.
@@ -98,6 +103,10 @@ DEFAULT_TRACK_DECREMENT: Final = 10
 # Absent `priority`, an HSRP group runs at 100 — the same default the other two
 # dialects carry.
 DEFAULT_PRIORITY: Final = "100"
+
+# What identifies one `hsrp` block within an interface. HSRP for IPv6 is a
+# separate block with its own settings, so the number alone does not name it.
+type _GroupKey = tuple[int, AddressFamily]
 
 
 # `router bgp` lines that are structure or carry no fact any tier reads yet. Kept
@@ -198,7 +207,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> NxosDevice:
     hostname = device_id or "unknown"
     interfaces: list[Interface] = []
     tracked: list[TrackedObject] = []
-    fhrp: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
+    fhrp: list[FhrpRecord] = []
     timers: list[FhrpTimers] = []
     unparsed: list[str] = []
     declared_vlans: list[Vlan] = []
@@ -270,7 +279,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> NxosDevice:
             interfaces=tuple(interfaces),
             config_line_count=len(text.splitlines()),
         ),
-        fhrp=tuple(fhrp),
+        fhrp_records=tuple(fhrp),
         tracked=tuple(tracked),
         timers=tuple(timers),
         unparsed_lines=tuple(unparsed),
@@ -357,16 +366,23 @@ def _parse_router_bgp(
 def _parse_hsrp_group(
     body: list[str], settings: dict[str, str], tracks: list[tuple[str, int]]
 ) -> list[str]:
-    """Read one `hsrp <n>` sub-block into `settings` and `tracks`.
+    """Read one `hsrp <n>` or `hsrp <n> ipv6` sub-block into `settings` and `tracks`.
 
     The settings are the same set the `standby`/`vrrp` one-liners produce in the
-    other dialects, so everything downstream of the parser sees one shape.
+    other dialects, so everything downstream of the parser sees one shape. Which
+    family the block configures is on its header, not in here — an IPv6 group's
+    virtual address is still written `ip <address>`.
     """
     unparsed: list[str] = []
     for raw in body:
         line = raw.strip()
+        if line == "ip autoconfig":
+            # The virtual address is derived from the interface's own prefix and
+            # the group's virtual MAC, so no configuration file states it. The
+            # group is real; it simply has no address to check.
+            continue
         if m := re.fullmatch(r"ip (\S+)( secondary)?", line):
-            settings.setdefault("virtual_ipv4", m.group(1))
+            settings.setdefault("virtual", m.group(1))
         elif m := re.fullmatch(
             r"priority (\d+)( forwarding-threshold lower \d+ upper \d+)?", line
         ):
@@ -399,12 +415,7 @@ def _parse_hsrp_group(
 
 def _parse_interface(
     device: str, name: str, stanza: _Block
-) -> tuple[
-    Interface,
-    list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]],
-    list[FhrpTimers],
-    list[str],
-]:
+) -> tuple[Interface, list[FhrpRecord], list[FhrpTimers], list[str]]:
     description: str | None = None
     enabled = True
     mtu: int | None = None
@@ -418,24 +429,31 @@ def _parse_interface(
     addresses: list[IpAssignment] = []
     unparsed: list[str] = []
 
-    # group -> accumulated HSRP settings
-    groups: dict[int, dict[str, str]] = {}
-    group_tracks: dict[int, list[tuple[str, int]]] = {}
+    # (group number, family) -> accumulated HSRP settings. The family is part of
+    # the key because `hsrp 14` and `hsrp 14 ipv6` are two blocks with their own
+    # priority, preempt and timers, and they elect independently.
+    groups: dict[_GroupKey, dict[str, str]] = {}
+    group_tracks: dict[_GroupKey, list[tuple[str, int]]] = {}
     # group -> the line its sub-block opens on, which is where a reader looking
     # for the group should be sent.
-    group_lines: dict[int, int] = {}
+    group_lines: dict[_GroupKey, int] = {}
 
     for block in _blocks(stanza.body, stanza.body_lines):
         line = block.header
 
-        if m := re.fullmatch(r"hsrp (\d+)", line):
-            group = int(m.group(1))
-            group_lines.setdefault(group, block.line)
+        if m := re.fullmatch(r"hsrp (\d+)( ipv6)?", line):
+            key: _GroupKey = (
+                int(m.group(1)),
+                AddressFamily.IPV6_UNICAST
+                if m.group(2)
+                else AddressFamily.IPV4_UNICAST,
+            )
+            group_lines.setdefault(key, block.line)
             unparsed.extend(
                 _parse_hsrp_group(
                     block.body,
-                    groups.setdefault(group, {}),
-                    group_tracks.setdefault(group, []),
+                    groups.setdefault(key, {}),
+                    group_tracks.setdefault(key, []),
                 )
             )
             continue
@@ -492,6 +510,11 @@ def _parse_interface(
                     secondary=bool(m.group(3)),
                 )
             )
+        elif m := re.fullmatch(r"ipv6 address (.+)", line):
+            if assignment := ipv6_assignment(m.group(1)):
+                addresses.append(assignment)
+            elif not ipv6_states_no_subnet(m.group(1)):
+                unparsed.append(line)
         elif not _UNINTERESTING.fullmatch(line):
             unparsed.append(line)
 
@@ -512,9 +535,9 @@ def _parse_interface(
         config_line=stanza.line or None,
     )
 
-    members: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
+    members: list[FhrpRecord] = []
     timers: list[FhrpTimers] = []
-    for group, settings in sorted(groups.items()):
+    for (number, family), settings in sorted(groups.items()):
         member = FhrpMember(
             device=device,
             interface=name,
@@ -528,20 +551,27 @@ def _parse_interface(
                     target="",
                     decrement=decrement,
                 )
-                for track_id, decrement in group_tracks.get(group, [])
+                for track_id, decrement in group_tracks.get((number, family), [])
             ),
             version=version,
-            config_line=group_lines.get(group),
+            config_line=group_lines.get((number, family)),
         )
         members.append(
-            (group, FhrpProtocol.HSRP, member, name, settings.get("virtual_ipv4"))
+            FhrpRecord(
+                number=number,
+                protocol=FhrpProtocol.HSRP,
+                family=family,
+                member=member,
+                interface=name,
+                virtual=settings.get("virtual"),
+            )
         )
         timers.append(
             FhrpTimers(
                 scope=TimerScope(
                     device=device,
                     interface=name,
-                    instance=str(group),
+                    instance=fhrp_instance(number, family),
                     source=TimerSource.CONFIGURED,
                 ),
                 protocol=FhrpProtocol.HSRP,

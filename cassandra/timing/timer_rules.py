@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Final
 
+from cassandra.factpack.builders.common import fhrp_instance
 from cassandra.factpack.schema import (
     BfdTimers,
     DampeningProfile,
@@ -712,7 +713,11 @@ def fhrp_hold_time_is_shorter_than_a_peer_hello(
             for member in group.members
             if (
                 timers := index.get(
-                    (member.device, member.interface, str(group.group_number))
+                    (
+                        member.device,
+                        member.interface,
+                        fhrp_instance(group.group_number, group.family),
+                    )
                 )
             )
             is not None
@@ -724,7 +729,7 @@ def fhrp_hold_time_is_shorter_than_a_peer_hello(
                 continue
             if a.hold_time_ms > b.hello_interval_ms:
                 continue
-            virtual = group.virtual_ipv4 or "the virtual address"
+            virtual = group.virtual_address or "the virtual address"
             yield Finding(
                 rule="fhrp-hold-under-peer-hello",
                 tier=Tier.FACTS,

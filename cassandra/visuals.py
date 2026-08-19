@@ -23,6 +23,7 @@ import re
 from collections.abc import Callable
 from typing import Final
 
+from cassandra.factpack.builders.common import fhrp_instance
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.findings import Finding
 from cassandra.timing.model import Event, EventKind, simulate
@@ -145,7 +146,7 @@ def timeline_svg(pack: StaticFactPack, finding: Finding) -> str:
         return ""
 
     groups = [g for g in pack.fhrp_groups]
-    labels = {g.id: f"{g.protocol.value.upper()} {g.group_number}" for g in groups}
+    labels = {g.id: g.label for g in groups}
     holders = sorted(
         {
             master
@@ -424,7 +425,11 @@ def _group_reaction(pack: StaticFactPack) -> list[tuple[str, int, int, bool]]:
         decrement = 0
         preempt = False
         for member in group.members:
-            key = (member.device, member.interface, str(group.group_number))
+            key = (
+                member.device,
+                member.interface,
+                fhrp_instance(group.group_number, group.family),
+            )
             delay_ms = max(delay_ms, delays.get(key, 0))
             decrement = max(
                 decrement,
@@ -432,7 +437,7 @@ def _group_reaction(pack: StaticFactPack) -> list[tuple[str, int, int, bool]]:
                 0,
             )
             preempt = preempt or member.preempt
-        label = f"{group.protocol.value.upper()} {group.group_number}"
+        label = group.label
         rows.append((label, delay_ms // 1000, decrement, preempt))
     return rows
 

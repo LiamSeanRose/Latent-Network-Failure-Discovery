@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterator
 from typing import Final
 
 from cassandra.factpack.schema import (
+    AddressFamily,
     BgpProcess,
     FhrpGroup,
     FhrpMember,
@@ -33,12 +34,20 @@ RULES: list[Rule] = []
 
 type Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 type Address = ipaddress.IPv4Interface | ipaddress.IPv6Interface
+type Host = ipaddress.IPv4Address | ipaddress.IPv6Address
 type SubnetKey = tuple[VrfName | None, Network]
 
 # A /30 or /31 with one end in the corpus is far more often a link to something
 # the user did not hand us — a carrier handoff, a firewall, a server — than a
 # real isolation defect, so the isolation rule stops there.
 POINT_TO_POINT_PREFIXLEN: Final = 30
+
+# The same judgement in IPv6, where the numbers are not the same ones. A /64 is
+# the ordinary LAN, not a point-to-point link, so reusing the IPv4 threshold
+# would exempt every IPv6 subnet there is and the isolation rule would have
+# nothing left to say about a dual-stack network. RFC 6164 makes /127 the
+# inter-router link.
+POINT_TO_POINT_PREFIXLEN_V6: Final = 127
 
 # A trunk permitting hundreds of VLANs is a bulk-permit policy, not a per-VLAN
 # assertion, and reading intent into it produces noise rather than findings.
@@ -71,14 +80,63 @@ def _interfaces(pack: StaticFactPack) -> dict[tuple[str, str], Interface]:
     }
 
 
-def _networks(interface: Interface) -> list[ipaddress.IPv4Network]:
-    nets = []
+def _networks(interface: Interface) -> list[Network]:
+    """Every subnet this interface is addressed in, both families together.
+
+    Both families, because most callers ask "is this address on one of them?"
+    and `ipaddress` answers that across families for them: an IPv4 address is
+    never in an IPv6 network. A caller that instead reports the list, or counts
+    it, has to say which family it means — see `_networks_in`.
+    """
+    nets: list[Network] = []
     for assignment in interface.addresses:
         try:
             nets.append(ipaddress.ip_interface(assignment.prefix).network)
         except ValueError:
             continue
     return nets
+
+
+def _networks_in(interface: Interface, family: AddressFamily) -> list[Network]:
+    """The subnets this interface is addressed in, in one address family.
+
+    What makes a rule about an FHRP group's virtual address family-aware. A
+    dual-stack SVI is on an IPv4 subnet and an IPv6 one; asking whether an IPv6
+    virtual address is inside "the interface's subnets" and finding the IPv4 one
+    there is not an answer, and reporting the IPv4 subnet as the one the address
+    should have been inside is a finding about nothing.
+    """
+    version = 6 if family is AddressFamily.IPV6_UNICAST else 4
+    return [net for net in _networks(interface) if net.version == version]
+
+
+def _host(value: str | None) -> Host | None:
+    """`value` as an address, or None when it does not name one.
+
+    Every rule that compares addresses goes through this rather than comparing
+    the strings a config happened to spell them with. IPv6 has many spellings of
+    one address — `2001:db8::1` and `2001:0DB8:0:0:0:0:0:1` are the same
+    gateway — so a string comparison finds a duplicate only when two operators
+    typed it the same way, which is the case where it was least likely to be an
+    accident.
+    """
+    if not value:
+        return None
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _canonical(address: str) -> str:
+    """One spelling per address, so two configs that wrote it differently match.
+
+    Falls back to the text as written when it names no address at all, which
+    keeps a malformed value comparable with itself — two groups sharing one
+    typo are still sharing it — and leaves reporting it to the rule whose job
+    that is.
+    """
+    return str(_host(address) or address)
 
 
 @rule
@@ -90,35 +148,40 @@ def virtual_address_outside_subnet(pack: StaticFactPack) -> Iterator[Finding]:
     group otherwise looks healthy: it elects, it advertises, and nothing uses it.
 
     Silent when the interface has no address at all, since there is then no
-    subnet to be outside of.
+    subnet to be outside of, and silent when it has no address in the group's
+    own family: an IPv6 group on an interface that is only numbered for IPv4 is
+    missing an address, not holding one in the wrong place, and comparing its
+    virtual address against the IPv4 subnet would report every dual-stack group
+    on a half-numbered interface.
+
+    Silent, too, for an IPv6 virtual address in fe80::/10. RFC 5798 makes the
+    link-local address a VRRPv3 group's primary virtual address precisely
+    because every interface on the segment already has one, so there is no
+    subnet for it to be outside of.
     """
     interfaces = _interfaces(pack)
     for group in pack.fhrp_groups:
-        if not group.virtual_ipv4:
-            continue
-        try:
-            virtual = ipaddress.ip_address(group.virtual_ipv4)
-        except ValueError:
-            # A mistyped octet is the commonest malformation there is, and the
-            # parsers accept any token here. `fhrp-virtual-not-a-host-address`
-            # is the rule that reports it; this one has nothing to say about a
-            # string that names no address, and crashing the whole run over it
-            # would take every other finding down with it.
+        # A mistyped octet is the commonest malformation there is, and the
+        # parsers accept any token here. `fhrp-virtual-not-an-address` is the
+        # rule that reports it; this one has nothing to say about a string that
+        # names no address, and crashing the whole run over it would take every
+        # other finding down with it.
+        virtual = _host(group.virtual_address)
+        if virtual is None or virtual.is_link_local:
             continue
         for member in group.members:
             interface = interfaces.get((member.device, member.interface))
             if interface is None:
                 continue
-            nets = _networks(interface)
+            nets = _networks_in(interface, group.family)
             if nets and not any(virtual in net for net in nets):
                 yield Finding(
                     rule="fhrp-virtual-outside-subnet",
                     tier=Tier.FACTS,
                     severity=Severity.HIGH,
                     device=member.device,
-                    title=f"{group.protocol.value.upper()} {group.group_number} "
-                    f"virtual address is outside its own subnet",
-                    detail=f"{group.virtual_ipv4} is not in "
+                    title=f"{group.label} virtual address is outside its own subnet",
+                    detail=f"{group.virtual_address} is not in "
                     + ", ".join(str(n) for n in nets),
                     evidence=(f"{member.device}:{member.interface}",),
                     remedy="move the virtual address into the interface subnet",
@@ -136,22 +199,23 @@ def virtual_address_collides(pack: StaticFactPack) -> Iterator[Finding]:
     """
     interfaces = _interfaces(pack)
     for group in pack.fhrp_groups:
+        virtual = group.virtual_address
+        if not virtual:
+            continue
         for member in group.members:
             interface = interfaces.get((member.device, member.interface))
             if interface is None:
                 continue
             for assignment in interface.addresses:
-                if assignment.address == group.virtual_ipv4:
+                if _canonical(assignment.address) == _canonical(virtual):
                     yield Finding(
                         rule="fhrp-virtual-collides",
                         tier=Tier.FACTS,
                         severity=Severity.HIGH,
                         device=member.device,
-                        title=f"{group.protocol.value.upper()} "
-                        f"{group.group_number} virtual address collides with a "
-                        f"real interface address",
-                        detail=f"{group.virtual_ipv4} is also configured on "
-                        f"{member.interface}",
+                        title=f"{group.label} virtual address collides "
+                        f"with a real interface address",
+                        detail=f"{virtual} is also configured on {member.interface}",
                         evidence=(f"{member.device}:{member.interface}",),
                         remedy="give the group a virtual address no device owns",
                     )
@@ -174,8 +238,7 @@ def group_has_no_redundancy(pack: StaticFactPack) -> Iterator[Finding]:
                 tier=Tier.FACTS,
                 severity=Severity.MEDIUM,
                 device=device,
-                title=f"{group.protocol.value.upper()} {group.group_number} has "
-                f"only {len(group.members)} member",
+                title=f"{group.label} has only {len(group.members)} member",
                 detail="a redundancy group with one member provides no redundancy",
                 remedy="configure the group on the peer device, or remove it",
             )
@@ -201,8 +264,7 @@ def priority_tie(pack: StaticFactPack) -> Iterator[Finding]:
                 tier=Tier.FACTS,
                 severity=Severity.MEDIUM,
                 device=tied[0].device,
-                title=f"{group.protocol.value.upper()} {group.group_number} has no "
-                f"preferred master",
+                title=f"{group.label} has no preferred master",
                 detail=f"{len(tied)} members share priority {top}, so the master is "
                 f"decided by address comparison and can change on reboot",
                 evidence=tuple(f"{m.device}:{m.interface}" for m in tied),
@@ -267,8 +329,7 @@ def tracking_cannot_change_the_outcome(pack: StaticFactPack) -> Iterator[Finding
                     tier=Tier.FACTS,
                     severity=Severity.MEDIUM,
                     device=member.device,
-                    title=f"{group.protocol.value.upper()} {group.group_number} "
-                    f"tracking can never cause a failover",
+                    title=f"{group.label} tracking can never cause a failover",
                     detail=f"priority {member.priority} minus the total decrement "
                     f"{total} is {member.priority - total}, still above the highest "
                     f"peer priority {max(rivals)}",
@@ -319,7 +380,7 @@ def svi_vlan_missing_from_every_trunk(pack: StaticFactPack) -> Iterator[Finding]
 
 @rule
 def duplicate_addresses(pack: StaticFactPack) -> Iterator[Finding]:
-    """One IPv4 address configured on two interfaces in the collection.
+    """One address configured on two interfaces in the collection.
 
     Whichever device answers first wins, and which one that is depends on ARP
     timing rather than on anything written down. The usual cause is a config
@@ -327,7 +388,10 @@ def duplicate_addresses(pack: StaticFactPack) -> Iterator[Finding]:
     duplicate is often on the device that was working yesterday.
 
     Compares addresses, not prefixes: the same address with two different masks
-    is still one address two devices claim.
+    is still one address two devices claim. Compares them as addresses rather
+    than as text, because IPv6 has many spellings of one address and two
+    configs that wrote `2001:db8::1` and `2001:0DB8:0:0:0:0:0:1` have made
+    exactly this mistake.
 
     Scoped per VRF, like every other subnet-shaped rule in this module. Two VRFs
     reusing an address is the reason VRFs exist, and the mechanism this rule
@@ -339,7 +403,7 @@ def duplicate_addresses(pack: StaticFactPack) -> Iterator[Finding]:
         for interface in device.interfaces:
             for assignment in interface.addresses:
                 where = f"{device.id}:{interface.name}"
-                key = (interface.vrf, assignment.address)
+                key = (interface.vrf, _canonical(assignment.address))
                 if (previous := seen.get(key)) is not None:
                     yield Finding(
                         rule="duplicate-address",
@@ -384,8 +448,7 @@ def preferred_master_will_not_reclaim(pack: StaticFactPack) -> Iterator[Finding]
                     tier=Tier.FACTS,
                     severity=Severity.LOW,
                     device=member.device,
-                    title=f"{group.protocol.value.upper()} {group.group_number} will "
-                    f"not return to its preferred master",
+                    title=f"{group.label} will not return to its preferred master",
                     detail=f"{member.device} has the highest priority ({top}) but "
                     f"preempt is off, so after any failover the group stays on the "
                     f"backup indefinitely",
@@ -422,6 +485,14 @@ def _ordered_subnets(pack: StaticFactPack) -> list[tuple[SubnetKey, list[Interfa
     return sorted(_subnets(pack).items(), key=lambda item: str(item[0]))
 
 
+def _point_to_point(net: Network) -> bool:
+    """True for a prefix too narrow for a missing far end to mean anything."""
+    limit = (
+        POINT_TO_POINT_PREFIXLEN_V6 if net.version == 6 else POINT_TO_POINT_PREFIXLEN
+    )
+    return net.prefixlen >= limit
+
+
 def _svi_vlan(interface: Interface) -> VlanId | None:
     if interface.kind is not InterfaceKind.SVI:
         return None
@@ -436,12 +507,22 @@ def mtu_mismatch_across_a_subnet(pack: StaticFactPack) -> Iterator[Finding]:
     Only explicitly configured values are compared. An unset MTU is a platform
     default this tool does not claim to know, and guessing one would invent
     findings rather than report them.
+
+    Reported once per set of interfaces rather than once per subnet. A
+    dual-stack link is one wire in two subnets and its MTU is one setting, so
+    naming it twice would tell the reader they have two problems to fix when
+    one edit fixes both.
     """
+    reported: set[frozenset[tuple[str, str]]] = set()
     for (_vrf, net), members in _ordered_subnets(pack):
         sized = [i for i in members if i.mtu_bytes is not None]
         values: set[int] = {i.mtu_bytes for i in sized if i.mtu_bytes is not None}
         if len(sized) < 2 or len(values) < 2:
             continue
+        who = frozenset((i.device, i.name) for i in sized)
+        if who in reported:
+            continue
+        reported.add(who)
         smallest = min(values)
         yield Finding(
             rule="mtu-mismatch",
@@ -533,7 +614,7 @@ def isolated_l3_interface(pack: StaticFactPack) -> Iterator[Finding]:
     }
 
     for (_vrf, net), members in subnets:
-        if net.prefixlen >= POINT_TO_POINT_PREFIXLEN:
+        if _point_to_point(net):
             continue
         if len({i.device for i in members}) > 1:
             continue
@@ -570,19 +651,15 @@ def virtual_address_is_not_an_address(pack: StaticFactPack) -> Iterator[Finding]
     checked by nothing and reported as healthy.
     """
     for group in pack.fhrp_groups:
-        if not group.virtual_ipv4:
-            continue
-        try:
-            ipaddress.ip_address(group.virtual_ipv4)
-        except ValueError:
+        configured = group.virtual_address
+        if configured and _host(configured) is None:
             yield Finding(
                 rule="fhrp-virtual-not-an-address",
                 tier=Tier.FACTS,
                 severity=Severity.HIGH,
                 device=group.members[0].device if group.members else "?",
-                title=f"{group.protocol.value.upper()} {group.group_number} "
-                f"virtual address is not an address",
-                detail=f"{group.virtual_ipv4!r} does not name an IP address, so "
+                title=f"{group.label} virtual address is not an address",
+                detail=f"{configured!r} does not name an IP address, so "
                 f"the group has no gateway to answer for and every other check "
                 f"on it was skipped",
                 evidence=tuple(f"{m.device}:{m.interface}" for m in group.members),
@@ -599,37 +676,47 @@ def virtual_address_is_network_or_broadcast(pack: StaticFactPack) -> Iterator[Fi
     """
     interfaces = _interfaces(pack)
     for group in pack.fhrp_groups:
-        if not group.virtual_ipv4:
-            continue
-        try:
-            virtual = ipaddress.ip_address(group.virtual_ipv4)
-        except ValueError:
+        virtual = _host(group.virtual_address)
+        if virtual is None:
             continue
         for member in group.members:
             interface = interfaces.get((member.device, member.interface))
             if interface is None:
                 continue
-            for net in _networks(interface):
-                # A /31 or /32 has neither a network nor a broadcast host, so
-                # the question does not arise there.
-                if net.version != virtual.version or net.prefixlen >= 31:
+            for net in _networks_in(interface, group.family):
+                # A /31 or /32 — a /127 or /128 in IPv6 — has neither a network
+                # nor a broadcast host, so the question does not arise there.
+                if net.version != virtual.version:
+                    continue
+                if net.prefixlen >= net.max_prefixlen - 1:
                     continue
                 if virtual not in net:
                     continue
                 if virtual == net.network_address:
-                    role = "network address"
-                elif virtual == net.broadcast_address:
+                    # IPv6 has no broadcast address, and the all-zeros host is
+                    # the Subnet-Router anycast rather than a plain unusable
+                    # one. Naming it correctly matters: an operator told their
+                    # gateway is a "network address" in IPv6 will go looking for
+                    # a concept the protocol does not have.
+                    role = (
+                        "subnet-router anycast address"
+                        if net.version == 6
+                        else "network address"
+                    )
+                elif net.version == 4 and virtual == net.broadcast_address:
                     role = "broadcast address"
                 else:
+                    # The last address of an IPv6 prefix is an ordinary host
+                    # address. Reading IPv4's broadcast rule onto it would
+                    # condemn a perfectly usable gateway.
                     continue
                 yield Finding(
                     rule="fhrp-virtual-not-a-host-address",
                     tier=Tier.FACTS,
                     severity=Severity.HIGH,
                     device=member.device,
-                    title=f"{group.protocol.value.upper()} {group.group_number} "
-                    f"virtual address is the {role} of its subnet",
-                    detail=f"{group.virtual_ipv4} is the {role} of {net}; hosts "
+                    title=f"{group.label} virtual address is the {role} of its subnet",
+                    detail=f"{group.virtual_address} is the {role} of {net}; hosts "
                     "will not ARP for it as a gateway and stacks routinely refuse "
                     "to configure it as a default route",
                     evidence=(f"{member.device}:{member.interface} {net}",),
@@ -643,7 +730,10 @@ def duplicate_group_member(pack: StaticFactPack) -> Iterator[Finding]:
     """One device holding two memberships of the same group on one subnet.
 
     Group numbers are legitimately reused across unrelated subnets — group 1 on
-    every SVI is ordinary practice — so the subnet is what makes this decidable.
+    every SVI is ordinary practice — so the subnet is what makes this decidable,
+    and the subnet is read in the group's own address family: a dual-stack pair
+    of interfaces shares an IPv4 subnet and an IPv6 one, and an IPv6 group's
+    two memberships are only in contention if they share the IPv6 one.
     Two memberships of one group in one subnet on one device means the device
     contends with itself: it sends advertisements from two interfaces, and which
     of them holds the virtual address is not something the config decides.
@@ -661,7 +751,11 @@ def duplicate_group_member(pack: StaticFactPack) -> Iterator[Finding]:
                 b = interfaces.get((device, second.interface))
                 if a is None or b is None:
                     continue
-                shared = sorted(set(_networks(a)) & set(_networks(b)), key=str)
+                shared = sorted(
+                    set(_networks_in(a, group.family))
+                    & set(_networks_in(b, group.family)),
+                    key=str,
+                )
                 if not shared:
                     continue
                 yield Finding(
@@ -694,8 +788,8 @@ def virtual_address_shared_by_two_groups(pack: StaticFactPack) -> Iterator[Findi
     """
     by_address: dict[str, list[FhrpGroup]] = {}
     for group in pack.fhrp_groups:
-        if group.virtual_ipv4:
-            by_address.setdefault(group.virtual_ipv4, []).append(group)
+        if virtual := group.virtual_address:
+            by_address.setdefault(_canonical(virtual), []).append(group)
 
     for address, groups in sorted(by_address.items()):
         if len(groups) < 2:
@@ -777,7 +871,8 @@ def evaluate(pack: StaticFactPack) -> list[Finding]:
 
 
 def group_summary(group: FhrpGroup) -> str:
-    return f"{group.protocol.value} {group.group_number}"
+    """The lower-case form of a group's label, for use inside a sentence."""
+    return group.label.lower()
 
 
 @rule
@@ -826,7 +921,7 @@ def vlan_used_but_not_declared(pack: StaticFactPack) -> Iterator[Finding]:
 def _address_owner(pack: StaticFactPack) -> dict[str, str]:
     """Which device owns each configured address, for resolving peerings."""
     return {
-        assignment.address: device.id
+        _canonical(assignment.address): device.id
         for device in pack.devices
         for interface in device.interfaces
         for assignment in interface.addresses
@@ -843,17 +938,20 @@ def bgp_session_configured_on_one_side(pack: StaticFactPack) -> Iterator[Finding
     """
     owner = _address_owner(pack)
     local_addresses = {
-        device.id: {a.address for i in device.interfaces for a in i.addresses}
+        device.id: {
+            _canonical(a.address) for i in device.interfaces for a in i.addresses
+        }
         for device in pack.devices
     }
     configured: dict[tuple[str, str], str] = {}
     for process in pack.bgp:
         for neighbor in process.neighbors:
-            configured[(process.device, neighbor.address)] = neighbor.address
+            address = _canonical(neighbor.address)
+            configured[(process.device, address)] = address
 
     for process in pack.bgp:
         for neighbor in process.neighbors:
-            peer_device = owner.get(neighbor.address)
+            peer_device = owner.get(_canonical(neighbor.address))
             if peer_device is None or peer_device == process.device:
                 continue
             reciprocated = any(
@@ -888,7 +986,7 @@ def bgp_remote_as_disagrees(pack: StaticFactPack) -> Iterator[Finding]:
 
     for process in pack.bgp:
         for neighbor in process.neighbors:
-            peer_device = owner.get(neighbor.address)
+            peer_device = owner.get(_canonical(neighbor.address))
             if peer_device is None or neighbor.remote_as is None:
                 continue
             actual = local_as.get(peer_device)
@@ -1224,28 +1322,36 @@ def fhrp_members_addressed_on_different_subnets(
     Requires the group number *and* the virtual address to match, so reusing
     group 1 on every SVI — ordinary practice — stays silent. Silent, too, when
     the members share a subnet, which is the case where the group really is one
-    group.
+    group, and across address families: a group's IPv4 half being on
+    10.14.0.0/24 while its IPv6 half is on 2001:db8:14::/64 is what a dual-stack
+    segment looks like, not a split.
     """
-    by_intent: dict[tuple[str, int, str], list[FhrpGroup]] = {}
+    by_intent: dict[tuple[str, int, str, str], list[FhrpGroup]] = {}
     for group in pack.fhrp_groups:
-        if group.virtual_ipv4 and group.subnet:
-            key = (group.protocol.value, group.group_number, group.virtual_ipv4)
+        virtual = group.virtual_address
+        if virtual and group.subnet:
+            key = (
+                group.protocol.value,
+                group.group_number,
+                group.family.value,
+                virtual,
+            )
             by_intent.setdefault(key, []).append(group)
 
-    for (protocol, number, virtual), groups in sorted(by_intent.items()):
+    for (_protocol, _number, _family, virtual), groups in sorted(by_intent.items()):
         subnets = sorted({group.subnet for group in groups if group.subnet})
         devices = sorted({m.device for group in groups for m in group.members})
         if len(subnets) < 2 or len(devices) < 2:
             continue
+        label = groups[0].label
         yield Finding(
             rule="fhrp-members-on-different-subnets",
             tier=Tier.FACTS,
             severity=Severity.HIGH,
             device=devices[0],
-            title=f"{protocol.upper()} {number} is split across "
-            + " and ".join(subnets),
+            title=f"{label} is split across " + " and ".join(subnets),
             detail=", ".join(devices)
-            + f" all run {protocol} {number} with virtual address {virtual}, but "
+            + f" all run {label.lower()} with virtual address {virtual}, but "
             f"their interfaces are addressed in different subnets, so they are not "
             f"members of one group: each is master of its own and none of them "
             f"backs up any other",
@@ -1255,7 +1361,7 @@ def fhrp_members_addressed_on_different_subnets(
                 for group in groups
                 for member in group.members
             ),
-            remedy=f"put every member of {protocol} {number} in one subnet, or "
+            remedy=f"put every member of {label.lower()} in one subnet, or "
             f"give the groups that are genuinely separate their own numbers and "
             f"virtual addresses",
         )

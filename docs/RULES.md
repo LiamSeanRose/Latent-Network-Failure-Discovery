@@ -20,7 +20,7 @@ breaks the build.
 | [`bgp-session-one-sided`](#bgp-session-one-sided) | facts | high | A peering only one end knows about. |
 | [`dampening-exceeds-sla`](#dampening-exceeds-sla) | facts | high | Max-suppress bounds how long a prefix stays withdrawn after the fault ends. |
 | [`device-isolated-by-shutdown`](#device-isolated-by-shutdown) | facts | high | A device whose every link into these configs is administratively down. |
-| [`duplicate-address`](#duplicate-address) | facts | high | One IPv4 address configured on two interfaces in the collection. |
+| [`duplicate-address`](#duplicate-address) | facts | high | One address configured on two interfaces in the collection. |
 | [`fhrp-duplicate-member`](#fhrp-duplicate-member) | facts | high | One device holding two memberships of the same group on one subnet. |
 | [`fhrp-hold-under-peer-hello`](#fhrp-hold-under-peer-hello) | facts | high | A member that gives up before its peer is next due to speak is not a standby, it is a second active gateway. |
 | [`fhrp-members-on-different-subnets`](#fhrp-members-on-different-subnets) | facts | high | A redundancy group whose two halves are not on the same subnet. |
@@ -191,6 +191,8 @@ Decidable only when both devices are present, so it stays silent on a single-dev
   `test_ios_builder.py::test_ios_reciprocated_bgp_session_is_silent`
 - The peering the far end states without a remote-as is still a peering.  
   `test_ios_builder.py::test_a_far_end_known_only_by_a_password_is_not_a_one_sided_session`
+- A peer address is checked against the subnets the device is addressed in. With IPv6 addressing unread those subnets did not exist, so every IPv6 peering in every config looked like a peer on no local subnet — a defect reported wholesale about configurations that were correct.  
+  `test_ipv6.py::test_an_ipv6_bgp_peer_is_found_on_its_own_subnet`
 - Nxos reciprocated bgp session is silent  
   `test_nxos_builder.py::test_nxos_reciprocated_bgp_session_is_silent`
 - The peering the far end states without a remote-as is still a peering.  
@@ -246,11 +248,11 @@ Reads the derived L3 adjacency graph, which already omits shut interfaces, and t
 
 **high** · `cassandra.facts.rules.duplicate_addresses`
 
-One IPv4 address configured on two interfaces in the collection.
+One address configured on two interfaces in the collection.
 
 Whichever device answers first wins, and which one that is depends on ARP timing rather than on anything written down. The usual cause is a config copied between devices and edited everywhere except the address, so the duplicate is often on the device that was working yesterday.
 
-Compares addresses, not prefixes: the same address with two different masks is still one address two devices claim.
+Compares addresses, not prefixes: the same address with two different masks is still one address two devices claim. Compares them as addresses rather than as text, because IPv6 has many spellings of one address and two configs that wrote `2001:db8::1` and `2001:0DB8:0:0:0:0:0:1` have made exactly this mistake.
 
 Scoped per VRF, like every other subnet-shaped rule in this module. Two VRFs reusing an address is the reason VRFs exist, and the mechanism this rule describes — whoever answers ARP first wins — cannot happen between segments that never see each other's ARP.
 
@@ -266,6 +268,8 @@ Scoped per VRF, like every other subnet-shaped rule in this module. Two VRFs reu
   `test_facts_rules.py::test_a_virtual_address_written_on_both_members`
 - Two VRFs are two separate address spaces, so the same address in each is a deliberate design rather than a collision. Nothing on either segment ever sees the other's ARP, which is the mechanism the rule is written about.  
   `test_facts_rules.py::test_the_same_address_in_two_vrfs_on_one_device`
+- An interface's IPv4 address and its IPv6 address are two addresses on one interface. A rule that indexed them together, or compared them as text without knowing which family they belonged to, would report the pair as two devices contending for one address.  
+  `test_ipv6.py::test_two_families_on_one_interface_are_not_one_address_claimed_twice`
 
 ### `fhrp-duplicate-member`
 
@@ -273,7 +277,7 @@ Scoped per VRF, like every other subnet-shaped rule in this module. Two VRFs reu
 
 One device holding two memberships of the same group on one subnet.
 
-Group numbers are legitimately reused across unrelated subnets — group 1 on every SVI is ordinary practice — so the subnet is what makes this decidable. Two memberships of one group in one subnet on one device means the device contends with itself: it sends advertisements from two interfaces, and which of them holds the virtual address is not something the config decides.
+Group numbers are legitimately reused across unrelated subnets — group 1 on every SVI is ordinary practice — so the subnet is what makes this decidable, and the subnet is read in the group's own address family: a dual-stack pair of interfaces shares an IPv4 subnet and an IPv6 one, and an IPv6 group's two memberships are only in contention if they share the IPv6 one. Two memberships of one group in one subnet on one device means the device contends with itself: it sends advertisements from two interfaces, and which of them holds the virtual address is not something the config decides.
 
 **Reports:** {…} is a member of {…} twice on {…}
 
@@ -285,6 +289,8 @@ Group numbers are legitimately reused across unrelated subnets — group 1 on ev
 
 - Group 14 on two unrelated subnets is ordinary practice, not a defect.  
   `test_facts_rules.py::test_group_number_reused_on_another_subnet_is_not_a_duplicate`
+- The IPv4 and IPv6 halves of one group number hold different virtual addresses on the same interfaces. Read without their families they are two groups claiming one interface — a device contending with itself, and two groups answering for one address.  
+  `test_ipv6.py::test_the_two_families_of_one_group_do_not_collide_or_share`
 
 ### `fhrp-hold-under-peer-hello`
 
@@ -319,18 +325,20 @@ A redundancy group whose two halves are not on the same subnet.
 
 Two devices run the same protocol, the same group number and the same virtual address, which is as explicit as intent gets — and their interfaces are addressed in different subnets, so the Fact Pack holds them as two separate one-member groups rather than one pair. Each device is master of its own group, neither backs the other up, and the failover the numbers describe does not exist. A wrong octet or a wrong mask on one side produces exactly this, and both configurations look correct read on their own.
 
-Requires the group number *and* the virtual address to match, so reusing group 1 on every SVI — ordinary practice — stays silent. Silent, too, when the members share a subnet, which is the case where the group really is one group.
+Requires the group number *and* the virtual address to match, so reusing group 1 on every SVI — ordinary practice — stays silent. Silent, too, when the members share a subnet, which is the case where the group really is one group, and across address families: a group's IPv4 half being on 10.14.0.0/24 while its IPv6 half is on 2001:db8:14::/64 is what a dual-stack segment looks like, not a split.
 
-**Reports:** {…} {…} is split across {…}
+**Reports:** {…} is split across {…}
 
-**Detail:** {…} all run {…} {…} with virtual address {…}, but their interfaces are addressed in different subnets, so they are not members of one group: each is master of its own and none of them backs up any other
+**Detail:** {…} all run {…} with virtual address {…}, but their interfaces are addressed in different subnets, so they are not members of one group: each is master of its own and none of them backs up any other
 
-**Remedy:** put every member of {…} {…} in one subnet, or give the groups that are genuinely separate their own numbers and virtual addresses
+**Remedy:** put every member of {…} in one subnet, or give the groups that are genuinely separate their own numbers and virtual addresses
 
 **Stays silent when:**
 
 - Group 14 reused on an unrelated subnet with its own virtual address is ordinary practice: the intent to pair two devices is what the matching virtual address establishes, and it is absent here.  
   `test_facts_rules.py::test_one_group_number_on_two_subnets_with_its_own_address_each`
+- The IPv4 half of a group is on 10.14.0.0/24 and the IPv6 half on 2001:db8:14::/64. That is what one dual-stack segment looks like, not two devices that were meant to be in one subnet and are not.  
+  `test_ipv6.py::test_a_group_spanning_two_families_is_not_a_group_split_in_two`
 
 ### `fhrp-track-target-shutdown`
 
@@ -382,7 +390,7 @@ A virtual address a real interface on the same pair already owns.
 
 The virtual address is meant to be answered by whichever member is master. When one member also carries it as its own interface address, that member answers for it whether or not it holds the group, so failover moves the group without moving the traffic.
 
-**Reports:** {…} {…} virtual address collides with a real interface address
+**Reports:** {…} virtual address collides with a real interface address
 
 **Detail:** {…} is also configured on {…}
 
@@ -394,6 +402,8 @@ The virtual address is meant to be answered by whichever member is master. When 
   `test_facts_rules.py::test_both_members_advertising_the_same_virtual_address`
 - A member interface may carry several real addresses on the segment it serves. Sharing the subnet with the virtual address is the requirement, not the defect — only an interface configured with the virtual address itself answers for it while it is backup.  
   `test_facts_rules.py::test_a_virtual_address_beside_a_secondary_on_the_same_subnet`
+- The IPv4 and IPv6 halves of one group number hold different virtual addresses on the same interfaces. Read without their families they are two groups claiming one interface — a device contending with itself, and two groups answering for one address.  
+  `test_ipv6.py::test_the_two_families_of_one_group_do_not_collide_or_share`
 
 ### `fhrp-virtual-not-a-host-address`
 
@@ -403,7 +413,7 @@ A virtual address that is not a host address at all.
 
 Distinct from `fhrp-virtual-outside-subnet`: this address *is* inside the subnet, which is why that rule stays quiet, but no host may hold it.
 
-**Reports:** {…} {…} virtual address is the {…} of its subnet
+**Reports:** {…} virtual address is the {…} of its subnet
 
 **Detail:** {…} is the {…} of {…}; hosts will not ARP for it as a gateway and stacks routinely refuse to configure it as a default route
 
@@ -413,6 +423,8 @@ Distinct from `fhrp-virtual-outside-subnet`: this address *is* inside the subnet
 
 - Host virtual address is not flagged  
   `test_facts_rules.py::test_host_virtual_address_is_not_flagged`
+- IPv6 has no broadcast address. The last address of a prefix is a host address like any other, and a gateway numbered there is fine; applying IPv4's broadcast rule to it would condemn a working configuration.  
+  `test_ipv6.py::test_the_last_address_of_an_ipv6_prefix_is_an_ordinary_host_address`
 
 ### `fhrp-virtual-not-an-address`
 
@@ -422,7 +434,7 @@ A virtual address that is not an IP address at all.
 
 A mistyped octet — `10.14.0.300` — is the commonest malformation a config has, and the parsers accept whatever token follows the keyword rather than guessing at what was meant. Every other rule about the virtual address skips a group it cannot read, so without this one the group would be checked by nothing and reported as healthy.
 
-**Reports:** {…} {…} virtual address is not an address
+**Reports:** {…} virtual address is not an address
 
 **Detail:** {…} does not name an IP address, so the group has no gateway to answer for and every other check on it was skipped
 
@@ -432,6 +444,8 @@ A mistyped octet — `10.14.0.300` — is the commonest malformation a config ha
 
 - The rule exists for a string that names no address, not for one that names an address someone dislikes.  
   `test_facts_rules.py::test_a_readable_virtual_address_is_not_reported_as_unreadable`
+- Every rule about a virtual address skips a group whose address it cannot read, and `fhrp-virtual-not-an-address` is what stops that being silent. It has to look in the field the group's own family uses — reading `virtual_ipv4` on an IPv6 group finds nothing there and reports a healthy group as broken, or skips it entirely.  
+  `test_ipv6.py::test_an_ipv6_virtual_address_is_read_as_an_address`
 
 ### `fhrp-virtual-outside-subnet`
 
@@ -441,9 +455,11 @@ A virtual address outside every subnet the member interface is on.
 
 Hosts reach their gateway by ARPing for an address on their own subnet. One outside it is unreachable from the segment it is supposed to serve, and the group otherwise looks healthy: it elects, it advertises, and nothing uses it.
 
-Silent when the interface has no address at all, since there is then no subnet to be outside of.
+Silent when the interface has no address at all, since there is then no subnet to be outside of, and silent when it has no address in the group's own family: an IPv6 group on an interface that is only numbered for IPv4 is missing an address, not holding one in the wrong place, and comparing its virtual address against the IPv4 subnet would report every dual-stack group on a half-numbered interface.
 
-**Reports:** {…} {…} virtual address is outside its own subnet
+Silent, too, for an IPv6 virtual address in fe80::/10. RFC 5798 makes the link-local address a VRRPv3 group's primary virtual address precisely because every interface on the segment already has one, so there is no subnet for it to be outside of.
+
+**Reports:** {…} virtual address is outside its own subnet
 
 **Detail:** {…} is not in {…}
 
@@ -453,6 +469,12 @@ Silent when the interface has no address at all, since there is then no subnet t
 
 - Virtual address is network or broadcast  
   `test_facts_rules.py::test_virtual_address_is_network_or_broadcast`
+- A dual-stack interface is on two subnets, and a virtual address can only be inside one of them. Judged against both, every group on every dual-stack interface in the world is outside a subnet it was never meant to be in.  
+  `test_ipv6.py::test_an_ipv4_virtual_address_is_not_judged_against_an_ipv6_subnet`
+- An IPv6 group whose interface carries no IPv6 address is missing an address, not holding one in the wrong place. The interface's IPv4 subnet is not a subnet its virtual address could have been inside, so reporting it as the one the address should have been in would name an unrelated prefix.  
+  `test_ipv6.py::test_an_ipv6_group_on_an_ipv4_only_interface_is_not_outside_its_subnet`
+- RFC 5798 makes an IPv6 group's primary virtual address link-local, which is exactly why the IOS configs here write `address FE80::1 primary`. Every interface on the segment is already on fe80::/10, so there is no subnet for that address to be outside of and no defect to report.  
+  `test_ipv6.py::test_a_link_local_virtual_address_is_not_outside_its_subnet`
 
 ### `fhrp-virtual-shared`
 
@@ -472,6 +494,8 @@ Each group derives its own virtual MAC from its group number, so one address res
 
 - Distinct virtual addresses are not shared  
   `test_facts_rules.py::test_distinct_virtual_addresses_are_not_shared`
+- The IPv4 and IPv6 halves of one group number hold different virtual addresses on the same interfaces. Read without their families they are two groups claiming one interface — a device contending with itself, and two groups answering for one address.  
+  `test_ipv6.py::test_the_two_families_of_one_group_do_not_collide_or_share`
 
 ### `mtu-mismatch`
 
@@ -480,6 +504,8 @@ Each group derives its own virtual MAC from its group number, so one address res
 Neighbours that disagree about how large a frame may be.
 
 Only explicitly configured values are compared. An unset MTU is a platform default this tool does not claim to know, and guessing one would invent findings rather than report them.
+
+Reported once per set of interfaces rather than once per subnet. A dual-stack link is one wire in two subnets and its MTU is one setting, so naming it twice would tell the reader they have two problems to fix when one edit fixes both.
 
 **Reports:** MTU is not agreed across {…}
 
@@ -493,6 +519,8 @@ Only explicitly configured values are compared. An unset MTU is a platform defau
   `test_facts_rules.py::test_matching_mtu_does_not_fire`
 - An unset MTU is a platform default the tool does not claim to know.  
   `test_facts_rules.py::test_one_configured_mtu_is_not_a_mismatch`
+- Both ends of the link are 9214 bytes and the link is in two subnets. The rule walks subnets, so it looks at this wire twice and has to reach the same answer both times.  
+  `test_ipv6.py::test_a_dual_stack_wire_whose_ends_agree_reports_no_mtu_mismatch`
 
 ### `ospf-timers-disagree`
 
@@ -547,6 +575,8 @@ Silent when the prefix lengths agree, and when neither address is inside the oth
   `test_facts_rules.py::test_a_host_address_inside_another_subnet_is_not_a_mask_disagreement`
 - Neither address falls inside the other's subnet, so the two interfaces make no competing claim about one segment and there is nothing to reconcile.  
   `test_facts_rules.py::test_unrelated_subnets_with_different_masks_are_not_a_disagreement`
+- A /24 and a /64 on the same pair of interfaces are two masks, and they are not a disagreement: they describe different address families. The rule only compares addresses of one version, and this is what says so.  
+  `test_ipv6.py::test_two_families_on_one_wire_do_not_disagree_about_its_mask`
 
 ### `vlan-not-declared`
 
@@ -654,6 +684,8 @@ Skipped when the peering is explicitly not directly connected — an update-sour
 
 - update-source or ebgp-multihop says the operator meant it.  
   `test_facts_rules.py::test_multihop_peer_off_subnet_is_intentional`
+- A peer address is checked against the subnets the device is addressed in. With IPv6 addressing unread those subnets did not exist, so every IPv6 peering in every config looked like a peer on no local subnet — a defect reported wholesale about configurations that were correct.  
+  `test_ipv6.py::test_an_ipv6_bgp_peer_is_found_on_its_own_subnet`
 
 ### `dampening-never-suppresses`
 
@@ -717,7 +749,7 @@ A redundancy group with fewer than two members in the collection.
 
 Either the peer's configuration is not in the directory — in which case the finding is telling you the analysis is incomplete, which is worth knowing — or the group really is configured on one device, and the virtual address is a second name for a single point of failure.
 
-**Reports:** {…} {…} has only {…} member
+**Reports:** {…} has only {…} member
 
 **Detail:** a redundancy group with one member provides no redundancy
 
@@ -738,7 +770,7 @@ Members sharing the top priority, so nothing decides the master.
 
 The protocols break the tie on address comparison, which is deterministic but not chosen: the master is whichever device happens to have the higher interface address. That holds until a reboot changes who advertises first, and then the placement people have been assuming quietly stops being true.
 
-**Reports:** {…} {…} has no preferred master
+**Reports:** {…} has no preferred master
 
 **Detail:** {…} members share priority {…}, so the master is decided by address comparison and can change on reboot
 
@@ -759,7 +791,7 @@ A decrement too small to lose the election is tracking that does nothing.
 
 This is the quiet one: the config looks correct, the intent is visible, and the failover silently never happens.
 
-**Reports:** {…} {…} tracking can never cause a failover
+**Reports:** {…} tracking can never cause a failover
 
 **Detail:** priority {…} minus the total decrement {…} is {…}, still above the highest peer priority {…}
 
@@ -851,7 +883,7 @@ Low severity because it is a defensible configuration. It is reported so the cho
 
 Silent when the top priority is shared. There is then no preferred master to fail to reclaim — firing once per tied member would state, twice and contradictorily, that each of them is the preferred one. `fhrp-priority-tie` is the finding for that group.
 
-**Reports:** {…} {…} will not return to its preferred master
+**Reports:** {…} will not return to its preferred master
 
 **Detail:** {…} has the highest priority ({…}) but preempt is off, so after any failover the group stays on the backup indefinitely
 
@@ -936,6 +968,8 @@ INFO, not a defect: a subnet whose other end is a server, a firewall, or a devic
   `test_facts_rules.py::test_a_device_sharing_no_subnet_at_all_is_not_reported_interface_by_interface`
 - Loopback is not isolated  
   `test_facts_rules.py::test_loopback_is_not_isolated`
+- Both aggregation switches are addressed in 2001:db8:14::/64, so neither is alone on it. The IPv4 threshold that decides when a missing far end is unremarkable would have exempted every /64 there is, which is the same silence for the wrong reason.  
+  `test_ipv6.py::test_a_shared_ipv6_subnet_is_not_an_isolated_interface`
 
 ## TIMING tier
 
@@ -1003,6 +1037,12 @@ These tests assert that a rule set reports nothing at all on a given input. They
   `test_facts_rules.py::test_real_corpus_produces_nothing`
 - **`cassandra.facts.rules`** — Reciprocated bgp session is silent  
   `test_facts_rules.py::test_reciprocated_bgp_session_is_silent`
+- **`cassandra.facts.rules`** — The whole FACTS tier against a dual-stack pair with nothing wrong with it. Every cross-family false positive there is would show up here.  
+  `test_ipv6.py::test_a_clean_dual_stack_eos_pair_produces_nothing`
+- **`cassandra.facts.rules`** — The same claim for the dialect that writes its IPv6 group in a sub-mode rather than on one line, whose virtual address is link-local.  
+  `test_ipv6.py::test_a_clean_dual_stack_ios_pair_produces_nothing`
+- **`cassandra.facts.rules`** — The same claim again for HSRP, whose IPv6 group is a separate block with its own priority rather than a second address on a shared one.  
+  `test_ipv6.py::test_a_clean_dual_stack_nxos_pair_produces_nothing`
 - **`cassandra.timing.timer_rules`** — Fast bfd alongside the same igp is silent  
   `test_timer_rules.py::test_fast_bfd_alongside_the_same_igp_is_silent`
 - **`cassandra.timing.timer_rules`** — Dampening inside the sla is silent  
