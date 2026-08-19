@@ -139,18 +139,27 @@ class _Block:
     """A config line plus the lines indented beneath it, indentation intact.
 
     The difference from `common.Stanza` is that `body` is not stripped, so a block
-    can be split again at the next level down.
+    can be split again at the next level down. `line` and `body_lines` number
+    them as `Stanza` does, and survive that second split.
     """
 
     header: str
     body: list[str] = field(default_factory=list)
+    line: int = 0
+    body_lines: list[int] = field(default_factory=list)
 
 
-def _blocks(lines: list[str]) -> list[_Block]:
-    """Split `lines` at their shallowest indentation into headers and bodies."""
+def _blocks(lines: list[str], numbers: list[int] | None = None) -> list[_Block]:
+    """Split `lines` at their shallowest indentation into headers and bodies.
+
+    `numbers` is where each line sits in the file. A nested split passes the
+    enclosing block's `body_lines` so an `hsrp <n>` group four levels into a
+    config still knows the line it was written on.
+    """
     out: list[_Block] = []
     base: int | None = None
-    for raw in lines:
+    counted = numbers if numbers is not None else list(range(1, len(lines) + 1))
+    for number, raw in zip(counted, lines, strict=True):
         if not raw.strip():
             continue
         indent = len(raw) - len(raw.lstrip())
@@ -158,8 +167,9 @@ def _blocks(lines: list[str]) -> list[_Block]:
             base = indent
         if indent > base and out:
             out[-1].body.append(raw)
+            out[-1].body_lines.append(number)
             continue
-        out.append(_Block(header=raw.strip()))
+        out.append(_Block(header=raw.strip(), line=number))
     return out
 
 
@@ -224,7 +234,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> NxosDevice:
 
         if m := re.fullmatch(r"interface (\S+)", header):
             iface, iface_fhrp, iface_timers, leftover = _parse_interface(
-                hostname, m.group(1), block.body
+                hostname, m.group(1), block
             )
             interfaces.append(iface)
             fhrp.extend(iface_fhrp)
@@ -388,7 +398,7 @@ def _parse_hsrp_group(
 
 
 def _parse_interface(
-    device: str, name: str, body: list[str]
+    device: str, name: str, stanza: _Block
 ) -> tuple[
     Interface,
     list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]],
@@ -411,12 +421,16 @@ def _parse_interface(
     # group -> accumulated HSRP settings
     groups: dict[int, dict[str, str]] = {}
     group_tracks: dict[int, list[tuple[str, int]]] = {}
+    # group -> the line its sub-block opens on, which is where a reader looking
+    # for the group should be sent.
+    group_lines: dict[int, int] = {}
 
-    for block in _blocks(body):
+    for block in _blocks(stanza.body, stanza.body_lines):
         line = block.header
 
         if m := re.fullmatch(r"hsrp (\d+)", line):
             group = int(m.group(1))
+            group_lines.setdefault(group, block.line)
             unparsed.extend(
                 _parse_hsrp_group(
                     block.body,
@@ -495,6 +509,7 @@ def _parse_interface(
         vrf=vrf,
         addresses=tuple(addresses),
         lag_member_of=lag_member_of,
+        config_line=stanza.line or None,
     )
 
     members: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
@@ -516,6 +531,7 @@ def _parse_interface(
                 for track_id, decrement in group_tracks.get(group, [])
             ),
             version=version,
+            config_line=group_lines.get(group),
         )
         members.append(
             (group, FhrpProtocol.HSRP, member, name, settings.get("virtual_ipv4"))

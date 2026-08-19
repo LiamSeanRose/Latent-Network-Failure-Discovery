@@ -23,6 +23,7 @@ from typing import Final
 from cassandra.factpack.builders.common import (
     BgpPeerSettings,
     ParsedDevice,
+    Stanza,
     apply_bgp_peer_setting,
     bgp_neighbors_from,
     declared_vlans_from,
@@ -152,7 +153,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> IosDevice:
 
         if m := re.fullmatch(r"interface (\S+)", header):
             iface, iface_fhrp, iface_timers, leftover = _parse_interface(
-                hostname, m.group(1), stanza.body
+                hostname, m.group(1), stanza
             )
             interfaces.append(iface)
             fhrp.extend(iface_fhrp)
@@ -244,7 +245,7 @@ def _parse_router_bgp(
 
 
 def _parse_interface(
-    device: str, name: str, body: list[str]
+    device: str, name: str, stanza: Stanza
 ) -> tuple[
     Interface,
     list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]],
@@ -261,8 +262,11 @@ def _parse_interface(
     unparsed: list[str] = []
     groups: dict[int, dict[str, str]] = {}
     group_tracks: dict[int, list[tuple[str, int]]] = {}
+    # group -> the first line that configures it, which is where a reader looking
+    # for the group should be sent. The later lines are the same group.
+    group_lines: dict[int, int] = {}
 
-    for line in body:
+    for number, line in zip(stanza.body_lines, stanza.body, strict=True):
         if m := re.fullmatch(r"description (.+)", line):
             description = m.group(1)
         elif line == "shutdown":
@@ -303,6 +307,7 @@ def _parse_interface(
             group = int(m.group(1))
             rest = m.group(2)
             settings = groups.setdefault(group, {})
+            group_lines.setdefault(group, number)
             if t := re.fullmatch(r"track (\S+)( decrement (\d+))?", rest):
                 decrement = t.group(3)
                 group_tracks.setdefault(group, []).append(
@@ -343,6 +348,7 @@ def _parse_interface(
         access_vlan=access_vlan,
         allowed_vlans=allowed,
         addresses=tuple(addresses),
+        config_line=stanza.line or None,
     )
 
     members: list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]] = []
@@ -363,6 +369,7 @@ def _parse_interface(
                 )
                 for track_id, decrement in group_tracks.get(group, [])
             ),
+            config_line=group_lines.get(group),
         )
         members.append(
             (group, FhrpProtocol.HSRP, member, name, settings.get("virtual_ipv4"))

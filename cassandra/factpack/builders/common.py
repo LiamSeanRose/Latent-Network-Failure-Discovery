@@ -48,22 +48,31 @@ def interface_kind(name: str) -> InterfaceKind:
 
 @dataclass(slots=True)
 class Stanza:
-    """A top-level config line plus the indented lines beneath it."""
+    """A top-level config line plus the indented lines beneath it.
+
+    `line` and `body_lines` number the header and each body line from one, so a
+    fact can carry the place it was configured. They count lines of the file the
+    operator has open, which is why `strip_banners` blanks a banner out rather
+    than deleting it.
+    """
 
     header: str
     body: list[str] = field(default_factory=list)
+    line: int = 0
+    body_lines: list[int] = field(default_factory=list)
 
 
 def stanzas(text: str) -> list[Stanza]:
     out: list[Stanza] = []
-    for raw in text.splitlines():
+    for number, raw in enumerate(text.splitlines(), start=1):
         if not raw.strip():
             continue
         if raw[0].isspace():
             if out:
                 out[-1].body.append(raw.strip())
+                out[-1].body_lines.append(number)
             continue
-        out.append(Stanza(header=raw.strip()))
+        out.append(Stanza(header=raw.strip(), line=number))
     return out
 
 
@@ -173,7 +182,12 @@ def declared_vlans_from(device: str, stanza: Stanza) -> list[Vlan]:
         None,
     )
     return [
-        Vlan(device=device, vlan_id=vid, name=name if len(ids) == 1 else None)
+        Vlan(
+            device=device,
+            vlan_id=vid,
+            name=name if len(ids) == 1 else None,
+            config_line=stanza.line or None,
+        )
         for vid in ids
     ]
 
@@ -213,17 +227,24 @@ def strip_banners(text: str) -> str:
     Banner text sits at column zero and is arbitrary prose, so a stanza parser
     reads every line of it as a separate top-level command. On a real device
     config that is the single largest source of nonsense.
+
+    A removed line is replaced by an empty one rather than dropped. Every stanza
+    after a banner would otherwise sit at a lower number than it does in the
+    file, and a citation that points a reader at the wrong line is worse than one
+    that points at none.
     """
     out: list[str] = []
     in_banner = False
     for line in text.splitlines():
         if not in_banner and line.strip().startswith("banner "):
             in_banner = True
+            out.append("")
             continue
         if in_banner:
             # EOS terminates with a lone EOF; IOS uses a delimiter character.
             if line.strip() in {"EOF", "!", ""} or line.strip().startswith("^"):
                 in_banner = False
+            out.append("")
             continue
         out.append(line)
     return "\n".join(out)

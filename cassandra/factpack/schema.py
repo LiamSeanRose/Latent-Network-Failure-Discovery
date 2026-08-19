@@ -25,6 +25,12 @@ Design rules this module holds to:
   distinguishes an explicitly configured timer from a platform default;
   the difference decides whether a timer race is an operator decision or an
   inherited accident.
+* A fact carries where it was written. `Device.config_path` names the file, and
+  `config_line` on the objects a stanza declares names the line inside it, so a
+  finding can send a reader to the configuration responsible rather than to a
+  device name (§5.4). The path is relative to the directory that was checked:
+  an absolute path from the machine that ran the check means nothing in a report
+  someone else reads.
 """
 
 from __future__ import annotations
@@ -217,6 +223,7 @@ class Interface:
     parent: InterfaceName | None = None
     lag_member_of: InterfaceName | None = None
     dot1q_vlan: VlanId | None = None
+    config_line: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -231,6 +238,7 @@ class Device:
     vrfs: tuple[VrfName, ...] = ()
     interfaces: tuple[Interface, ...] = ()
     config_line_count: int | None = None
+    config_path: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -278,6 +286,7 @@ class Vlan:
     vlan_id: VlanId
     name: str | None = None
     stp_instance: int | None = None
+    config_line: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -346,6 +355,7 @@ class FhrpMember:
     tracked_objects: tuple[TrackedObject, ...] = ()
     version: int | None = None
     authenticated: bool = False
+    config_line: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

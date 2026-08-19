@@ -114,6 +114,13 @@ def build_fact_pack(
     for config in found.configs:
         digest.update(config.text.encode())
         parsed = parse(config.text, device_id=config.device_id)
+        # The file is stored relative to the directory that was checked. A
+        # finding travels — into a baseline, a report, a ticket — and an absolute
+        # path from whichever machine ran the check means nothing to whoever
+        # reads it next.
+        parsed = replace(
+            parsed, device=replace(parsed.device, config_path=config.relative)
+        )
         if _is_empty_of_facts(config, parsed):
             notes.append(
                 f"{config.path}: reads as configuration but declares no hostname "
@@ -158,6 +165,7 @@ def build_fact_pack(
                         )
                         for obj in member.tracked_objects
                     ),
+                    config_line=member.config_line,
                 )
             )
             virtuals.setdefault(key, virtual)

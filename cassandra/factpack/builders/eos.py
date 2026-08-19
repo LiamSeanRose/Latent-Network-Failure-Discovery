@@ -20,6 +20,7 @@ from typing import Final
 
 from cassandra.factpack.builders.common import (
     ParsedDevice,
+    Stanza,
     declared_vlans_from,
     interface_kind,
     is_out_of_scope,
@@ -178,7 +179,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
                 iface_bfd,
                 iface_igp,
                 iface_unparsed,
-            ) = _parse_interface(hostname, name, stanza.body)
+            ) = _parse_interface(hostname, name, stanza)
             interfaces.append(iface)
             fhrp.extend(iface_fhrp)
             timers.extend(iface_timers)
@@ -399,7 +400,7 @@ def _dampening_profile(
 
 
 def _parse_interface(
-    device: str, name: str, body: list[str]
+    device: str, name: str, stanza: Stanza
 ) -> tuple[
     Interface,
     list[tuple[int, FhrpProtocol, FhrpMember, str, str | None]],
@@ -420,6 +421,9 @@ def _parse_interface(
     # group -> accumulated VRRP settings
     groups: dict[int, dict[str, str]] = {}
     group_tracks: dict[int, list[tuple[str, int]]] = {}
+    # group -> the first line that configures it, which is where a reader looking
+    # for the group should be sent. The later lines are the same group.
+    group_lines: dict[int, int] = {}
 
     bfd_settings: dict[str, str] = {}
     bfd_echo = False
@@ -427,7 +431,7 @@ def _parse_interface(
     ospf: dict[str, str] = {}
     isis: dict[str, str] = {}
 
-    for line in body:
+    for number, line in zip(stanza.body_lines, stanza.body, strict=True):
         if m := re.fullmatch(r"description (.+)", line):
             description = m.group(1)
         elif line == "shutdown":
@@ -487,6 +491,7 @@ def _parse_interface(
             group = int(m.group(1))
             rest = m.group(2)
             settings = groups.setdefault(group, {})
+            group_lines.setdefault(group, number)
             if t := re.fullmatch(r"tracked-object (\S+) decrement (\d+)", rest):
                 group_tracks.setdefault(group, []).append((t.group(1), int(t.group(2))))
             elif t := re.fullmatch(r"ipv4 (\S+)", rest):
@@ -519,6 +524,7 @@ def _parse_interface(
         access_vlan=access_vlan,
         allowed_vlans=allowed,
         addresses=tuple(addresses),
+        config_line=stanza.line or None,
     )
 
     scope = TimerScope(device=device, interface=name, source=TimerSource.CONFIGURED)
@@ -587,6 +593,7 @@ def _parse_interface(
                 )
                 for track_id, decrement in group_tracks.get(group, [])
             ),
+            config_line=group_lines.get(group),
         )
         members.append(
             (group, FhrpProtocol.VRRP, member, name, settings.get("virtual_ipv4"))
