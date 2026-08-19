@@ -53,6 +53,36 @@ operation, so there is no second route.
 
 ---
 
+## 2026-08-19 — What the parallel round produced, and what it cost
+
+Five workers on disjoint files, then three more. Worth recording because the value did not
+come from where it was expected.
+
+**The throughput was real but secondary.** A third config dialect, timer-race rules, BGP parity,
+richer FACTS rules, packaging, topology derivation and baseline comparison landed in two rounds.
+
+**The defects they found in each other's work were the point.** Three examples, none of which a
+single worker would have hit:
+
+- The timer rules were wired into `check` and could never fire, because the collector populated
+  only the FHRP timer family. A rule that cannot fire is indistinguishable from a clean network.
+- FHRP groups were keyed by number alone across a whole directory, so a group number reused per
+  VLAN merged and produced three findings on a valid config.
+- `cassandra/baseline.py`'s author found two flaws in the CLI wiring written for it: an
+  unwritable path raised a traceback, and the exit semantics of `--save-baseline` were
+  undocumented.
+
+**What file ownership does not prevent.** Three web-view tests broke despite perfectly disjoint
+file lists, because a fixture pinned exact rule names while another worker added rules.
+Exclusive ownership stops write conflicts, not semantic coupling — assertions that name another
+module's registry are a shared surface whatever file they live in.
+
+**Where it does not help**, recorded so it is not applied blindly: the emulation validation
+failure earlier the same day would not have been solved faster by more workers. It needed one
+machine that could boot the lab.
+
+---
+
 ## 2026-08-19 — Layer 1 is refused, and the corpus is why
 
 **Context:** the schema has had `L1Link` since it was written. Deriving it would complete the
