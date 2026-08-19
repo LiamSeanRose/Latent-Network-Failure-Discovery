@@ -45,6 +45,16 @@ _SEVERITY_ORDER: Final = (
 
 _TIER_ORDER: Final = (Tier.FACTS, Tier.TIMING)
 
+# A thousand findings is a real answer on a real archive, and rendering all of
+# them is a seven-megabyte page that takes eight seconds to build. The caps are
+# on the page, not on the analysis: every finding is in the JSON, in the report
+# and in the count, and the page says exactly what it left out and links to it.
+PAGE_LIMIT: Final = 200
+
+# The timelines dominate the cost and repeat themselves — one per device, all
+# drawn from the same kind of sequence. A dozen is enough to see the shape.
+FIGURE_LIMIT: Final = 12
+
 _TIMING_CAVEAT: Final = (
     "Timing findings come from a model of timer interaction, not from running the "
     "protocols. They tell you a sequence your configuration permits — each one shows "
@@ -504,6 +514,9 @@ class Filters:
     # object, and a comparison that falls off the moment you click a severity is
     # a comparison nobody can use.
     since: str = ""
+    # Also carried state rather than a filter: it widens the view instead of
+    # narrowing it, and it has to survive clicking a chip like everything else.
+    show_all: bool = False
 
     @property
     def active(self) -> bool:
@@ -629,6 +642,7 @@ def parse_filters(params: dict[str, list[str]]) -> Filters:
         devices=frozenset(devices),
         unknown=tuple(unknown),
         since=(params.get("since") or [""])[0].strip(),
+        show_all=bool(params.get("all")),
     )
 
 
@@ -643,6 +657,8 @@ def _query_pairs(config_dir: str, filters: Filters) -> list[tuple[str, str]]:
     pairs.extend(("device", device) for device in sorted(filters.devices))
     if filters.since:
         pairs.append(("since", filters.since))
+    if filters.show_all:
+        pairs.append(("all", "1"))
     return pairs
 
 
@@ -865,6 +881,8 @@ def _device_html(
     findings: list[Finding],
     pack: StaticFactPack | None = None,
     comparison: Comparison | None = None,
+    *,
+    draw_figures: bool = True,
 ) -> str:
     """One device's findings.
 
@@ -877,7 +895,8 @@ def _device_html(
     drawn = False
     for index, finding in enumerate(findings):
         figure = ""
-        if pack is not None and not drawn and finding.tier is Tier.TIMING:
+        wanted = draw_figures and not drawn and finding.tier is Tier.TIMING
+        if wanted and pack is not None:
             figure = visuals.timeline_svg(pack, finding)
             drawn = bool(figure)
         state = comparison.state(finding) if comparison is not None else ""
@@ -1142,10 +1161,38 @@ def page(
         sections.append(_filter_bar(config_dir, analysis.findings, filters))
         if visible:
             sections.append(_counts_html(visible, len(analysis.findings)))
-            sections.extend(
-                _device_html(device, group, analysis.pack, comparison)
-                for device, group in _by_device(visible)
-            )
+            shown = visible if filters.show_all else visible[:PAGE_LIMIT]
+            if len(shown) < len(visible):
+                more = href("/", config_dir, replace(filters, show_all=True))
+                sections.append(
+                    f'<p class="note">Showing the worst {len(shown)} of '
+                    f"{len(visible)} on this page. Nothing was dropped from the "
+                    f"count, the report or "
+                    f'<a href="{href("/findings.json", config_dir, filters)}">'
+                    f'findings.json</a>. <a href="{more}">Render all '
+                    f"{len(visible)}</a> — expect a slow page.</p>"
+                )
+            figures = 0
+            for device, group in _by_device(shown):
+                draw = figures < FIGURE_LIMIT
+                sections.append(
+                    _device_html(
+                        device,
+                        group,
+                        analysis.pack,
+                        comparison,
+                        draw_figures=draw,
+                    )
+                )
+                if draw and any(f.tier is Tier.TIMING for f in group):
+                    figures += 1
+            if figures >= FIGURE_LIMIT:
+                sections.append(
+                    f'<p class="note">Timelines are drawn for the first '
+                    f"{FIGURE_LIMIT} devices. They repeat the same shape and "
+                    f"dominate the size of the page; filter to one device to "
+                    f"see its own.</p>"
+                )
         else:
             clear = href(
                 "/",

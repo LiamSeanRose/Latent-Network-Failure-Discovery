@@ -685,3 +685,98 @@ def test_serve_says_what_to_do_when_the_port_is_taken(
     message = str(exit_info.value)
     assert "9999" in message
     assert "--port 10000" in message
+
+
+@pytest.fixture(scope="module")
+def crowded(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """More findings than the page will render. Built once: the analysis of five
+    hundred devices is not something to repeat per test."""
+    return _many(tmp_path_factory.mktemp("crowded"), 260)
+
+
+@pytest.fixture(scope="module")
+def busy(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Enough devices with timing findings to exceed the figure cap."""
+    return _many(tmp_path_factory.mktemp("busy"), 40)
+
+
+def _many(tmp_path: Path, sites: int) -> Path:
+    """A directory of independent two-device sites, each with its own defect."""
+    configs = tmp_path / "many"
+    configs.mkdir()
+    for site in range(sites):
+        vlan = 10 * site + 4
+        for role, host, priority in (("agg-a", 2, 110), ("agg-b", 3, 100)):
+            (configs / f"s{site}-{role}.cfg").write_text(
+                f"hostname s{site}-{role}\n"
+                f"vlan {vlan}\n"
+                "track UPLINK interface Ethernet1 line-protocol\n"
+                "interface Ethernet1\n   no switchport\n"
+                f"   ip address 10.{site}.0.{host}/31\n"
+                f"interface Vlan{vlan}\n"
+                f"   ip address 10.{site}.{vlan % 250}.{host}/24\n"
+                f"   vrrp {vlan} ipv4 10.{site}.{vlan % 250}.1\n"
+                f"   vrrp {vlan} priority-level {priority}\n"
+                f"   vrrp {vlan} preempt\n"
+                f"   vrrp {vlan} tracked-object UPLINK decrement 40\n"
+            )
+    return configs
+
+
+def test_a_large_result_is_capped_and_says_so(base_url: str, crowded: Path) -> None:
+    """A thousand findings is a real answer on a real archive. Rendering all of
+    them is a seven-megabyte page; rendering some of them without saying so is
+    worse than either."""
+    from cassandra.app import PAGE_LIMIT
+
+    configs = crowded
+    result = analyse(configs)
+    assert len(result.findings) > PAGE_LIMIT, "fixture must exceed the cap"
+
+    body = view(base_url, configs)
+    assert f"Showing the worst {PAGE_LIMIT} of {len(result.findings)}" in body
+    assert "Nothing was dropped from the count" in body
+    assert "Render all" in body
+
+
+def test_nothing_is_capped_out_of_the_json(base_url: str, crowded: Path) -> None:
+    """The cap is on the page, not on the analysis."""
+    from cassandra.app import PAGE_LIMIT
+
+    configs = crowded
+    document = json.loads(view(base_url, configs, path="/findings.json"))
+    assert len(document["findings"]) > PAGE_LIMIT
+
+
+def test_asking_for_all_of_them_renders_all_of_them(
+    base_url: str, crowded: Path
+) -> None:
+    configs = crowded
+    total = len(analyse(configs).findings)
+    body = view(base_url, configs, "all=1")
+    assert "Showing the worst" not in body
+    assert body.count('<article style="--i:') == total
+
+
+def test_a_small_result_is_not_capped(base_url: str, mixed: Path) -> None:
+    """The notice has to mean something when it appears."""
+    assert "Showing the worst" not in view(base_url, mixed)
+
+
+def test_timelines_are_limited_and_the_page_says_where(
+    base_url: str, busy: Path
+) -> None:
+    """They repeat the same shape and dominate the weight of the page."""
+    from cassandra.app import FIGURE_LIMIT
+
+    configs = busy
+    body = view(base_url, configs)
+    assert body.count("gateway ownership over time") == FIGURE_LIMIT
+    assert f"first {FIGURE_LIMIT} devices" in body
+
+
+def test_the_cap_survives_clicking_a_filter(base_url: str, crowded: Path) -> None:
+    configs = crowded
+    body = view(base_url, configs, "all=1&severity=high")
+    assert "Showing the worst" not in body
+    assert "all=1" in body

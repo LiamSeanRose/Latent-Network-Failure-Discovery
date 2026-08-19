@@ -126,6 +126,28 @@ not on convenience.
 is a slow external signal. Several workers guessing blindly against a five-minute CI loop is not
 five times the progress; it is five times the guessing.
 
+**What running this has actually taught, and what it costs to ignore:**
+
+- *Ownership has to include the test files, and one worker per test file.* Two workers were
+  once given the same test file — one adding rules, one adding tests for existing rules — and
+  both appended to it. It merged because both appended, and because one of them said so in its
+  report. That was luck. Name the test file in exactly one worker's list.
+- *A worker appending to a file it does not own is a worse failure than editing it.* It leaves
+  no conflict to notice: the file is valid, the tests pass, and the duplication (two helpers with
+  the same job under different names) only shows up when someone reads it. Every worker that
+  appends must say so in its report, by name.
+- *Ask for the wiring, do not let the worker do it.* A worker that builds a module the CLI or
+  the view should expose is told to describe the wiring precisely and not apply it. Its report
+  becomes a patch the coordinator applies in one place, and two workers cannot then both be in
+  `cli.py`.
+- *Tell workers to leave a real defect failing.* The most valuable thing a worker produced this
+  round was a red test naming a crash in a file it was forbidden to touch. A worker that
+  quietly adjusts a test to match buggy behaviour has destroyed the finding; say so in the
+  brief, every time.
+- *The coordinator runs the suite last, not the workers.* A worker's "everything is green" is
+  a claim about a tree that three other workers were editing at the time. Treat it as a claim,
+  re-run it, and expect transient failures in files nobody owns to be exactly that.
+
 ### 7.4 The decision log
 
 Every decision that a future reader might otherwise have to reverse-engineer goes in
