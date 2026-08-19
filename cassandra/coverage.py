@@ -86,7 +86,7 @@ import inspect
 import re
 import sys
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import CodeType, FrameType, ModuleType
@@ -472,9 +472,18 @@ def _element_class(owner: type, field: str) -> type | None:
 def _words(name: str) -> str:
     """`BgpProcess` and `mtu_bytes` both as a person would say them."""
     parts = [part for chunk in name.split("_") for part in _WORD.findall(chunk)]
-    return " ".join(
-        part.upper() if part.lower() in _ACRONYMS else part.lower() for part in parts
-    )
+    return " ".join(_SPELLED.get(part.lower(), _cased(part)) for part in parts)
+
+
+# Terms whose conventional spelling is neither all upper nor all lower. Kept
+# apart from the acronym set because that set is a membership test and these are
+# substitutions, and folding them together would mean the set could no longer
+# lag the schema harmlessly.
+_SPELLED: Final[dict[str, str]] = {"ipv4": "IPv4", "ipv6": "IPv6"}
+
+
+def _cased(part: str) -> str:
+    return part.upper() if part.lower() in _ACRONYMS else part.lower()
 
 
 def _field_words(field: str) -> str:
@@ -1088,6 +1097,179 @@ def _catalogued() -> tuple[RuleDoc, ...]:
     return found
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UnreadFact:
+    """One thing the parsers put in the pack that no rule ever looked at.
+
+    The rule side of this report answers "did this check have an input". This is
+    the same question from the other end — "does anything read this input" — and
+    the two are not the same. A pack can hand every rule something to look at and
+    still carry a field that was parsed, tested, documented, and consulted by
+    nothing, which is a check nobody has written yet rather than a check that ran.
+    """
+
+    path: str
+    label: str
+    records: int
+
+    @property
+    def sentence(self) -> str:
+        many = "" if self.records == 1 else "s"
+        return f"{self.label} — stated by {self.records} record{many}, read by no rule"
+
+
+def _populated(pack: StaticFactPack) -> dict[str, int]:
+    """Every path the pack actually states something at, and how often.
+
+    Paths are built exactly as `_Watched` builds them, because the two sets are
+    compared: a walk that spelled `devices[].interfaces` differently would report
+    every field in the pack as unread. Absence is not counted — a field that is
+    None on every record it could sit on is not a fact this collection contains,
+    and reporting it would bury the ones that are in a list of the ones that
+    are not.
+    """
+    found: dict[str, int] = {}
+
+    def walk(record: object, path: str) -> None:
+        for field in dataclasses.fields(record):  # type: ignore[arg-type]
+            value = getattr(record, field.name)
+            full = f"{path}.{field.name}" if path else field.name
+            kind = _kind(type(record), field.name, value)
+            if kind is _VALUE:
+                if value is not None and value != "" and value is not False:
+                    found[full] = found.get(full, 0) + 1
+                continue
+            if kind is _RECORD:
+                if value is not None:
+                    walk(value, full)
+                continue
+            if not value:
+                continue
+            found[full] = found.get(full, 0) + len(value)
+            for item in value:
+                walk(item, f"{full}[]")
+
+    walk(pack, "")
+    return found
+
+
+def unread(pack: StaticFactPack, consulted: Collection[str]) -> tuple[UnreadFact, ...]:
+    """Facts this pack states that nothing in `consulted` read.
+
+    `meta` is excluded: it is the pack's identity rather than a fact about the
+    network, every field of it is reported elsewhere, and a rule reading it would
+    be reasoning about the collection instead of the configuration. So is the
+    citation and identity machinery — see `_BOOKKEEPING`.
+    """
+    candidates = [
+        path
+        for path in sorted(_populated(pack))
+        if path not in consulted
+        and not path.startswith("meta")
+        and _field(path).removesuffix("[]") not in _BOOKKEEPING
+    ]
+    # A field of a collection nothing opened is not a second thing nobody reads.
+    # Listing `l2_segments` and then each of its six fields says one fact six
+    # times and pushes the other findings off the end of the report.
+    unopened = set(candidates)
+    populated = _populated(pack)
+    return tuple(
+        UnreadFact(path=path, label=_describe(path), records=populated[path])
+        for path in candidates
+        if not any(ancestor in unopened for ancestor in _ancestors(path))
+    )
+
+
+def _ancestors(path: str) -> Iterator[str]:
+    """Every path this one sits inside, longest first."""
+    head = path
+    while True:
+        head = head.rpartition(".")[0]
+        if not head:
+            return
+        yield head.removesuffix("[]")
+        yield head
+
+
+# Fields that exist so a finding can be cited, printed or joined back to its
+# record, rather than so a rule can reason about them. Every one of them is read
+# — by `findings.locate`, by the figures, by the views — and none of them is read
+# by a rule, so listing them here would fill the report with thirty true
+# sentences that mean nothing and bury the four that mean something.
+_BOOKKEEPING: Final = frozenset(
+    {
+        "config_line",
+        "config_path",
+        "config_line_count",
+        "id",
+        "device",
+        "hostname",
+        "description",
+        "label",
+        "name",
+        "segment",
+    }
+)
+
+
+def _singular(word: str) -> str:
+    if word.endswith("ies"):
+        return f"{word[:-3]}y"
+    if word.endswith("ses"):
+        return word[:-2]
+    return word.removesuffix("s")
+
+
+def _describe(path: str) -> str:
+    """`devices[].interfaces[].lag_member_of` as a sentence fragment.
+
+    Built from the path rather than from a table, so a field added to the schema
+    is described the day it is added rather than the day somebody remembers to
+    describe it. Only the immediate owner is named — the full chain reads worse
+    at every extra level and the path itself is printed beside this for anyone
+    who needs the exact name.
+    """
+    parts = [part.removesuffix("[]") for part in path.split(".") if part]
+    leaf = _field_words(parts[-1])
+    # A record named `a` or `b` — one end of an adjacency — is not a noun, so
+    # the name a reader would recognise is the collection those ends sit in.
+    owners = [part for part in parts[:-1] if len(part) > 2]
+    if not owners:
+        return leaf
+    # A short structural name — `scope`, `meta` — names the shape of a record
+    # rather than the thing it is about, so it borrows the segment above it.
+    named = owners[-2:] if len(owners[-1]) <= 5 and len(owners) > 1 else owners[-1:]
+    owner = " ".join(_words(part) for part in [*named[:-1], _singular(named[-1])])
+    return f"{leaf} on {_article(owner)} {owner}"
+
+
+# Letters whose *name* begins with a vowel sound, which is what decides the
+# article in front of an initialism: an L2 segment, an MTU, a VLAN.
+_VOWEL_SOUNDED: Final = frozenset("aeiouAEFHILMNORSX")
+
+
+def _article(noun: str) -> str:
+    first = noun.split()[0]
+    if first.isupper() or (first[:-1].isupper() and first[-1:].isdigit()):
+        return "an" if first[0] in _VOWEL_SOUNDED else "a"
+    return "an" if first[0].lower() in "aeiou" else "a"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Assessment:
+    """Both halves of the coverage question, from one run of the rules.
+
+    Together rather than separately because the second half is free once the
+    first has been paid for: the recorder that answers "did this rule have an
+    input" already knows every path the rules touched, and the paths it did not
+    touch are the answer to "does anything read this input". Running the rules
+    twice to ask them apart would be the same work for the same answer.
+    """
+
+    rules: tuple[RuleCoverage, ...]
+    unread: tuple[UnreadFact, ...]
+
+
 def assess(
     pack: StaticFactPack, *, limits: Limits = DEFAULT_LIMITS
 ) -> tuple[RuleCoverage, ...]:
@@ -1096,14 +1278,21 @@ def assess(
     Ordered as the catalogue orders it, so a coverage line and a rule entry read
     side by side.
     """
+    return assess_all(pack, limits=limits).rules
+
+
+def assess_all(pack: StaticFactPack, *, limits: Limits = DEFAULT_LIMITS) -> Assessment:
+    """The rule verdicts, and the facts no rule consulted."""
     docs = _catalogued()
     groups, orphans = _groups(docs)
     by_id = {doc.id: doc for doc in docs}
     covered: dict[str, RuleCoverage] = {}
+    consulted: set[str] = set()
 
     with _Trace(SOURCES) as trace:
         for group in groups:
             findings, reads, executed = _observe(group, pack, limits, trace)
+            consulted.update(reads.order)
             counts = Counter(finding.rule for finding in findings)
             shape = _shape(group.module)
             name = group.entry.__name__
@@ -1129,7 +1318,10 @@ def assess(
             reason="could not be assessed: nothing in the module evaluates it",
         )
 
-    return tuple(covered[doc.id] for doc in docs)
+    return Assessment(
+        rules=tuple(covered[doc.id] for doc in docs),
+        unread=unread(pack, consulted),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1169,8 +1361,16 @@ def summary(coverage: Sequence[RuleCoverage], *, named: int = 3) -> str:
     return "\n".join(lines)
 
 
-def render_text(coverage: Sequence[RuleCoverage]) -> str:
-    """Every rule, the ones that ran first, with the reason each inert one had."""
+def render_text(
+    coverage: Sequence[RuleCoverage], unread_facts: Sequence[UnreadFact] = ()
+) -> str:
+    """Every rule, the ones that ran first, with the reason each inert one had.
+
+    The unread facts come last and are optional, because they answer a different
+    question from everything above them. A rule that could not run is a gap in
+    what this collection contains; a fact nothing reads is a gap in what this
+    tool checks, and only the second one is a suggestion about the tool itself.
+    """
     if not coverage:
         return "no rules to report on"
     width = max(len(entry.rule) for entry in coverage)
@@ -1186,4 +1386,18 @@ def render_text(coverage: Sequence[RuleCoverage]) -> str:
             continue
         lines.append(f"INERT  {entry.rule:<{width}}  {entry.reason}")
         lines += [f"       {'':<{width}}  {note}" for note in entry.detail]
-    return "\n".join([*lines, "", summary(coverage)])
+    tail = [""]
+    if unread_facts:
+        # Its own column width. Borrowing the rule column's leaves the longest
+        # labels hanging past it, which reads as a broken table rather than as a
+        # wide one.
+        labelled = max(len(fact.label) for fact in unread_facts)
+        tail += [
+            f"{len(unread_facts)} facts these configs state are read by no check:",
+            *(f"  {fact.label:<{labelled}}  {fact.path}" for fact in unread_facts),
+            "",
+            "Each is parsed, tested and in the pack, and no rule consults it. That",
+            "is a check nobody has written rather than a check that passed.",
+            "",
+        ]
+    return "\n".join([*lines, *tail, summary(coverage)])

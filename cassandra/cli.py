@@ -451,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
         # from one that never ran, and `--coverage` prints the same thing; two
         # traced runs of the whole rule set to say it twice is pure waste.
         assessed = (
-            coverage.assess(pack)
+            coverage.assess_all(pack)
             if chosen == "junit" or args.coverage is not None
             else None
         )
@@ -507,7 +507,7 @@ def _emit(
     pack: StaticFactPack,
     chosen: str,
     args: argparse.Namespace,
-    assessed: tuple[coverage.RuleCoverage, ...] | None,
+    assessed: coverage.Assessment | None,
 ) -> str:
     """The findings in the shape that was asked for.
 
@@ -532,7 +532,7 @@ def _emit(
             digest=pack.meta.config_digest,
         )
     if chosen == "junit":
-        return exchange.junit(findings, assessed or ())
+        return exchange.junit(findings, assessed.rules if assessed else ())
     return render(findings, explain=args.explain)
 
 
@@ -540,7 +540,7 @@ def _report_coverage(
     pack: StaticFactPack,
     wanted: str | None,
     *,
-    assessed: tuple[coverage.RuleCoverage, ...] | None,
+    assessed: coverage.Assessment | None,
     quiet: bool,
 ) -> None:
     """Say which checks had something to look at, after saying what they found.
@@ -554,11 +554,11 @@ def _report_coverage(
     """
     if wanted is None:
         return
-    measured = coverage.assess(pack) if assessed is None else assessed
+    measured = coverage.assess_all(pack) if assessed is None else assessed
     text = (
-        coverage.render_text(measured)
+        coverage.render_text(measured.rules, measured.unread)
         if wanted == "full"
-        else coverage.summary(measured)
+        else coverage.summary(measured.rules)
     )
     print(text, file=sys.stderr if quiet else sys.stdout)
 

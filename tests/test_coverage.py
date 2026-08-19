@@ -603,3 +603,115 @@ def test_coverage_does_not_pollute_the_json(
     captured = capsys.readouterr()
     assert "coverage:" not in captured.out
     assert "coverage:" in captured.err
+
+
+# --------------------------------------------------------------------------
+# Facts nothing reads
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def whole_corpus(corpus: StaticFactPack) -> coverage.Assessment:
+    return coverage.assess_all(corpus)
+
+
+def test_a_fact_in_the_pack_that_no_rule_reads_is_named(
+    corpus: StaticFactPack, whole_corpus: coverage.Assessment
+) -> None:
+    """The rule side of the report answers "did this check have an input". This
+    is the same question from the other end, and the two are not the same.
+
+    A pack can hand every rule something to look at and still carry a field that
+    was parsed, tested, documented, and consulted by nothing — which is a check
+    nobody has written rather than a check that ran. The L2 segments are the
+    standing example: `factpack/topology.py` computes them on every build and no
+    rule in either tier has ever opened one.
+    """
+    assert corpus.l2_segments, "the fixture no longer exercises the case"
+    unread = {fact.path for fact in whole_corpus.unread}
+    assert "l2_segments" in unread
+    assert all(fact.records > 0 for fact in whole_corpus.unread)
+
+
+def test_a_fact_a_rule_does_read_is_not_named(
+    whole_corpus: coverage.Assessment,
+) -> None:
+    """The report is only worth reading if being on it means something."""
+    unread = {fact.path for fact in whole_corpus.unread}
+    for consulted in (
+        "devices[].interfaces[].allowed_vlans",
+        "fhrp_groups[].members[].priority",
+    ):
+        assert consulted not in unread, f"{consulted} is read and is on the list"
+
+
+def test_a_field_of_an_unopened_collection_is_not_a_second_finding(
+    whole_corpus: coverage.Assessment,
+) -> None:
+    """Listing a collection nothing reads and then each of its fields says one
+    fact six times and pushes the other findings off the end of the report."""
+    unread = {fact.path for fact in whole_corpus.unread}
+    assert "l2_segments" in unread
+    assert not [path for path in unread if path.startswith("l2_segments[]")]
+
+
+def test_nothing_absent_is_reported_as_unread(
+    corpus: StaticFactPack, whole_corpus: coverage.Assessment
+) -> None:
+    """A field unset on every record it could sit on is not a fact this
+    collection contains, and reporting it would bury the ones that are."""
+    stated = any(
+        interface.mtu_bytes
+        for device in corpus.devices
+        for interface in device.interfaces
+    )
+    assert not stated, "the fixture no longer exercises the case"
+    unread = {fact.path for fact in whole_corpus.unread}
+    assert "devices[].interfaces[].mtu_bytes" not in unread
+
+
+def test_the_citation_machinery_is_not_reported_as_unread(
+    whole_corpus: coverage.Assessment,
+) -> None:
+    """`config_line` and `config_path` exist so a finding can be pointed at a
+    file, and they are read — by `findings.locate`, by the figures, by the
+    views. None of them is read by a rule, so without the exclusion the report
+    would carry thirty true sentences that mean nothing."""
+    unread = {fact.path for fact in whole_corpus.unread}
+    for bookkeeping in (
+        "devices[].config_path",
+        "devices[].interfaces[].config_line",
+    ):
+        assert bookkeeping not in unread
+
+
+def test_the_unread_list_reaches_the_full_report(
+    whole_corpus: coverage.Assessment,
+) -> None:
+    rendered = coverage.render_text(whole_corpus.rules, whole_corpus.unread)
+    assert "read by no check" in rendered
+    assert "l2_segments" in rendered
+    # And is absent from the report that was not asked for it, because the two
+    # answer different questions and only one of them was requested.
+    assert "read by no check" not in coverage.render_text(whole_corpus.rules)
+
+
+def test_assess_still_returns_only_the_rule_verdicts(
+    corpus: StaticFactPack, whole_corpus: coverage.Assessment
+) -> None:
+    """Every existing caller reads a sequence of RuleCoverage, so the second
+    half arrives through a new door rather than by changing that one."""
+    assert coverage.assess(corpus) == whole_corpus.rules
+
+
+def test_every_unread_fact_reads_as_a_sentence(
+    whole_corpus: coverage.Assessment,
+) -> None:
+    """The labels are built from the path rather than from a table, so that a
+    field added to the schema is described the day it is added. The cost of that
+    is that nobody proofreads them, which this stands in for."""
+    for fact in whole_corpus.unread:
+        assert fact.label == fact.label.strip()
+        assert "  " not in fact.label
+        assert not fact.label.startswith("on ")
+        assert " a L" not in fact.label, f"{fact.label}: an initialism took 'a'"
