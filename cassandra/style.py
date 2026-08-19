@@ -189,6 +189,11 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
   font-size: .86rem; }
 .rule li { margin-bottom: .3rem; }
 .rule .src { display: block; color: var(--ink-3); font-size: .74rem; }
+/* A test identifier is one unbreakable token about ninety characters long, and
+   there are several per rule. Left alone they push the whole page sideways on a
+   phone, which is a horizontal scrollbar on the document rather than on the one
+   element that is too wide. */
+.rule .src, .rule .mono, .cite { overflow-wrap: anywhere; }
 .rule .undocumented { color: var(--s-serious); font-size: .88rem; }
 /* The linked rule is marked, not merely scrolled to: landing in a list of
    near-identical boxes and having to work out which one you asked for is the

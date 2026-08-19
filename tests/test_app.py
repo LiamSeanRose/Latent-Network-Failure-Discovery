@@ -872,3 +872,33 @@ def test_the_citation_reaches_the_json(base_url: str) -> None:
         assert not finding["source"]["file"].startswith("/"), (
             "an absolute path from someone else's machine is noise in a report"
         )
+
+
+def test_long_identifiers_are_allowed_to_wrap() -> None:
+    """A test identifier is one unbreakable token about ninety characters long.
+
+    Several of them sit in every rule entry. Left unwrapped they pushed the
+    whole document sideways on a phone — a horizontal scrollbar on the page
+    rather than on the one element that is genuinely too wide.
+    """
+    from cassandra.style import STYLE
+
+    rules = re.findall(r"([^{}]*)\{([^{}]*)\}", STYLE)
+    wrapping = {
+        selector.strip()
+        for selector, body in rules
+        if "overflow-wrap" in body or "word-break" in body
+    }
+    covered = " ".join(wrapping)
+    for needed in (".rule .src", ".cite"):
+        assert needed in covered, f"{needed} can push the page sideways"
+
+
+def test_wide_figures_scroll_inside_their_own_card() -> None:
+    """Below about 520px the timeline's band labels stop being readable, so it
+    must not shrink — but the scrollbar belongs to the figure, not the page."""
+    from cassandra.style import STYLE
+
+    assert "svg.viz { width: 100%; min-width: 520px" in STYLE
+    figure = re.search(r"\.figure \{([^}]*)\}", STYLE)
+    assert figure and "overflow-x: auto" in figure.group(1)
