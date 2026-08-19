@@ -262,8 +262,28 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
 .read-appendix > summary { cursor: pointer; font-weight: 640; padding: .5rem 0;
   border-bottom: 1px solid var(--line); margin-bottom: .8rem; }
 .device-facts { padding-bottom: .6rem; }
+/* The table scrolls sideways on a narrow screen rather than shrinking its
+   columns to nothing, and says so. Without the shadow a six-column table on a
+   phone is a five-column table: the last column is simply not there, and
+   nothing on screen suggests otherwise.
+
+   Four layers, no script. The two `local` gradients scroll with the content and
+   are painted in the card's own colour, so each one covers the shadow beside it
+   exactly when that end is reached; the two `scroll` shadows stay put. It is the
+   standard trick and it is here because the alternative is a scroll listener,
+   and this page has no script tag at all. */
 table.facts { width: 100%; border-collapse: collapse; margin: .4rem 0 .9rem;
-  font-size: .84rem; display: block; overflow-x: auto; }
+  font-size: .84rem; display: block; overflow-x: auto;
+  --edge: color-mix(in srgb, var(--ink-1) 15%, transparent);
+  background-image:
+    linear-gradient(to right, var(--surface-1), transparent),
+    linear-gradient(to left, var(--surface-1), transparent),
+    linear-gradient(to right, var(--edge), transparent),
+    linear-gradient(to left, var(--edge), transparent);
+  background-position: left center, right center, left center, right center;
+  background-repeat: no-repeat;
+  background-size: 22px 100%, 22px 100%, 10px 100%, 10px 100%;
+  background-attachment: local, local, scroll, scroll; }
 table.facts th { text-align: left; font-weight: 640; color: var(--ink-3);
   text-transform: uppercase; letter-spacing: .05em; font-size: .7rem;
   padding: .3rem .6rem .3rem 0; border-bottom: 1px solid var(--line);

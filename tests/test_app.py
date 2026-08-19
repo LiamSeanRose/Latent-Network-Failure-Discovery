@@ -1132,3 +1132,27 @@ def test_the_catalogue_without_a_pack_claims_nothing_about_any_configs(
     body = get(f"{base_url}/rules")[1]
     assert "that no check read" not in body
     assert "had something to look at" not in body
+
+
+def test_a_table_that_scrolls_sideways_says_that_it_does() -> None:
+    """A six-column table on a phone is a five-column table unless something on
+    screen says otherwise.
+
+    The fact tables already scrolled rather than crushing their columns, which
+    is right — but nothing marked the edge, so the last column was simply not
+    there and the page looked complete. The affordance is four background
+    layers rather than a scroll listener because this page has no script tag at
+    all, and the two that move with the content have to be painted in the card's
+    own colour or they mask the shadow with a rectangle of the wrong grey.
+    """
+    from cassandra.style import STYLE
+
+    table = re.search(r"table\.facts \{([^}]*)\}", STYLE)
+    assert table, "the fact table has no rule of its own"
+    body = table.group(1)
+    assert "overflow-x: auto" in body
+    assert "background-attachment: local, local, scroll, scroll" in body
+    assert "var(--surface-1)" in body, (
+        "the covering layers must be the card's own colour, or they hide the "
+        "shadow behind a rectangle that does not match anything"
+    )
