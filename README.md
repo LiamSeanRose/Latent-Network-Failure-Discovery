@@ -3,8 +3,8 @@
 **Point it at a directory of network configs. Get back a ranked list of latent failure modes,
 each with the evidence that produced it.**
 
-Arista EOS, Cisco IOS and NX-OS, detected automatically. VRRP and HSRP, IPv4 and IPv6. No lab,
-no containers, no account, no network access.
+Arista EOS, Cisco IOS, NX-OS and IOS-XR, detected automatically. VRRP and HSRP, IPv4 and IPv6.
+No lab, no containers, no account, no network access.
 
 ![The web view: an adjacency map, a severity ring and findings grouped by device](docs/images/screenshot.png)
 
@@ -63,6 +63,8 @@ uv sync                                        # install
 uv run cassandra check ./configs               # findings, ranked; exit 1 if any
 uv run cassandra check ./configs --explain     # + evidence, fixes, rule ids
 uv run cassandra check ./configs --json        # machine-readable, with a config digest
+uv run cassandra check ./configs --format sarif  # SARIF 2.1.0, for code scanning
+uv run cassandra check ./configs --format junit  # a test report of the rule set
 uv run cassandra check ./configs --fail-on high  # print everything, block on high only
 uv run cassandra facts ./configs               # the materialised fact pack
 uv run cassandra facts ./configs --json        # the same, whole, for checking against
@@ -127,6 +129,28 @@ The verdict is measured, not declared: the fact pack is wrapped in a recorder, t
 against it, and a rule counts as inert only when it produced nothing, never reached the decision
 point its own source shows, and something it read was absent.
 
+### In a pipeline
+
+Exit status is the verdict, so nothing has to parse anything: `check` exits 1 on a finding and
+`--fail-on high` narrows what counts. Two formats exist for the case where something on the far
+end already knows how to read a result.
+
+`--format sarif` writes a SARIF 2.1.0 log. Upload it with GitHub's `upload-sarif` action and
+every finding becomes an annotation on the configuration line responsible for it, carrying the
+rule's own documentation. Its fingerprint is derived from the objects a finding names rather
+than from a line number, so editing something further up the file does not re-report it as new.
+
+`--format junit` writes a test report of the rule set rather than of the findings: a rule that
+fired is a failure carrying its evidence, a rule that ran and found nothing is a pass, and a
+rule that never had a fact to reason over is a skip with the reason it was inert. That last one
+is the point — it stops a green build with seventeen of forty-five checks starved of input from
+looking like a clean one.
+
+Neither offers an autofix. A suggested change is lines you type on a device, and sometimes not
+the device the finding is located on, so a patch built from one would edit the wrong file. Both
+are byte-identical from one run to the next — no timestamps, no run ids — so the artifact is
+worth diffing rather than merely archiving.
+
 ## What to distrust
 
 FACTS findings are decidable from the configuration. If one is wrong, it is a bug.
@@ -162,7 +186,7 @@ and dispatching `validate-timing-model.yml` is what closes it.
 ## Layout
 
 ```
-cassandra/factpack/    schema, config discovery, EOS/IOS/NX-OS parsers, topology
+cassandra/factpack/    schema, config discovery, EOS/IOS/NX-OS/IOS-XR parsers, topology
 cassandra/facts/       FACTS tier: deterministic rules
 cassandra/timing/      TIMING tier: discrete-event model + sequence enumeration
 cassandra/catalogue.py rule documentation, derived from the rules
@@ -170,6 +194,7 @@ cassandra/baseline.py  record a run, compare against it
 cassandra/app.py       local web view (stdlib only)
 cassandra/visuals.py   figures drawn from facts
 cassandra/art.py       generated artwork, kept apart so it cannot be read as a result
+cassandra/exchange.py  SARIF and JUnit, for a pipeline that already reads one
 cassandra/cli.py       facts | check | report | rules | serve
 scenarios/             two worked scenarios — EOS/VRRP and NX-OS/HSRP — and the CI validator
 docs/                  spec, conventions, decisions, rules, timing model, fidelity

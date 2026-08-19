@@ -1,7 +1,8 @@
 """Command line entry point.
 
-Phase 1 provides `facts` only. `check` and `analyze` arrive with the FACTS and
-TIMING tiers (PROJECT.md §4.2).
+`facts` prints the fact pack the other four rest on; `check` runs the rules
+against it; `report` writes the standalone HTML; `rules` prints the catalogue;
+`serve` puts the same views behind a local port. README.md covers each.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Final
@@ -18,7 +20,7 @@ from cassandra.app import analyse, compare_with, serve
 from cassandra.catalogue import catalogue, render_text
 from cassandra.factpack import discovery
 from cassandra.factpack.builders import build_fact_pack
-from cassandra.factpack.schema import StaticFactPack
+from cassandra.factpack.schema import StaticFactPack, TimerInventory, TimerScope
 from cassandra.facts import rules
 from cassandra.findings import Finding, Severity, locate
 from cassandra.report import as_json, render
@@ -29,6 +31,147 @@ from cassandra.timing import sequences, timer_rules
 # person; the other three are for something downstream, and which one is right
 # depends on what is already reading it rather than on which is best.
 FORMATS: Final[tuple[str, ...]] = ("text", "json", "sarif", "junit")
+
+
+def _scope(scope: TimerScope) -> str:
+    """`device:interface instance` — as much of a scope as the record carries."""
+    where = scope.device
+    if scope.interface:
+        where += f":{scope.interface}"
+    if scope.neighbor:
+        where += f" neighbor {scope.neighbor}"
+    if scope.instance:
+        where += f" [{scope.instance}]"
+    return where
+
+
+def _values(**named: object) -> str:
+    """`name=value` for each value the record actually states.
+
+    Absent is written by leaving the name out rather than by printing `None`. A
+    timer this tool did not read and a timer the config does not set look
+    identical in a dump that prints both, and the difference is the whole
+    subject of the coverage report.
+    """
+    return "  ".join(
+        f"{name.replace('_', '-')}={value}"
+        for name, value in named.items()
+        if value is not None and value is not False
+    )
+
+
+def _timer_lines(timers: TimerInventory) -> list[str]:
+    """Every timer family the inventory holds, one section each.
+
+    Written as a loop over the families rather than one block per family so that
+    a family added to the schema and filled by a builder cannot be silently
+    missing here — which is what the FHRP-only version of this function was, for
+    long enough that a reader could conclude the pack held no BGP or spanning
+    tree timing when it held both.
+    """
+    families: tuple[tuple[str, tuple[object, ...], Callable[[object], str]], ...] = (
+        (
+            "fhrp timers",
+            timers.fhrp,
+            lambda t: _values(
+                hello=_ms_or_none(t.hello_interval_ms),
+                hold=_ms_or_none(t.hold_time_ms),
+                preempt_delay=_ms_or_none(t.preempt_delay_ms),
+                preempt_delay_reload=_ms_or_none(t.preempt_delay_reload_ms),
+            ),
+        ),
+        (
+            "igp hello timers",
+            timers.igp_hello,
+            lambda t: _values(
+                protocol=t.protocol.value,
+                hello=_ms_or_none(t.hello_interval_ms),
+                dead=_ms_or_none(t.dead_interval_ms),
+                area=t.ospf_area,
+            ),
+        ),
+        (
+            "bfd timers",
+            timers.bfd,
+            lambda t: _values(
+                tx=_ms_or_none(t.desired_min_tx_ms),
+                rx=_ms_or_none(t.required_min_rx_ms),
+                multiplier=t.detect_multiplier,
+                echo=t.echo_enabled,
+                echo_rx=_ms_or_none(t.echo_rx_interval_ms),
+            ),
+        ),
+        (
+            "bgp timers",
+            timers.bgp,
+            lambda t: _values(
+                keepalive=_ms_or_none(t.keepalive_ms),
+                hold=_ms_or_none(t.hold_time_ms),
+                min_hold=_ms_or_none(t.min_hold_time_ms),
+                restart_time=_s_or_none(t.graceful_restart_time_s),
+                stalepath_time=_s_or_none(t.stalepath_time_s),
+            ),
+        ),
+        (
+            "stp timers",
+            timers.stp,
+            lambda t: _values(
+                mode=t.mode.value,
+                vlans=",".join(str(v) for v in t.vlans) or None,
+                hello=_ms_or_none(t.hello_time_ms),
+                forward_delay=_ms_or_none(t.forward_delay_ms),
+                max_age=_ms_or_none(t.max_age_ms),
+            ),
+        ),
+        (
+            "spf throttle",
+            timers.spf_throttle,
+            lambda t: _values(
+                initial=_ms_or_none(t.initial_delay_ms),
+                minimum=_ms_or_none(t.min_hold_ms),
+                maximum=_ms_or_none(t.max_wait_ms),
+            ),
+        ),
+        (
+            "carrier delay",
+            timers.carrier_delay,
+            lambda t: _values(
+                up=_ms_or_none(t.up_ms),
+                down=_ms_or_none(t.down_ms),
+            ),
+        ),
+        (
+            "dampening",
+            timers.dampening,
+            lambda t: _values(
+                half_life=_s_or_none(t.half_life_s),
+                reuse=t.reuse_threshold,
+                suppress=t.suppress_threshold,
+                max_suppress=_s_or_none(t.max_suppress_s),
+            ),
+        ),
+    )
+    lines: list[str] = []
+    for heading, records, values_of in families:
+        if not records:
+            continue
+        lines.append(heading)
+        for record in records:
+            stated = values_of(record)
+            lines.append(
+                f"  {_scope(record.scope)}  {stated}  "
+                f"source={record.scope.source.value}".replace("   ", "  ")
+            )
+        lines.append("")
+    return lines or ["no timers in these configs"]
+
+
+def _ms_or_none(value: int | None) -> str | None:
+    return None if value is None else f"{value}ms"
+
+
+def _s_or_none(value: int | None) -> str | None:
+    return None if value is None else f"{value}s"
 
 
 def render_facts(pack: StaticFactPack, unparsed: dict[str, tuple[str, ...]]) -> str:
@@ -70,17 +213,45 @@ def render_facts(pack: StaticFactPack, unparsed: dict[str, tuple[str, ...]]) -> 
             )
     lines.append("")
 
-    lines.append("timers")
-    for timer in pack.timers.fhrp:
-        parts = [
-            f"  {timer.scope.device}:{timer.scope.interface}",
-            f"group={timer.scope.instance}",
-            f"hello={timer.hello_interval_ms}ms",
-        ]
-        if timer.preempt_delay_ms is not None:
-            parts.append(f"preempt-delay={timer.preempt_delay_ms}ms")
-        parts.append(f"source={timer.scope.source.value}")
-        lines.append("  ".join(parts))
+    if pack.vlans:
+        lines.append("vlans")
+        for vlan in pack.vlans:
+            named = f"  {vlan.name}" if vlan.name else ""
+            instance = (
+                f"  stp-instance={vlan.stp_instance}"
+                if vlan.stp_instance is not None
+                else ""
+            )
+            lines.append(f"  {vlan.device}  vlan {vlan.vlan_id}{named}{instance}")
+        lines.append("")
+
+    for process in pack.bgp:
+        router_id = f"  router-id={process.router_id}" if process.router_id else ""
+        lines.append(f"bgp {process.device}  as={process.local_as}{router_id}")
+        for neighbor in process.neighbors:
+            bits = [f"  {neighbor.address}"]
+            if neighbor.remote_as:
+                bits.append(f"remote-as={neighbor.remote_as}")
+            if neighbor.update_source:
+                bits.append(f"update-source={neighbor.update_source}")
+            if neighbor.bfd:
+                bits.append("bfd")
+            if neighbor.multihop:
+                bits.append("multihop")
+            lines.append("  ".join(bits))
+    if pack.bgp:
+        lines.append("")
+
+    if pack.l3_adjacencies:
+        lines.append("l3 adjacencies")
+        for adjacency in pack.l3_adjacencies:
+            members = ", ".join(
+                f"{member.device}:{member.interface}" for member in adjacency.members
+            )
+            lines.append(f"  {adjacency.prefix}  {members}")
+        lines.append("")
+
+    lines.extend(_timer_lines(pack.timers))
 
     leftovers = {device: rest for device, rest in unparsed.items() if rest}
     if leftovers:

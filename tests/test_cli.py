@@ -11,7 +11,8 @@ from xml.etree import ElementTree
 import pytest
 
 from cassandra.catalogue import catalogue
-from cassandra.cli import main
+from cassandra.cli import main, render_facts
+from cassandra.factpack.builders import build_fact_pack
 
 CORPUS: Final = (
     Path(__file__).resolve().parents[1]
@@ -296,3 +297,88 @@ def test_coverage_beside_a_machine_format_stays_out_of_it(
     printed = capsys.readouterr()
     json.loads(printed.out)
     assert "coverage:" in printed.err
+
+
+def test_facts_prints_every_timer_family_the_pack_holds(tmp_path: Path) -> None:
+    """`facts` is documented as the materialised fact pack, so a family that is
+    in the pack and not in the output is the output lying by omission.
+
+    It printed one heading, `timers`, holding only the FHRP records — for long
+    enough that BGP and spanning-tree timing could be read into the pack, checked
+    by four rules and reported on, while the command that exists to show what was
+    read said the pack had none of it. The families are rendered from a table
+    rather than one block each so that a family added to the schema and filled by
+    a builder cannot go missing here the same way twice.
+    """
+    (tmp_path / "sw1.cfg").write_text(
+        "hostname sw1\n"
+        "!\n"
+        "vlan 10\n"
+        "!\n"
+        "spanning-tree mode rapid-pvst\n"
+        "spanning-tree hello-time 2000\n"
+        "spanning-tree forward-time 15\n"
+        "spanning-tree max-age 20\n"
+        "!\n"
+        "interface Ethernet1\n"
+        "   no switchport\n"
+        "   ip address 198.51.100.1/31\n"
+        "   ip ospf hello-interval 5\n"
+        "   ip ospf dead-interval 20\n"
+        "!\n"
+        "router bgp 64512\n"
+        "   router-id 198.51.100.1\n"
+        "   timers bgp 10 30\n"
+        "   graceful-restart restart-time 300\n"
+        "   graceful-restart stalepath-time 150\n"
+        "   neighbor 198.51.100.0 remote-as 64513\n"
+        "!\n"
+    )
+    pack, unparsed = build_fact_pack(tmp_path)
+    rendered = render_facts(pack, unparsed)
+
+    assert pack.timers.stp and pack.timers.bgp and pack.timers.igp_hello
+    for heading in ("stp timers", "bgp timers", "igp hello timers"):
+        assert heading in rendered, f"the pack holds {heading} and nothing prints them"
+    # The bare heading was the other half of the problem: it named the section
+    # after every timer and showed one family.
+    assert "\ntimers\n" not in rendered
+    assert "fhrp timers" in rendered or not pack.timers.fhrp
+    assert "restart-time=300s" in rendered
+    assert "max-age=20000ms" in rendered
+    assert "vlans" in rendered
+    assert "bgp sw1  as=64512" in rendered
+
+
+def test_facts_omits_a_timer_the_config_does_not_state(tmp_path: Path) -> None:
+    """A value the config never set and a value this tool could not read look
+    identical in a dump that prints `None` for both, and telling them apart is
+    the entire subject of the coverage report."""
+    (tmp_path / "sw1.cfg").write_text(
+        "hostname sw1\n"
+        "!\n"
+        "interface Ethernet1\n"
+        "   no switchport\n"
+        "   ip address 198.51.100.1/31\n"
+        "   ip ospf hello-interval 5\n"
+        "!\n"
+    )
+    pack, unparsed = build_fact_pack(tmp_path)
+    rendered = render_facts(pack, unparsed)
+    assert "hello=5000ms" in rendered
+    assert "None" not in rendered
+    assert "dead=" not in rendered
+
+
+def test_the_help_text_names_the_commands_that_exist() -> None:
+    """The description argparse prints above the subcommand list came from the
+    module docstring, and the docstring still said the tool provided `facts`
+    only and that something called `analyze` was coming. Neither was true, and
+    the contradicting list was three lines below it on every `--help`."""
+    from cassandra import cli
+
+    described = cli.__doc__ or ""
+    assert "analyze" not in described
+    assert "Phase 1" not in described
+    for command in ("facts", "check", "report", "rules", "serve"):
+        assert command in described
