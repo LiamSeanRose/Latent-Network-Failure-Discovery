@@ -36,6 +36,7 @@ uv run cassandra check ./configs             # findings, ranked; exit 1 if any
 uv run cassandra check ./configs --explain   # + evidence, fixes, rule ids
 uv run cassandra facts ./configs             # the materialised fact pack
 uv run cassandra serve                       # local web view on 127.0.0.1:8765
+uv run cassandra report ./configs -o out.html  # shareable standalone report
 
 uv run cassandra check ./configs --save-baseline base.json   # record a run
 uv run cassandra check ./configs --since base.json           # what changed since

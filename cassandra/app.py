@@ -473,7 +473,16 @@ def _counts_html(visible: list[Finding], total: int) -> str:
         if len(visible) == total
         else f'<p class="showing">Showing {len(visible)} of {total} findings.</p>'
     )
-    return f'{showing}<div class="counts">{cells}</div>'
+    bar = visuals.sparkbar(
+        {s.value: counts[s] for s in _SEVERITY_ORDER},
+        {
+            Severity.HIGH.value: "var(--s-critical)",
+            Severity.MEDIUM.value: "var(--s-serious)",
+            Severity.LOW.value: "var(--s-warning)",
+            Severity.INFO.value: "var(--series-1)",
+        },
+    )
+    return f'{showing}<div class="counts">{cells}</div>{bar}'
 
 
 def _finding_html(finding: Finding, figure: str = "") -> str:

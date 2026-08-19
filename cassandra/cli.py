@@ -11,11 +11,12 @@ import sys
 from pathlib import Path
 
 from cassandra import baseline
-from cassandra.app import serve
+from cassandra.app import analyse, serve
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
 from cassandra.report import render
+from cassandra.report_html import write as write_html
 from cassandra.timing import sequences, timer_rules
 
 
@@ -98,13 +99,23 @@ def main(argv: list[str] | None = None) -> int:
         "--save-baseline",
         type=Path,
         metavar="FILE",
-        help="record this run so a later one can be compared against it",
+        help=(
+            "record this run so a later one can be compared against it. The exit "
+            "status still reports the check, so a run with findings exits 1 even "
+            "when the baseline is written"
+        ),
     )
     check.add_argument(
         "--since",
         type=Path,
         metavar="FILE",
         help="report only what changed since a saved baseline",
+    )
+
+    report = sub.add_parser("report", help="write a shareable HTML report")
+    report.add_argument("config_dir", type=Path)
+    report.add_argument(
+        "-o", "--output", type=Path, default=Path("cassandra-report.html")
     )
 
     app = sub.add_parser("serve", help="open the local web view")
@@ -130,7 +141,11 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         if args.save_baseline:
-            baseline.save(findings, pack, args.save_baseline)
+            try:
+                baseline.save(findings, pack, args.save_baseline)
+            except baseline.BaselineError as error:
+                print(error, file=sys.stderr)
+                return 2
             print(f"baseline written to {args.save_baseline}", file=sys.stderr)
 
         if args.since:
@@ -151,6 +166,15 @@ def main(argv: list[str] | None = None) -> int:
         # Exit status is the verdict: non-zero when something needs attention, so
         # this is usable in a pre-commit hook or CI without parsing the output.
         return 1 if findings else 0
+
+    if args.command == "report":
+        analysis = analyse(args.config_dir)
+        if analysis.error:
+            print(analysis.error, file=sys.stderr)
+            return 2
+        written = write_html(analysis, args.config_dir, args.output)
+        print(f"wrote {written}", file=sys.stderr)
+        return 1 if analysis.findings else 0
 
     if args.command == "serve":
         serve(host=args.host, port=args.port)

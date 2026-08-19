@@ -422,3 +422,27 @@ def test_the_corpus_baseline_survives_a_save_and_reload(tmp_path: Path) -> None:
     diff = compare(load(path), snapshot(findings, pack))
     assert diff.new == []
     assert diff.fixed == []
+
+
+def test_a_finding_that_names_no_object_is_identified_by_rule_and_device() -> None:
+    """Coarse on purpose: there is nothing here to tell two of them apart, and
+    inventing a difference would be worse than counting them."""
+    vague = Finding(
+        rule="some-rule",
+        tier=Tier.FACTS,
+        severity=Severity.LOW,
+        device="agg-a",
+        title="this network has a problem",
+        detail="no object is named anywhere in this finding",
+    )
+    assert identity(vague) == ("some-rule", "agg-a", ())
+
+
+def test_an_unwritable_baseline_path_is_an_error_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    blocked = tmp_path / "file"
+    blocked.write_text("not a directory\n")
+    with pytest.raises(BaselineError) as raised:
+        save([BFD_ONE], pack_of("agg-a"), blocked / "baseline.json")
+    assert "cannot write baseline" in str(raised.value)

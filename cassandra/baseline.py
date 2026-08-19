@@ -175,12 +175,12 @@ def identity(finding: Finding) -> Identity:
 
     See the module docstring for why it is these fields and not the text.
     """
-    described = " \n".join(
+    described = "\n".join(
         part for part in (finding.title, finding.detail, finding.trigger) if part
     )
     refs = references(described)
     if not refs:
-        refs = references(" \n".join(finding.evidence))
+        refs = references("\n".join(finding.evidence))
     return (finding.rule, finding.device, tuple(sorted(refs)))
 
 
