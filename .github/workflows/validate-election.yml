@@ -76,16 +76,35 @@ jobs:
       - name: validate the model against it
         run: sudo python3 validate.py
 
-      - name: diagnostics on failure
-        if: failure()
+      - name: capture lab state (always, before teardown)
+        if: always()
         run: |
+          echo "======== LAB STATE ========"
           for n in r1 r2; do
-            echo "=== $n ==="
-            sudo docker exec "clab-frr-vrrp-election-$n" vtysh -c 'show vrrp' || true
-            sudo docker exec "clab-frr-vrrp-election-$n" ip -br link show || true
-            sudo docker logs "clab-frr-vrrp-election-$n" 2>&1 | tail -30 || true
+            echo "--- $n links ---"
+            sudo docker exec "clab-frr-vrrp-election-$n" ip -br link show 2>&1 | tail -6 || true
+            echo "--- $n vrrp ---"
+            sudo docker exec "clab-frr-vrrp-election-$n" vtysh -c 'show vrrp' 2>&1 \
+              | grep -E 'VRID|State|Priority|Advertisements Tx|Interface' | head -8 || true
           done
+          echo "======== END LAB STATE ========"
 
+      # Teardown runs BEFORE diagnostics and silently. Its output is verbose and
+      # was burying the actual failure at the end of the log, which is the part
+      # anyone reads first.
       - name: teardown
         if: always()
-        run: sudo containerlab destroy -t topology.clab.yml --cleanup || true
+        run: sudo containerlab destroy -t topology.clab.yml --cleanup >/dev/null 2>&1 || true
+
+      - name: why it failed
+        if: failure()
+        run: |
+          echo "================ FAILURE SUMMARY ================"
+          echo "state captured before teardown is in the steps above;"
+          echo "the step that failed is the last one marked with a red X."
+          echo "================================================="
+
+      - name: capture state before teardown
+        if: failure()
+        run: |
+          echo "(no-op placeholder: state capture moved ahead of teardown)"
