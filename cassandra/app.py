@@ -155,7 +155,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/rules":
-            self._respond(rules_page(), "text/html; charset=utf-8")
+            # With a directory, the catalogue also says which checks had
+            # nothing in those configs to look at.
+            self._respond(
+                rules_page(analysis.pack, config_dir),
+                "text/html; charset=utf-8",
+            )
             return
 
         if parsed.path == "/rules.json":

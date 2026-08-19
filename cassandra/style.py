@@ -195,6 +195,8 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
    element that is too wide. */
 .rule .src, .rule .mono, .cite { overflow-wrap: anywhere; }
 .rule .undocumented { color: var(--s-serious); font-size: .88rem; }
+.rule .inert-why { color: var(--ink-2); font-size: .88rem; }
+.tag.inert { color: var(--s-warning); border-color: var(--s-warning); }
 /* The linked rule is marked, not merely scrolled to: landing in a list of
    near-identical boxes and having to work out which one you asked for is the
    failure mode of every in-page anchor. */

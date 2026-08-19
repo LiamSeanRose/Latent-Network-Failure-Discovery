@@ -475,7 +475,7 @@ def test_the_catalogue_page_states_its_own_documentation_debt(base_url: str) -> 
 def test_the_catalogue_page_is_reachable_from_a_result(
     base_url: str, mixed: Path
 ) -> None:
-    assert 'href="/rules"' in view(base_url, mixed)
+    assert 'href="/rules?dir=' in view(base_url, mixed)
 
 
 def test_the_catalogue_page_fetches_nothing_either(base_url: str) -> None:
@@ -928,3 +928,33 @@ def test_the_offer_is_absent_when_the_examples_are_not_installed(
 
     monkeypatch.setattr(view, "_EXAMPLE", Path("/definitely/not/here"))
     assert view._example_offer() == ""
+
+
+def test_the_catalogue_marks_the_checks_that_had_nothing_to_look_at(
+    base_url: str,
+) -> None:
+    """A check that could not run is not a check that passed.
+
+    On a corpus with no BGP, no BFD and no IGP timers, most of the rule set
+    never had anything to examine, and nothing on the page said so.
+    """
+    body = get(f"{base_url}/rules?dir={quote(str(CORPUS))}")[1]
+    assert "had something to look at" in body
+    assert "nothing to look at" in body
+    assert "no BGP process in these configs" in body
+
+
+def test_the_catalogue_without_a_directory_claims_nothing_about_one(
+    base_url: str,
+) -> None:
+    body = get(f"{base_url}/rules")[1]
+    assert "had something to look at" not in body
+    assert "nothing to look at" not in body
+
+
+def test_the_rulebook_links_to_the_catalogue_for_this_directory(
+    base_url: str, mixed: Path
+) -> None:
+    """Following the link should not lose the corpus the reader is looking at."""
+    body = view(base_url, mixed)
+    assert f"/rules?dir={quote(str(mixed), safe='')}" in body

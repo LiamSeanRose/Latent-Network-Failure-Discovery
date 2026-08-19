@@ -30,8 +30,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlencode
 
-from cassandra import art, baseline, visuals
+from cassandra import art, baseline, coverage, visuals
 from cassandra.catalogue import RuleDoc, catalogue
+from cassandra.coverage import RuleCoverage
 from cassandra.findings import Finding, Severity, Tier
 from cassandra.style import STYLE
 
@@ -502,8 +503,14 @@ def _device_html(
     )
 
 
-def _rule_entry(doc: RuleDoc) -> str:
-    """One rule, opened by clicking its identifier in a finding."""
+def _rule_entry(doc: RuleDoc, inert: RuleCoverage | None = None) -> str:
+    """One rule, opened by clicking its identifier in a finding.
+
+    `inert` is set when a directory was named and this rule had nothing in it to
+    look at. That is the difference between a check that ran and found nothing
+    and a check that never ran, which is the whole reason a clean result is hard
+    to read.
+    """
     # Plain sections rather than <details>: whether a closed <details> opens
     # when a link targets it is browser-dependent, and a link that lands on a
     # collapsed box has failed. Only the rules that fired are listed, so the
@@ -513,8 +520,19 @@ def _rule_entry(doc: RuleDoc) -> str:
         f'<h3><span class="mono">{html.escape(doc.id)}</span>'
         f'<span class="sev {html.escape(doc.severity.value)}">'
         f"{html.escape(doc.severity.value)}</span>"
-        f'<span class="tag">{html.escape(doc.tier.value)}</span></h3>',
+        f'<span class="tag">{html.escape(doc.tier.value)}</span>'
+        + (
+            '<span class="tag inert">nothing to look at</span>'
+            if inert is not None
+            else ""
+        )
+        + "</h3>",
     ]
+    if inert is not None:
+        parts.append(
+            f'<p class="inert-why">This check did not run on these configs: '
+            f"{html.escape(inert.reason)}.</p>"
+        )
     if doc.summary is None:
         # Said out loud rather than papered over. An entry that reads
         # "undocumented" is a defect anyone can see, which is the point.
@@ -555,7 +573,7 @@ def _rule_entry(doc: RuleDoc) -> str:
     return "".join(parts)
 
 
-def _rulebook_html(findings: list[Finding]) -> str:
+def _rulebook_html(findings: list[Finding], config_dir: str = "") -> str:
     """What each rule on screen actually checks, and when it declines to fire.
 
     Only the rules that fired are listed. The full catalogue is a document; this
@@ -575,8 +593,15 @@ def _rulebook_html(findings: list[Finding]) -> str:
         '<section class="rulebook"><h2>The rule{}</h2>'
         '<p class="cap">Each identifier above links here. Generated from the '
         "rules themselves, so it cannot describe a check the tool no longer "
-        'makes. <a href="/rules">See all {} checks</a>.</p>{}</section>'
-    ).format(plural, len(book), "".join(_rule_entry(doc) for doc in seen))
+        'makes. <a href="{}">See all {} checks</a>.</p>{}</section>'
+    ).format(
+        plural,
+        html.escape(
+            f"/rules?{urlencode({'dir': config_dir})}" if config_dir else "/rules"
+        ),
+        len(book),
+        "".join(_rule_entry(doc) for doc in seen),
+    )
 
 
 def _comparison_html(comparison: Comparison) -> str:
@@ -832,7 +857,7 @@ def page(
             )
 
     if visible:
-        sections.append(_rulebook_html(visible))
+        sections.append(_rulebook_html(visible, config_dir))
 
     if analysis.unparsed:
         sections.append(_unparsed_html(analysis))
@@ -918,15 +943,23 @@ def page(
     return _shell(finder + topology + "".join(sections), pulse=pulse)
 
 
-def rules_page() -> str:
+def rules_page(pack: StaticFactPack | None = None, config_dir: str = "") -> str:
     """The whole catalogue, not just the rules something tripped.
 
     The panel under a result answers "what does this finding mean". This answers
     the question that comes before running anything at all: what does this tool
     look for, and — the half that decides whether a clean run means anything —
     what does it decline to look at.
+
+    Given a fact pack, it also answers the sharper version of that question: of
+    these checks, which ones had anything in *your* configs to examine.
     """
     docs = catalogue()
+    inert: dict[str, RuleCoverage] = {}
+    if pack is not None:
+        inert = {
+            entry.rule: entry for entry in coverage.assess(pack) if not entry.applicable
+        }
     undocumented = sum(1 for doc in docs if not doc.documented)
     untested = sum(1 for doc in docs if not doc.silence)
     by_tier: list[str] = []
@@ -937,7 +970,7 @@ def rules_page() -> str:
         by_tier.append(
             f'<h2 class="tier-head">{html.escape(tier.value)} tier '
             f'<span class="n">{len(entries)}</span></h2>'
-            + "".join(_rule_entry(doc) for doc in entries)
+            + "".join(_rule_entry(doc, inert.get(doc.id)) for doc in entries)
         )
 
     # Stated rather than left for someone to count. Both numbers measure this
@@ -949,6 +982,15 @@ def rules_page() -> str:
         f"{untested} have no test asserting they stay quiet, so their silence "
         "is not evidence of anything.</p>"
     )
+    if pack is not None:
+        live = len(docs) - len(inert)
+        health += (
+            f'<p class="offer"><strong>{live} of {len(docs)} had something to '
+            f"look at in {html.escape(config_dir or 'these configs')}.</strong> "
+            f"The other {len(inert)} are marked below with what they were "
+            "missing. A check that could not run is not a check that passed."
+            "</p>"
+        )
     return _shell(
         '<section class="rulebook">'
         "<h2>Every check this tool makes</h2>"
