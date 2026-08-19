@@ -636,13 +636,27 @@ def test_no_baseline_means_no_comparison_on_the_page(
 
 
 def test_the_endpoint_and_the_command_line_answer_in_one_shape(
-    base_url: str, mixed: Path
+    base_url: str, mixed: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Two shapes for one question is how a consumer ends up handling one."""
+    """Two shapes for one question is how a consumer ends up handling one.
+
+    The two are asserted equal in full rather than field by field, and against
+    each other rather than against the function they both call. Comparing a
+    field to the value `analyse` returns cannot fail — the endpoint calls
+    `analyse` — so it holds nothing. What can fail, and is the thing worth
+    guarding, is one of the two growing an emitter of its own: a key added on
+    the endpoint for a page that wanted it, a count reshaped on the command line
+    for a pipeline, and now the two answers to one question differ and every
+    consumer handles whichever it met first.
+    """
     document = json.loads(view(base_url, mixed, path="/findings.json"))
     assert sorted(document) == ["config_digest", "counts", "fact_pack_id", "findings"]
-    assert document["config_digest"] == analyse(mixed).digest
     assert document["counts"]
+
+    from cassandra.cli import main
+
+    assert main(["check", str(mixed), "--json"]) in (0, 1)
+    assert json.loads(capsys.readouterr().out) == document
 
 
 def test_the_endpoint_reports_the_digest_of_what_it_read(
