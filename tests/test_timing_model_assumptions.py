@@ -22,6 +22,7 @@ be an entry.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -267,18 +268,42 @@ def tracked_pair(
 # --------------------------------------------------------------------------
 
 
-def test_a1_the_configured_advertisement_interval_is_ignored() -> None:
-    """A1: the model advertises once a second whatever the inventory says."""
+def test_a1_the_configured_advertisement_interval_is_read() -> None:
+    """A1: a group that states an interval is modelled at the one it states.
+
+    The model used to advertise once a second whatever the inventory held, which
+    made a group configured at four seconds detect failure four times faster
+    than it does — the direction that hides a real outage rather than inventing
+    one.
+    """
     slow = fact_pack(tracked_pair(hello_ms=4000))
     fast = fact_pack(tracked_pair(hello_ms=1000))
     events = [down("agg-a", "Vlan10", at_ms=0)]
 
-    slow_line = holders(simulate(slow, events, until_ms=10_000), "vrrp-10")
-    fast_line = holders(simulate(fast, events, until_ms=10_000), "vrrp-10")
+    slow_line = holders(simulate(slow, events, until_ms=20_000), "vrrp-10")
+    fast_line = holders(simulate(fast, events, until_ms=20_000), "vrrp-10")
 
-    assert slow_line == fast_line
-    # And the detection interval is derived from the hardcoded advert, not 4s.
-    assert slow_line[MASTER_DOWN_INTERVAL_MS] == "agg-b"
+    assert slow_line != fast_line, "the stated interval must change the timeline"
+    # Three missed advertisements, at the interval each group states.
+    assert fast_line[3_000] == "agg-b"
+    assert slow_line[11_000] is None
+    assert slow_line[12_000] == "agg-b"
+
+
+def test_a1_hsrp_defaults_to_three_seconds_and_vrrp_to_one() -> None:
+    """The default is per protocol, not one number for both.
+
+    Modelling HSRP at a one-second hello made every HSRP group in every corpus
+    detect failure three times faster than the firmware does.
+    """
+    from cassandra.factpack.schema import FhrpProtocol
+    from cassandra.timing.model import advert_interval_ms
+
+    pack = fact_pack(tracked_pair())
+    vrrp = pack.fhrp_groups[0]
+    assert advert_interval_ms(pack, vrrp) == 1000
+    hsrp = dataclasses.replace(vrrp, protocol=FhrpProtocol.HSRP)
+    assert advert_interval_ms(pack, hsrp) == 3000
 
 
 def test_a2_events_take_effect_at_the_next_sample() -> None:

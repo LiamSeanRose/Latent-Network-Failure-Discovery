@@ -47,11 +47,12 @@ from cassandra.factpack.schema import (
 # entry that argues for it can be found by its A-number.
 # --------------------------------------------------------------------------
 
-# A1. Every group advertises once a second. VRRP's default is 1s and HSRP's
-# hello is 3s, but the corpus configures 1s explicitly and the model reads no
-# per-group value: `FhrpTimers.hello_interval_ms` exists in the inventory and is
-# not consulted. Confidence: documented default, wrongly applied to every group.
+# A1. How often a group advertises, when its own configuration does not say.
+# VRRP's default is one second and HSRP's hello is three, so the default is per
+# protocol; a group that states an interval gets the one it states, read from
+# `FhrpTimers.hello_interval_ms`. Confidence: documented per protocol.
 DEFAULT_ADVERT_MS: Final[int] = 1000
+DEFAULT_HSRP_HELLO_MS: Final[int] = 3000
 
 # A2. The timeline is sampled on a fixed grid rather than event-stepped, because
 # the questions asked of it are about durations (§2.2) and a uniform grid makes
@@ -68,6 +69,42 @@ SAMPLE_INTERVAL_MS: Final[int] = DEFAULT_ADVERT_MS
 # FHRP interface went down (A15). Confidence: documented, minus the skew.
 MASTER_DOWN_MULTIPLIER: Final[int] = 3
 MASTER_DOWN_INTERVAL_MS: Final[int] = MASTER_DOWN_MULTIPLIER * DEFAULT_ADVERT_MS
+
+
+def advert_interval_ms(pack: StaticFactPack, group: FhrpGroup) -> int:
+    """How often this group advertises (A1).
+
+    The configured interval if any member states one, and the protocol's own
+    default otherwise — one second for VRRP, three for HSRP. Modelling every
+    group at one second made every HSRP group detect failure three times faster
+    than it does, which is the direction that hides a real outage rather than
+    inventing one.
+
+    The longest stated interval wins where two members disagree: the group is
+    only as fast as the member that has to notice.
+    """
+    stated = [
+        timer.hello_interval_ms
+        for timer in pack.timers.fhrp
+        for member in group.members
+        if timer.hello_interval_ms
+        and timer.scope.device == member.device
+        and timer.scope.interface == member.interface
+        and timer.scope.instance == fhrp_instance(group.group_number, group.family)
+    ]
+    if stated:
+        return max(stated)
+    return (
+        DEFAULT_HSRP_HELLO_MS
+        if group.protocol is FhrpProtocol.HSRP
+        else DEFAULT_ADVERT_MS
+    )
+
+
+def master_down_interval_ms(pack: StaticFactPack, group: FhrpGroup) -> int:
+    """How long a backup waits before declaring the master gone (A3)."""
+    return MASTER_DOWN_MULTIPLIER * advert_interval_ms(pack, group)
+
 
 # A8. Tracking cannot drive a priority below this. VRRP encodes priority in one
 # octet where 0 means "the master is resigning" and 255 means "address owner",
@@ -159,6 +196,10 @@ class _GroupState:
     # A3: when the group was left without a master, so the detection interval
     # can be measured from it. None means "not currently vacant".
     vacant_since_ms: int | None = None
+    # A1/A3: this group's own detection interval, three times whatever it
+    # advertises at. Held per group because HSRP and VRRP do not agree on it and
+    # a configuration may override either.
+    master_down_ms: int = MASTER_DOWN_INTERVAL_MS
 
 
 def _primary_ipv4s(pack: StaticFactPack) -> dict[tuple[str, str], int]:
@@ -281,7 +322,10 @@ def simulate(
     """
     wanted = None if only is None else set(only)
     states = {
-        group.id: _GroupState(members=_members(group, pack))
+        group.id: _GroupState(
+            members=_members(group, pack),
+            master_down_ms=master_down_interval_ms(pack, group),
+        )
         for group in pack.fhrp_groups
         if wanted is None or group.id in wanted
     }
@@ -355,7 +399,7 @@ def _settle(state: _GroupState, *, now_ms: int) -> None:
     if incumbent is None:
         if (
             state.vacant_since_ms is not None
-            and now_ms < state.vacant_since_ms + MASTER_DOWN_INTERVAL_MS
+            and now_ms < state.vacant_since_ms + state.master_down_ms
         ):
             return
         # A13: claiming a vacant group is not preemption, so neither `preempt`

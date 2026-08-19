@@ -38,26 +38,35 @@ routers.** That is what §2.3 is for.
 
 ## Timing and time resolution
 
-### A1 — Every group advertises once per second
+### A1 — A group advertises at the interval it states, or its protocol's default
 
-**Model:** `DEFAULT_ADVERT_MS = 1000` for every group in every fact pack. The per-group
-`FhrpTimers.hello_interval_ms` the builders parse from `vrrp N advertisement interval 4` or
-`standby N timers 3 10` is never read by the model.
+**Model:** `advert_interval_ms` reads `FhrpTimers.hello_interval_ms` for the group's own
+members and uses the longest value any of them states. Where none states one, the default is
+per protocol: one second for VRRP, three for HSRP. The longest wins on disagreement, because
+the group is only as fast as the member that has to notice.
 
-**Believed real behaviour:** VRRP defaults to 1s and the corpus configures 1s explicitly, so
-the corpus happens to agree. HSRP's default hello is 3s with a 10s hold, so an HSRP group is
-modelled three times faster than it runs, and any group with a non-default advertisement
-interval is modelled wrong in both directions — detection time (A3) and sample resolution (A2)
-are both derived from this one number.
+**Believed real behaviour:** VRRP defaults to one second and HSRP's hello is three with a
+ten-second hold, which is what the per-protocol default encodes. Two members of one group
+advertising at different intervals is itself a misconfiguration, and taking the slower one
+predicts the later takeover rather than the earlier — the direction that reports an outage
+rather than hiding one.
 
-**Confidence:** documented for VRRP's default, wrong by construction for anything else — the
-inventory holds the real value and the model ignores it.
+**Confidence:** documented per protocol.
 
-**Falsified by:** configure `advertisement interval 4` (or an HSRP group with default timers)
-on a group, drop the master's tracked uplink, and measure the time to takeover. The model
-predicts the same time as for a 1s group; real firmware will not.
+**Correction:** this entry previously read "every group advertises once per second", and the
+model ignored the inventory value it had already parsed. Every HSRP group was therefore
+modelled detecting failure three times faster than it does, and any group with a non-default
+interval was modelled wrong in both directions. The sample grid (A2) is still a fixed one
+second and still derives from the VRRP default, so a four-second group is sampled four times
+finer than it can change — that costs resolution, not correctness, and it is A2's problem
+rather than this one's.
 
-**Test:** `test_a1_the_configured_advertisement_interval_is_ignored`
+**Falsified by:** configure `advertisement interval 4` on a VRRP group and an HSRP group with
+default timers, drop each master's tracked uplink, and measure the time to takeover. The model
+now predicts twelve seconds and nine seconds; if firmware disagrees with either, this entry is
+wrong by that much.
+
+**Test:** `test_a1_the_configured_advertisement_interval_is_read`, `test_a1_hsrp_defaults_to_three_seconds_and_vrrp_to_one`
 
 ### A2 — The timeline is sampled on a fixed 1s grid, not event-stepped
 
@@ -91,7 +100,10 @@ is `(256 − priority) / 256` advertisement intervals — up to nearly a full in
 different for every backup. That skew is what staggers backups so they do not all claim at
 once; it is not modelled. HSRP's equivalent is the hold time, which defaults to 10s, not 3s.
 
-**Confidence:** documented for VRRP, minus the skew term. Wrong for HSRP defaults (A1).
+**Confidence:** documented for VRRP, minus the skew term. The interval is now three times
+whatever the group actually advertises at (A1), so HSRP gets nine seconds rather than three —
+still not the ten-second hold HSRP states independently of its hello, which is the remaining
+error here.
 
 **Falsified by:** shut the master's SVI and timestamp the backup's first advertisement. Under
 3s means the model is slow; a value that varies with the backup's priority means the skew term
