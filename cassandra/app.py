@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from cassandra import visuals
+from cassandra import art, visuals
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
@@ -48,36 +48,50 @@ _TIMING_CAVEAT: Final = (
     "the sequence, so you can judge it."
 )
 
-_STYLE: Final = """
-/* Colours are the validated categorical slots and the reserved status palette.
-   Dark values are stepped for the dark surface, not flipped. */
-:root {
-  color-scheme: light dark;
+# The validated categorical slots and the reserved status palette. Written out
+# once each and applied by the block below, because a palette copied into four
+# selectors is a palette that drifts in three of them.
+_LIGHT: Final = """
   --surface-0: #f6f6f4; --surface-1: #fcfcfb; --surface-2: #eeeeea;
   --ink-1: #0b0b0b; --ink-2: #52514e; --ink-3: #85847e;
-  --line: #e0e0da;
-  --accent: #256abf;
-  --s-critical: #d03b3b; --s-serious: #ec835a; --s-warning: #fab219; --s-good: #0ca30c;
+  --line: #e0e0da; --accent: #256abf;
+  --s-critical: #d03b3b; --s-serious: #ec835a; --s-warning: #fab219;
+  --s-good: #0ca30c;
   --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
   --grid: rgba(37,106,191,.07);
-}
-@media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) {
-    --surface-0: #131312; --surface-1: #1a1a19; --surface-2: #232320;
-    --ink-1: #ffffff; --ink-2: #c3c2b7; --ink-3: #8e8d85;
-    --line: #2e2c28;
-    --accent: #6da7ec;
-    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
-    --grid: rgba(109,167,236,.10);
-  }
-}
-:root[data-theme="dark"] {
+"""
+
+# Stepped for the dark surface, not flipped. Status hues are inherited from the
+# light block on purpose: red still has to read as red.
+_DARK: Final = """
   --surface-0: #131312; --surface-1: #1a1a19; --surface-2: #232320;
   --ink-1: #ffffff; --ink-2: #c3c2b7; --ink-3: #8e8d85;
   --line: #2e2c28; --accent: #6da7ec;
   --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
   --grid: rgba(109,167,236,.10);
-}
+"""
+
+# Four ways in, one palette each way:
+#   default            - the system preference
+#   [data-theme]       - an explicit choice, for anything that sets the attribute
+#   :has(:checked)     - the in-page toggle, which inverts whatever the system said
+# The toggle is a checkbox and a label rather than a button and a script. A page
+# with no script at all is one an offline reader, a mail client and a reviewer
+# reading the source can all trust, and that is worth more than remembering the
+# choice between visits.
+_THEME: Final = (
+    ":root { color-scheme: light dark;" + _LIGHT + "}\n"
+    "@media (prefers-color-scheme: dark) {"
+    ' :root:where(:not([data-theme="light"])) {' + _DARK + "} }\n"
+    ':root[data-theme="dark"] {' + _DARK + "}\n"
+    ":root:has(.theme-input:checked) {" + _DARK + "}\n"
+    "@media (prefers-color-scheme: dark) {"
+    " :root:has(.theme-input:checked) {" + _LIGHT + "} }\n"
+)
+
+_STYLE: Final = (
+    _THEME
+    + """
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body {
@@ -108,6 +122,91 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
 .tagline { color: var(--ink-2); margin: .3rem 0 0; }
+
+/* ---- mark ---- */
+/* The glyph animates once and stops. A logo that never settles is a logo that
+   competes with the page it labels. */
+.mark { flex: none; overflow: visible; }
+.mark-plate { fill: var(--surface-2); stroke: var(--line); }
+.mark .trace { fill: none; stroke-width: 2.4; stroke-linecap: round;
+  stroke-linejoin: round; stroke-dasharray: 30; stroke-dashoffset: 30;
+  animation: draw .7s ease-out .1s forwards; }
+.mark .trace.a { stroke: var(--series-1); }
+.mark .trace.b { stroke: var(--series-2); animation-delay: .25s; }
+.mark-gap { fill: var(--s-critical); opacity: 0;
+  animation: gap-in .5s ease-out .95s forwards; }
+@keyframes gap-in { to { opacity: .17; } }
+
+/* ---- hero ---- */
+.hero { width: 100%; max-width: 34rem; height: auto; display: block;
+  margin: .2rem 0 .4rem; }
+.hero text { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  fill: var(--ink-3); }
+.hero .lane-label { fill: var(--ink-2); font-weight: 640; }
+.hero .axis { stroke: var(--line); stroke-width: 1; }
+.hero .event line { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; }
+.hero .held { transform-box: fill-box; transform-origin: left center;
+  animation: grow .55s cubic-bezier(.2,.8,.3,1) both;
+  animation-delay: var(--d); }
+.hero .held.late { animation-delay: calc(var(--d) + .45s); }
+.hero .split-edge { fill: none; stroke: var(--s-critical); stroke-width: 1.5;
+  stroke-dasharray: 4 3; }
+.hero .split-label { fill: var(--s-critical); font-weight: 700;
+  letter-spacing: .08em; }
+/* The split breathes; nothing else moves once it has drawn. It is the one part
+   of the picture a first-time reader has to notice. */
+.hero .split { opacity: 0; animation: split-in .6s ease-out 1.3s forwards,
+  breathe 3.4s ease-in-out 1.9s infinite; }
+@keyframes split-in { to { opacity: 1; } }
+@keyframes breathe { 50% { opacity: .55; } }
+
+/* ---- ring ---- */
+.ring { flex: none; }
+.ring .track { fill: none; stroke: var(--surface-2); stroke-width: 13; }
+.ring .arc { fill: none; stroke-width: 13;
+  transform: rotate(-90deg); transform-origin: 60px 60px;
+  stroke-dasharray: var(--len) var(--gap); stroke-dashoffset: var(--off);
+  animation: arc-in .65s cubic-bezier(.2,.8,.3,1) both;
+  animation-delay: calc(var(--i) * 110ms); }
+@keyframes arc-in { from { stroke-dasharray: 0 9999; } }
+.ring .ring-total { fill: var(--ink-1); font-size: 26px; font-weight: 680;
+  text-anchor: middle; font-variant-numeric: tabular-nums; }
+.ring .ring-unit { fill: var(--ink-3); font-size: 9.5px; text-anchor: middle;
+  text-transform: uppercase; letter-spacing: .08em; }
+.summary { display: flex; align-items: center; gap: 1.6rem; flex-wrap: wrap; }
+.summary .totals { flex: 1 1 16rem; min-width: 0; }
+
+/* ---- theme ---- */
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+/* Focusable but invisible: the label is what you see, the checkbox is what the
+   keyboard and the selector talk to. */
+.theme-input { position: absolute; opacity: 0; width: 0; height: 0; }
+.theme {
+  position: absolute; top: 0; right: 0; width: 2.1rem; height: 2.1rem;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface-1);
+  color: var(--ink-2); cursor: pointer; font-size: .95rem; line-height: 1;
+  display: grid; place-items: center;
+  transition: border-color .15s, color .15s, transform .18s;
+}
+.theme:hover { color: var(--ink-1); border-color: var(--accent);
+  transform: rotate(-18deg); }
+.theme-input:focus-visible + .theme {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+/* Show the destination, not the current state: the moon offers dark. */
+.theme .sun { display: none; }
+:root:has(.theme-input:checked) .theme .sun { display: inline; }
+:root:has(.theme-input:checked) .theme .moon { display: none; }
+@media (prefers-color-scheme: dark) {
+  .theme .sun { display: inline; }
+  .theme .moon { display: none; }
+  :root:has(.theme-input:checked) .theme .sun { display: none; }
+  :root:has(.theme-input:checked) .theme .moon { display: inline; }
+}
 
 /* ---- search ---- */
 form.finder { display: flex; gap: .5rem; margin: 1.4rem 0 1.6rem; flex-wrap: wrap; }
@@ -144,14 +243,19 @@ svg.viz .row-label { fill: var(--ink-1); font-weight: 600; }
 svg.viz .band-label { fill: #fff; font-weight: 600; }
 svg.viz .tick { fill: var(--ink-3); }
 svg.viz .ev { stroke: var(--ink-3); stroke-width: 1; opacity: .55; }
+/* --c and --cd live on the band element, so the dark variant has to be
+   selected here rather than folded into the palette: a custom property declared
+   on :root in terms of --c resolves against :root, where --c does not exist. */
 svg.viz .band rect {
   fill: var(--c); transform-origin: left center;
   animation: grow .5s cubic-bezier(.2,.8,.3,1) both;
 }
+:root[data-theme="dark"] svg.viz .band rect,
+:root:has(.theme-input:checked) svg.viz .band rect { fill: var(--cd); }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) svg.viz .band rect { fill: var(--cd); }
+  :root:has(.theme-input:checked) svg.viz .band rect { fill: var(--c); }
 }
-:root[data-theme="dark"] svg.viz .band rect { fill: var(--cd); }
 @keyframes grow {
   from { transform: scaleX(0); opacity: .2; }
   to { transform: scaleX(1); opacity: 1; }
@@ -256,17 +360,17 @@ footer.meta-foot { color: var(--ink-3); font-size: .78rem; margin-top: 1.6rem; }
 @media print {
   body { background: #fff; color: #000; background-image: none; }
   main { max-width: none; padding: 0; }
-  form.finder, .chips, .pulse { display: none; }
+  form.finder, .chips, .pulse, .theme, .theme-input { display: none; }
   .finding, .figure { break-inside: avoid; border: 1px solid #ccc; }
   .finding { box-shadow: none; }
   a[href]::after { content: ""; }
-  svg.viz .band rect { fill: var(--c); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
   svg.topology .edge line { stroke-dashoffset: 0; }
 }
 """
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -494,7 +598,20 @@ def _counts_html(visible: list[Finding], total: int) -> str:
             Severity.INFO.value: "var(--series-1)",
         },
     )
-    return f'{showing}<div class="counts">{cells}</div>{bar}'
+    ring = art.severity_ring(
+        {s.value: counts[s] for s in _SEVERITY_ORDER if counts[s]},
+        {
+            Severity.HIGH.value: "var(--s-critical)",
+            Severity.MEDIUM.value: "var(--s-serious)",
+            Severity.LOW.value: "var(--s-warning)",
+            Severity.INFO.value: "var(--series-1)",
+        },
+    )
+    return (
+        f'<div class="summary">{ring}'
+        f'<div class="totals">{showing}<div class="counts">{cells}</div>{bar}</div>'
+        "</div>"
+    )
 
 
 def _finding_html(finding: Finding, figure: str = "") -> str:
@@ -600,8 +717,17 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
         sections.append(f'<div class="error">{html.escape(analysis.error)}</div>')
     elif not config_dir:
         sections.append(
-            '<div class="empty">Enter a directory of device configs '
-            "(<code>.cfg</code> files) to analyse.</div>"
+            '<div class="empty landing">'
+            "<p><strong>Enter a directory of device configs</strong> "
+            "(<code>.cfg</code> files) to analyse. Nothing leaves this machine "
+            "and nothing is written to the directory.</p>"
+            f"{art.hero_svg()}"
+            '<p class="cap">Illustration, not a result. Two gateway groups '
+            "follow the same link failure at different speeds — one preempts "
+            "back early, the other waits out a delay — and the hatched window "
+            "is the stretch where they sit on different devices. Steady-state "
+            "analysis never sees it, because at rest the configuration is "
+            "correct.</p></div>"
         )
     elif not analysis.findings:
         sections.append(
@@ -662,7 +788,13 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
 <title>Cassandra</title><style>{_STYLE}</style></head>
 <body><main>
 <header class="masthead">
-  <h1 class="wordmark"><span class="{pulse}"></span>Cassandra</h1>
+  <input class="theme-input" type="checkbox" id="theme-toggle">
+  <label class="theme" for="theme-toggle" title="switch between light and dark">
+    <span class="moon" aria-hidden="true">&#9789;</span>
+    <span class="sun" aria-hidden="true">&#9788;</span>
+    <span class="visually-hidden">switch between light and dark</span>
+  </label>
+  <h1 class="wordmark">{art.mark_svg()}<span class="{pulse}"></span>Cassandra</h1>
   <p class="tagline">Latent failure modes in network configuration &mdash; the ones
   that only exist between events.</p>
 </header>

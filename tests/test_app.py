@@ -312,3 +312,37 @@ def test_the_page_is_theme_aware_and_responsive(base_url: str, mixed: Path) -> N
     assert "prefers-color-scheme: dark" in body
     assert "@media (max-width: 700px)" in body
     assert 'name="viewport"' in body
+
+
+def _root_blocks() -> list[str]:
+    """The bodies of every rule whose selector is the root element."""
+    from cassandra.app import _STYLE
+
+    return [
+        body
+        for selector, body in re.findall(r"(:root[^{]*)\{([^{}]*)\}", _STYLE)
+        if "svg" not in selector and " " not in selector.strip().rstrip("{")
+    ]
+
+
+def test_root_variables_only_reference_other_root_variables() -> None:
+    """A custom property on :root is substituted against :root.
+
+    Declaring `--band: var(--c)` there looks like it forwards a per-element
+    colour; it does not. --c is set on the band elements, so at :root the
+    reference is invalid, the property becomes guaranteed-invalid, and every
+    band falls back to the initial value — which for `fill` is black. This is
+    the check that caught it.
+    """
+    declared: set[str] = set()
+    referenced: dict[str, str] = {}
+    for body in _root_blocks():
+        for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", body):
+            declared.add(name)
+            for used in re.findall(r"var\((--[\w-]+)", value):
+                referenced[used] = name
+    assert declared, "no root-level custom properties found; the parse is wrong"
+    for used, by in referenced.items():
+        assert used in declared, (
+            f"{by} on :root references {used}, which :root does not define"
+        )
