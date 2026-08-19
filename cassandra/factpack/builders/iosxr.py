@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from cassandra.factpack.builders.common import (
+    NO_PREEMPT_KEY,
     BgpPeerSettings,
     Block,
     FhrpRecord,
@@ -64,6 +65,7 @@ from cassandra.factpack.builders.common import (
     ipv6_states_no_subnet,
     is_link_local_v6,
     netmask_to_prefix_length,
+    preempt_state,
     register_bgp_peer,
     seconds_to_ms,
     strip_banners,
@@ -611,11 +613,13 @@ def _parse_router_fhrp(
     for key in sorted(settings, key=lambda k: (k[0], k[1], k[2].value)):
         interface_name, number, family = key
         values = settings[key]
+        preempt, preempt_source = preempt_state(protocol, values)
         member = FhrpMember(
             device=device,
             interface=interface_name,
             priority=int(values.get("priority", DEFAULT_PRIORITY)),
-            preempt="preempt" in values or "preempt_delay_s" in values,
+            preempt=preempt,
+            preempt_source=preempt_source,
             tracked_objects=tuple(
                 TrackedObject(
                     id=track_id,
@@ -696,10 +700,13 @@ def _parse_fhrp_group(
         elif m := re.fullmatch(r"preempt delay (\d+)", line):
             settings["preempt_delay_s"] = m.group(1)
         elif re.fullmatch(r"preempt disable(?:d)?", line):
-            # Read, and deliberately recorded as nothing: `preempt` is a bool on
-            # the member with no room for "explicitly off", and off is what an
-            # unstated preempt already reads as.
-            continue
+            # Recorded, not discarded. The comment that used to sit here said
+            # off is what an unstated preempt already reads as — which is exactly
+            # backwards for IOS-XR: `router vrrp` preempts by default, so this
+            # line is the only thing in the block that turns it off, and throwing
+            # it away made a group that does not preempt indistinguishable from
+            # every group that does.
+            settings[NO_PREEMPT_KEY] = "true"
         elif m := re.fullmatch(r"timer (msec )?(\d+)", line):
             settings["hello_ms"] = str(_timer_ms(m.group(1), m.group(2)))
         elif m := re.fullmatch(r"timers (msec )?(\d+) (msec )?(\d+)", line):

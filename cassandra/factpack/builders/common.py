@@ -213,6 +213,90 @@ def _read_vlans(spec: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
     return tuple(vlans), tuple(rejected)
 
 
+# --------------------------------------------------------------------------
+# Trunk allowed lists
+#
+# EOS, IOS and NX-OS spell `switchport trunk allowed vlan` identically, keywords
+# included, and an allowed list is very often written across several lines: the
+# first states a set and the ones after it add to or subtract from what is
+# already there. Three copies of a regex that read only the first form is how the
+# `add` keyword came to be unread on all three at once, so the whole command is
+# read in one place and the dialects share it.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TrunkAllowed:
+    """What one `switchport trunk allowed vlan` line leaves the trunk permitting.
+
+    `unreadable` carries the parts of the id list that named no usable VLAN, for
+    the reason `unreadable_vlans` exists: a trunk quietly missing a VLAN this
+    could not read looks exactly like a trunk the operator forgot, and the next
+    rule blames them for it.
+    """
+
+    vlans: tuple[VlanId, ...]
+    unreadable: tuple[str, ...] = ()
+
+
+def trunk_allowed_vlans(
+    current: tuple[VlanId, ...], argument: str
+) -> TrunkAllowed | None:
+    """Fold one `switchport trunk allowed vlan <argument>` into the allowed set.
+
+    `current` is what earlier lines on the same interface left permitted, because
+    that is what the keywords are relative to. The forms all three dialects
+    accept:
+
+    * no keyword — the list replaces whatever was there;
+    * `add <list>` — union, the normal way to extend a list across several lines;
+    * `remove <list>` — subtraction;
+    * `none` — nothing is permitted;
+    * `all` and `except <list>` — everything, and everything but the list.
+
+    None means the argument is not one of those, which the caller reports. That
+    is the important half: a form this does not know must not silently reduce the
+    trunk to nothing, because `access-vlan-not-trunked` reads an empty allowed
+    list as a port that cannot leave the switch and reports it HIGH.
+
+    `add` and `remove` on a trunk that has stated no list yet are read against
+    the empty set rather than against the platform default of "all VLANs". The
+    Fact Pack has no way to say "everything except what a later line removes"
+    short of expanding 4094 ids, and a `remove` line with no preceding list is
+    not a shape any config in this corpus writes; reading it against nothing is
+    the conservative direction, since it can only leave the allowed list smaller
+    than the device's.
+    """
+    argument = argument.strip()
+    if argument == "none":
+        return TrunkAllowed(vlans=())
+    if argument == "all":
+        return TrunkAllowed(vlans=tuple(range(MIN_VLAN_ID, MAX_VLAN_ID + 1)))
+    keyword, _, spec = argument.partition(" ")
+    if keyword not in {"add", "remove", "except"}:
+        keyword, spec = "", argument
+    # An id list is one token — `10,20,30-32` — so anything with a space left in
+    # it is a form this does not know rather than a list it cannot read, and the
+    # difference decides whether the trunk keeps the VLANs it already had.
+    if not spec or " " in spec:
+        return None
+    listed, rejected = _read_vlans(spec)
+    if not listed and not rejected:
+        return None
+    if keyword == "add":
+        vlans = tuple(sorted(set(current) | set(listed)))
+    elif keyword == "remove":
+        vlans = tuple(vlan for vlan in current if vlan not in set(listed))
+    elif keyword == "except":
+        excluded = set(listed)
+        vlans = tuple(
+            vlan for vlan in range(MIN_VLAN_ID, MAX_VLAN_ID + 1) if vlan not in excluded
+        )
+    else:
+        vlans = listed
+    return TrunkAllowed(vlans=vlans, unreadable=rejected)
+
+
 def netmask_to_prefix_length(netmask: str) -> int | None:
     """`255.255.255.0` -> 24. IOS writes masks; the schema stores prefixes."""
     try:
@@ -338,6 +422,67 @@ class FhrpRecord:
     member: FhrpMember
     interface: InterfaceName
     virtual: IpAddress | None = None
+
+
+# --------------------------------------------------------------------------
+# Preemption
+#
+# RFC 3768 section 6.1 and RFC 5798 section 6.1.2 both make `Preempt_Mode`
+# default True, and EOS, IOS, NX-OS and IOS-XR all ship VRRP with preemption on.
+# HSRP is the exception in the other direction: Cisco's default is off, which is
+# why `standby <n> preempt` is a line people write and `vrrp <n> preempt` is
+# mostly a line people write to say what was already true.
+#
+# Every parser used to set the flag only where the word appeared, so a VRRP group
+# that simply omits the line — the common case, because the default is what
+# people want — was recorded as preempt-off. That is a false
+# `fhrp-no-preempt-on-preferred` whose suggested change is a line already in
+# effect, and, worse, it switches the TIMING tier off for that group:
+# `timing/model.py::_settle` gates every challenger on `member.preempt`, so
+# divergence and oscillation go unreported on a config that relies on the
+# default.
+#
+# The default is therefore applied by protocol at construction, and the negation
+# forms each dialect writes are read rather than swallowed.
+# --------------------------------------------------------------------------
+
+# The key an accumulated settings dict uses for a preemption that was turned off
+# explicitly. Deliberately not spelled with a `preempt` prefix: the positive
+# settings are recognised by that prefix, so a negation sharing it would read as
+# one of them.
+NO_PREEMPT_KEY: Final = "no_preempt"
+
+# Preemption as each protocol ships it, absent any configuration.
+PREEMPT_DEFAULTS: Final[dict[FhrpProtocol, bool]] = {
+    FhrpProtocol.VRRP: True,
+    FhrpProtocol.HSRP: False,
+    # GLBP follows HSRP: Cisco ships it with preemption off on the AVG election.
+    FhrpProtocol.GLBP: False,
+}
+
+
+def preempt_state(
+    protocol: FhrpProtocol, settings: Mapping[str, str]
+) -> tuple[bool, TimerSource]:
+    """Whether one group preempts, and whether the configuration said so.
+
+    The flag stays a bool because everything that reads it — the FACTS rule, the
+    timing model, `cassandra facts`, the diagram — asks one yes-or-no question
+    and would have to be taught a third state for no benefit. What is new beside
+    it is the provenance, which answers the question the bool cannot: a reader of
+    the fact pack could not tell "the operator wrote preempt" from "the protocol
+    defaults to it", and those two call for different words in a finding.
+
+    `CONFIGURED` covers the negation as well as the assertion. `no vrrp 14
+    preempt` is a decision somebody made and is worth exactly as much as writing
+    it on; recording it as a platform default would lose the one thing that
+    distinguishes it from silence.
+    """
+    if settings.get(NO_PREEMPT_KEY):
+        return False, TimerSource.CONFIGURED
+    if any(key.startswith("preempt") for key in settings):
+        return True, TimerSource.CONFIGURED
+    return PREEMPT_DEFAULTS.get(protocol, False), TimerSource.PLATFORM_DEFAULT
 
 
 # The keys an accumulated FHRP settings dict uses to say which address families
@@ -507,12 +652,19 @@ def _group_id(key: _GroupKey, groups: Mapping[_GroupKey, object]) -> str:
 
 def declared_vlans_from(device: str, stanza: Stanza) -> list[Vlan]:
     """`vlan 10,20` plus an optional indented `name`, which only binds when the
-    stanza declares exactly one id."""
+    stanza declares exactly one id.
+
+    The body is stripped here rather than assumed stripped. `Stanza` hands over
+    stripped lines and `Block` does not, and NX-OS is split by the second one, so
+    matching `name ` against a raw line meant every NX-OS VLAN name was dropped —
+    invisibly, since only `cassandra facts` prints one.
+    """
     ids = vlan_list(stanza.header.split(None, 1)[1])
+    body = [line.strip() for line in stanza.body]
     name = next(
         (
             line.split(None, 1)[1]
-            for line in stanza.body
+            for line in body
             if line.startswith("name ") and len(line.split(None, 1)) == 2
         ),
         None,
@@ -904,6 +1056,15 @@ _STP_FIELDS: Final[dict[str, str]] = {
     "max-age": "max_age_ms",
 }
 
+# The two disjoint ranges a hello time can be written in. IEEE 802.1D-1998
+# table 8-3 bounds it to 1-10 seconds, and EOS states the same command in
+# milliseconds over the same range. Nothing valid falls in both, which is what
+# lets `_stp_ms` read the unit off the number instead of off the dialect.
+MIN_STP_HELLO_S: Final = 1
+MAX_STP_HELLO_S: Final = 10
+MIN_STP_HELLO_MS: Final = 1_000
+MAX_STP_HELLO_MS: Final = 10_000
+
 # `spanning-tree vlan 1-100 hello-time 2` on IOS and NX-OS; EOS spells the same
 # scope `vlan-id`. Both are accepted everywhere: reading one extra spelling
 # costs nothing and mis-scoping a timer to the whole device would be a fact
@@ -939,15 +1100,13 @@ class StpSettings:
         self.values.setdefault(key, {})[field_name] = value
 
 
-def read_stp_line(settings: StpSettings, line: str, *, hello_in_ms: bool) -> bool:
+def read_stp_line(settings: StpSettings, line: str) -> bool:
     """Fold one top-level `spanning-tree` line in; False if it states no timer.
 
-    `hello_in_ms` is the one thing the dialects disagree about: EOS states the
-    hello time in milliseconds and its two siblings state it in seconds, while
-    all three state the forward delay and the max age in seconds. Reading the
-    wrong unit would put a two-second hello in the inventory as two
-    milliseconds, and every ratio computed from it would be a thousand times
-    wrong.
+    False also for a line that states a timer this cannot read — an unreadable
+    VLAN range, or a hello time in neither unit's range. The caller pairs this
+    with `states_stp_timer` to tell the two apart, and reports the second, so a
+    timer nobody could read reaches `unparsed_lines` rather than the inventory.
 
     A mode line returns True as well. It states no timer of its own, but it says
     which protocol the timers belong to, and losing it would leave every record
@@ -961,27 +1120,22 @@ def read_stp_line(settings: StpSettings, line: str, *, hello_in_ms: bool) -> boo
         return True
     if m := _STP_VLAN_TIMER.fullmatch(line):
         vlans = vlan_list(m.group(1))
-        if not vlans:
+        value = _stp_ms(m.group(2), m.group(3))
+        if not vlans or value is None:
             return False
-        settings.set(
-            (None, vlans),
-            _STP_FIELDS[m.group(2)],
-            _stp_ms(m.group(2), m.group(3), hello_in_ms),
-        )
+        settings.set((None, vlans), _STP_FIELDS[m.group(2)], value)
         return True
     if m := _STP_MST_TIMER.fullmatch(line):
-        settings.set(
-            ("mst", ()),
-            _STP_FIELDS[m.group(1)],
-            _stp_ms(m.group(1), m.group(2), hello_in_ms),
-        )
+        value = _stp_ms(m.group(1), m.group(2))
+        if value is None:
+            return False
+        settings.set(("mst", ()), _STP_FIELDS[m.group(1)], value)
         return True
     if m := _STP_TIMER.fullmatch(line):
-        settings.set(
-            (None, ()),
-            _STP_FIELDS[m.group(1)],
-            _stp_ms(m.group(1), m.group(2), hello_in_ms),
-        )
+        value = _stp_ms(m.group(1), m.group(2))
+        if value is None:
+            return False
+        settings.set((None, ()), _STP_FIELDS[m.group(1)], value)
         return True
     return False
 
@@ -999,10 +1153,41 @@ def states_stp_timer(line: str) -> bool:
     return any(f" {name} " in f"{line} " for name in _STP_FIELDS)
 
 
-def _stp_ms(name: str, value: str, hello_in_ms: bool) -> Milliseconds:
-    if name == "hello-time" and hello_in_ms:
-        return int(value)
-    return int(value) * 1000
+def _stp_ms(name: str, value: str) -> Milliseconds | None:
+    """One spanning-tree timer, in milliseconds. None if the unit is unknowable.
+
+    The hello time is the one value the dialects write in different units — EOS
+    in milliseconds, IOS and NX-OS in seconds — and this used to be settled by
+    asking the dialect. That made the unit a property of which parser ran, and on
+    an L2-only switch, which is exactly where spanning-tree timers live, every
+    parser explains the file completely and the dialect is decided by a tie-break.
+    A coin toss was therefore choosing between 2 seconds and 2 milliseconds.
+
+    It does not have to be asked, because the two ranges do not overlap: 802.1D
+    bounds the hello time to 1-10 seconds and EOS accepts the same command as
+    1000-10000 milliseconds. A number in one range cannot be a value in the
+    other, so it carries its own unit and this reads it rather than trusting the
+    caller.
+
+    A number in neither range is not converted to a guess. It is some fourth
+    thing — a typo, a platform this tool does not know, a unit nobody here has
+    seen — and the house rule for a fact-bearing line a parser cannot be sure
+    about is `unparsed_lines`, not the pack. None says so, and `read_stp_line`
+    turns it into the False its callers already report.
+
+    Deliberately not applied to the forward delay or the max age. All four
+    dialects state both in seconds, so there is no ambiguity to resolve, and
+    range-checking them here would reject a value the operator really did
+    configure on the strength of a standard the device does not enforce.
+    """
+    number = int(value)
+    if name != "hello-time":
+        return number * 1000
+    if MIN_STP_HELLO_S <= number <= MAX_STP_HELLO_S:
+        return number * 1000
+    if MIN_STP_HELLO_MS <= number <= MAX_STP_HELLO_MS:
+        return number
+    return None
 
 
 def stp_timer_records(device: DeviceId, settings: StpSettings) -> tuple[StpTimers, ...]:

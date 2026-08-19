@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from cassandra.factpack.builders.common import (
+    NO_PREEMPT_KEY,
     BgpPeerSettings,
     FhrpRecord,
     ParsedDevice,
@@ -52,14 +53,15 @@ from cassandra.factpack.builders.common import (
     ipv6_assignment,
     ipv6_states_no_subnet,
     is_out_of_scope,
+    preempt_state,
     read_stp_line,
     register_bgp_peer,
     seconds_to_ms,
     states_stp_timer,
     stp_timer_records,
     strip_banners,
+    trunk_allowed_vlans,
     unreadable_vlans,
-    vlan_list,
 )
 from cassandra.factpack.schema import (
     AddressFamily,
@@ -240,9 +242,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> NxosDevice:
         # priorities, the MST region block and its body — is absorbed here rather
         # than reported, exactly as it was when the whole domain was filtered.
         if header.startswith("spanning-tree "):
-            if not read_stp_line(stp, header, hello_in_ms=False) and states_stp_timer(
-                header
-            ):
+            if not read_stp_line(stp, header) and states_stp_timer(header):
                 # A line naming a timer this could not read is a timer the fact
                 # pack has lost, not one it chose not to keep.
                 unparsed.append(header)
@@ -437,6 +437,12 @@ def _parse_hsrp_group(
             r"priority (\d+)( forwarding-threshold lower \d+ upper \d+)?", line
         ):
             settings["priority"] = m.group(1)
+        elif line == "no preempt":
+            # HSRP defaults preemption off, so this usually restates the default.
+            # It is still a decision somebody wrote down, and the fact pack now
+            # separates "the operator turned it off" from "nobody said anything";
+            # it used to reach `unparsed_lines`.
+            settings[NO_PREEMPT_KEY] = "true"
         elif m := re.fullmatch(
             r"preempt( delay( minimum (\d+))?( reload (\d+))?)?", line
         ):
@@ -538,13 +544,22 @@ def _parse_interface(
             access_vlan = int(m.group(1))
         elif m := re.fullmatch(r"switchport trunk native vlan (\d+)", line):
             native_vlan = int(m.group(1))
-        elif m := re.fullmatch(r"switchport trunk allowed vlan (\S+)", line):
-            allowed = vlan_list(m.group(1))
-            if rejected := unreadable_vlans(m.group(1)):
-                # The line is reported rather than silently reduced: a trunk
-                # missing a VLAN this could not read looks exactly like a trunk
-                # the operator forgot, and the next rule blames them for it.
-                unparsed.append(f"{line}  [unreadable: {', '.join(rejected)}]")
+        elif m := re.fullmatch(r"switchport trunk allowed vlan (.+)", line):
+            update = trunk_allowed_vlans(allowed, m.group(1))
+            if update is None:
+                # A form this cannot read must not reduce the trunk to nothing:
+                # an empty allowed list is what `access-vlan-not-trunked` reports
+                # HIGH, so a guess here becomes an accusation there.
+                unparsed.append(line)
+            else:
+                allowed = update.vlans
+                if update.unreadable:
+                    # The line is reported rather than silently reduced: a trunk
+                    # missing a VLAN this could not read looks exactly like a
+                    # trunk the operator forgot, and the next rule blames them.
+                    unparsed.append(
+                        f"{line}  [unreadable: {', '.join(update.unreadable)}]"
+                    )
         elif m := re.fullmatch(r"vrf member (\S+)", line):
             vrf = m.group(1)
         elif m := re.fullmatch(r"channel-group (\d+)( mode (\S+))?", line):
@@ -588,11 +603,13 @@ def _parse_interface(
     members: list[FhrpRecord] = []
     timers: list[FhrpTimers] = []
     for (number, family), settings in sorted(groups.items()):
+        preempt, preempt_source = preempt_state(FhrpProtocol.HSRP, settings)
         member = FhrpMember(
             device=device,
             interface=name,
             priority=int(settings.get("priority", DEFAULT_PRIORITY)),
-            preempt=any(key.startswith("preempt") for key in settings),
+            preempt=preempt,
+            preempt_source=preempt_source,
             tracked_objects=tuple(
                 TrackedObject(
                     id=track_id,

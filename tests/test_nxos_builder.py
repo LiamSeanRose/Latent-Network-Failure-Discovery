@@ -34,6 +34,7 @@ from cassandra.factpack.schema import (
     NosFamily,
     StaticFactPack,
     SwitchportMode,
+    TimerSource,
 )
 from cassandra.facts.rules import evaluate
 
@@ -687,3 +688,119 @@ def test_a_far_end_known_only_by_a_password_is_not_a_one_sided_session(
 def test_nxos_peer_off_every_local_subnet(tmp_path: Path) -> None:
     pack = bgp_pair(tmp_path, a_neighbors="  neighbor 192.0.2.9\n    remote-as 65001\n")
     assert "bgp-peer-off-subnet" in {f.rule for f in evaluate(pack)}
+
+
+# --------------------------------------------------------------------------
+# `switchport trunk allowed vlan add`, and the fix loop it broke
+#
+# `native_vlan_not_permitted_on_the_trunk` suggests exactly this line as its
+# remedy. With the `add` form unread, applying the tool's own suggested change
+# left the finding standing — PROJECT.md section 5.4 broken in the most visible
+# way there is.
+# --------------------------------------------------------------------------
+
+NATIVE_NOT_ALLOWED: Final = """hostname nx1
+feature interface-vlan
+!
+vlan 120
+!
+vlan 900
+!
+interface Ethernet1/1
+  switchport
+  switchport mode trunk
+  switchport trunk native vlan 900
+  switchport trunk allowed vlan 120
+"""
+
+
+def test_nxos_reads_the_whole_trunk_allowed_command() -> None:
+    parsed = parse_device(
+        "hostname nx1\n"
+        "feature interface-vlan\n"
+        "interface Ethernet1/1\n"
+        "  switchport\n"
+        "  switchport mode trunk\n"
+        "  switchport trunk allowed vlan 120\n"
+        "  switchport trunk allowed vlan add 220,900\n",
+        device_id="nx1",
+    )
+    (trunk,) = parsed.device.interfaces
+    assert trunk.allowed_vlans == (120, 220, 900)
+    assert parsed.unparsed_lines == ()
+
+
+def test_the_suggested_change_for_a_native_vlan_actually_removes_the_finding(
+    tmp_path: Path,
+) -> None:
+    """The fix loop, closed end to end: take the finding's own `change`, append
+    it to the interface it names, and the finding must be gone.
+
+    It was not. The suggested line is `switchport trunk allowed vlan add 900`,
+    and no parser read the `add` form, so the second run produced the same
+    finding plus one more unparsed line — a tool telling the operator to type
+    something it cannot then read.
+    """
+    (tmp_path / "nx1.cfg").write_text(NATIVE_NOT_ALLOWED)
+    pack, _ = build_fact_pack(tmp_path)
+    finding = next(
+        f for f in evaluate(pack) if f.rule == "trunk-native-vlan-not-allowed"
+    )
+    assert finding.change, "the rule has to carry a change for this to be testable"
+
+    # Apply it exactly as printed: the interface header names where the rest goes.
+    header, *body = finding.change
+    assert header == "interface Ethernet1/1"
+    fixed = NATIVE_NOT_ALLOWED.replace(
+        "  switchport trunk allowed vlan 120\n",
+        "  switchport trunk allowed vlan 120\n" + "".join(f"{line}\n" for line in body),
+    )
+    (tmp_path / "nx1.cfg").write_text(fixed)
+    after, unparsed = build_fact_pack(tmp_path)
+    assert not any(unparsed.values()), "the tool suggested a line it cannot read"
+    assert "trunk-native-vlan-not-allowed" not in {f.rule for f in evaluate(after)}
+
+
+# --------------------------------------------------------------------------
+# Preemption
+#
+# NX-OS reads HSRP only, and HSRP is the protocol that defaults preemption off,
+# so the flag itself does not move here. What is new is that the pack can say
+# whether an operator chose that or inherited it — and that `no preempt` reaches
+# the parser instead of `unparsed_lines`.
+# --------------------------------------------------------------------------
+
+HSRP_SILENT_ON_PREEMPT: Final = """hostname dist-1
+feature interface-vlan
+feature hsrp
+!
+interface Vlan14
+  ip address 10.14.0.2/24
+  hsrp 14
+    ip 10.14.0.1
+    priority 110
+"""
+
+
+def test_an_hsrp_group_that_says_nothing_does_not_preempt() -> None:
+    parsed = parse_device(HSRP_SILENT_ON_PREEMPT, device_id="dist-1")
+    (record,) = parsed.fhrp_records
+    assert record.member.preempt is False
+    assert record.member.preempt_source is TimerSource.PLATFORM_DEFAULT
+
+
+def test_no_preempt_inside_an_hsrp_block_is_read_rather_than_reported() -> None:
+    parsed = parse_device(
+        HSRP_SILENT_ON_PREEMPT + "    no preempt\n", device_id="dist-1"
+    )
+    (record,) = parsed.fhrp_records
+    assert record.member.preempt is False
+    assert record.member.preempt_source is TimerSource.CONFIGURED
+    assert parsed.unparsed_lines == ()
+
+
+def test_an_hsrp_group_that_writes_preempt_is_marked_as_having_said_so() -> None:
+    parsed = parse_device(HSRP_SILENT_ON_PREEMPT + "    preempt\n", device_id="dist-1")
+    (record,) = parsed.fhrp_records
+    assert record.member.preempt is True
+    assert record.member.preempt_source is TimerSource.CONFIGURED

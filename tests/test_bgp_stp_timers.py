@@ -21,7 +21,7 @@ from typing import Final
 
 import pytest
 
-from cassandra.factpack.builders import build_fact_pack, eos, parse
+from cassandra.factpack.builders import build_fact_pack, eos, ios, nxos, parse
 from cassandra.factpack.schema import BgpTimers, StaticFactPack, StpMode, TimerSource
 from cassandra.timing.timer_rules import analyse
 
@@ -639,3 +639,128 @@ def test_no_new_rule_fires_on_a_shipped_corpus(corpus: Path) -> None:
     assert "bgp-timers-disagree" not in rules_fired(pack)
     assert "bgp-stalepath-under-restart-time" not in rules_fired(pack)
     assert "stp-timers-outside-the-standard" not in rules_fired(pack)
+
+
+# --------------------------------------------------------------------------
+# The hello time carries its own unit
+#
+# `spanning-tree hello-time N` is milliseconds on EOS and seconds on IOS and
+# NX-OS. The unit used to be chosen by whichever dialect the file was parsed as,
+# and on an L2-only switch — which is where spanning-tree timers live — every
+# parser accounts for the whole file, so the dialect was decided by a tie-break.
+# A standard EOS switch stating a two-second hello landed in the pack as
+# 2 000 000 ms and tripped `stp-timers-outside-the-standard` MEDIUM on timers
+# that are correct.
+# --------------------------------------------------------------------------
+
+L2_ONLY_SWITCH: Final = """hostname l2sw
+!
+vlan 10
+   name clients
+!
+spanning-tree mode rapid-pvst
+spanning-tree hello-time 2000
+spanning-tree forward-time 15
+spanning-tree max-age 20
+!
+interface Ethernet1
+   switchport mode trunk
+   switchport trunk allowed vlan 10
+!
+interface Ethernet2
+   switchport mode access
+   switchport access vlan 10
+"""
+
+
+def test_every_parser_accounts_for_an_l2_only_switch() -> None:
+    """The precondition for the defect, asserted so the test cannot rot into
+    passing because the tie stopped happening.
+
+    An L2-only switch states nothing that distinguishes IOS, EOS and NX-OS, so
+    all three explain the file completely and the dialect is a tie-break.
+    """
+    counts = {
+        name: len(module.parse_device(L2_ONLY_SWITCH, device_id="l2sw").unparsed_lines)
+        for name, module in (("ios", ios), ("eos", eos), ("nxos", nxos))
+    }
+    assert counts == {"ios": 0, "eos": 0, "nxos": 0}
+    assert not ios.looks_like_ios(L2_ONLY_SWITCH)
+    assert not nxos.looks_like_nxos(L2_ONLY_SWITCH)
+
+
+def test_a_millisecond_hello_time_is_read_as_milliseconds(tmp_path: Path) -> None:
+    """802.1D bounds the hello time to 1-10 seconds and EOS states the same
+    command as 1000-10000 milliseconds, so the ranges are disjoint and 2000 can
+    only be two seconds. The unit is read off the number rather than off whichever
+    parser won the tie."""
+    pack = build(tmp_path, l2sw=L2_ONLY_SWITCH)
+    (record,) = pack.timers.stp
+    assert record.hello_time_ms == 2_000
+    assert record.forward_delay_ms == 15_000
+    assert record.max_age_ms == 20_000
+
+
+def test_correct_timers_on_an_l2_only_switch_produce_no_finding(
+    tmp_path: Path,
+) -> None:
+    """2s / 15s / 20s satisfies both of the standard's inequalities. The rule
+    fired on it anyway, because the hello time reached it a thousand times too
+    large — a MEDIUM finding against the values every bridge ships with."""
+    pack = build(tmp_path, l2sw=L2_ONLY_SWITCH)
+    assert "stp-timers-outside-the-standard" not in rules_fired(pack)
+
+
+def test_a_hello_time_in_neither_unit_is_reported_rather_than_guessed() -> None:
+    """Between the two ranges the number says nothing about its unit, and the
+    house rule for a fact-bearing line this parser cannot be sure of is
+    `unparsed_lines` rather than a guess in the pack. 500 is neither a legal
+    number of seconds nor a legal number of milliseconds."""
+    parsed = parse("hostname sw1\nspanning-tree hello-time 500\n", device_id="sw1")
+    assert parsed.stp == ()
+    assert parsed.unparsed_lines == ("spanning-tree hello-time 500",)
+
+
+@pytest.mark.parametrize(
+    ("written", "expected_ms"),
+    [("2", 2_000), ("2000", 2_000), ("10", 10_000), ("10000", 10_000)],
+)
+def test_the_same_hello_time_in_either_unit_reads_the_same(
+    written: str, expected_ms: int
+) -> None:
+    """The whole point of reading the unit off the number: the two spellings of
+    one switch's timing have to reach the inventory as one value."""
+    parsed = parse(
+        f"hostname sw1\nspanning-tree hello-time {written}\n", device_id="sw1"
+    )
+    (record,) = parsed.stp
+    assert record.hello_time_ms == expected_ms
+
+
+def test_a_tie_is_broken_by_what_each_parser_read_not_by_list_order() -> None:
+    """The other half of the tie-break, and the reason it is no longer a toss.
+
+    Leftovers measure a parse from one side only. Every dialect also carries a
+    list of lines it absorbs as stating no fact, and those lists differ: `ip ospf
+    hello-interval 5` is an IGP hello record to the EOS parser and an
+    uninteresting line to the NX-OS one. Both account for the whole file, so on
+    leftovers alone they tie and `DIALECTS` order picks one — and picking the
+    wrong one silently drops a timer from the inventory rather than reporting it.
+    """
+    text = (
+        "hostname sw1\n"
+        "vlan 10\n"
+        "interface Ethernet1\n"
+        "   no switchport\n"
+        "   ip address 198.51.100.1/31\n"
+        "   ip ospf hello-interval 5\n"
+    )
+    assert len(eos.parse_device(text, device_id="sw1").unparsed_lines) == 0
+    assert len(nxos.parse_device(text, device_id="sw1").unparsed_lines) == 0
+    # The NX-OS record type has no IGP hello family at all: the line was
+    # absorbed, so there is nothing for it to have been read into.
+    assert not getattr(nxos.parse_device(text, device_id="sw1"), "igp_hello", ())
+
+    parsed = parse(text, device_id="sw1")
+    (hello,) = parsed.igp_hello
+    assert hello.hello_interval_ms == 5_000

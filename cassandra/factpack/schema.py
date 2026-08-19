@@ -356,10 +356,29 @@ class TrackedObject:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FhrpMember:
+    """One device's membership of one FHRP group.
+
+    `preempt` is the flag every tier asks about, and it is in effect on the
+    device whether or not the configuration mentions it: RFC 3768 and RFC 5798
+    default VRRP preemption on, and only HSRP defaults it off. It is therefore
+    the protocol's default unless a line changes it, not False unless a line
+    says otherwise.
+
+    `preempt_source` is the provenance the bool cannot carry, drawn the same way
+    `TimerSource` draws it for timers and for the same reason. "The operator
+    wrote preempt" and "the protocol defaults to it" are the same yes to a rule
+    that reads the flag and two very different sentences to the person reading
+    the finding — one is a decision to question, the other is a default nobody
+    has looked at. `CONFIGURED` covers `no preempt` too: turning it off is a
+    decision, and reading it as an inherited default would lose the only thing
+    separating it from silence.
+    """
+
     device: DeviceId
     interface: InterfaceName
     priority: int
     preempt: bool = False
+    preempt_source: TimerSource = TimerSource.UNKNOWN
     tracked_objects: tuple[TrackedObject, ...] = ()
     version: int | None = None
     authenticated: bool = False

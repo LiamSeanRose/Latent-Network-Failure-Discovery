@@ -80,6 +80,8 @@ Silent when a trunk on the device permits the VLAN, when the device has an SVI f
 
 **Stays silent when:**
 
+- A trunk permits a VLAN however its allowed list was written. VLAN 20 reaches this switch's uplink through `switchport trunk allowed vlan add 20` exactly as it would through a longer single line, so the access port reaches its gateway and there is nothing to report. Reading only the first form turned that into a HIGH finding against a correct trunk.  
+  `test_eos_builder.py::test_a_trunk_that_permits_the_access_vlan_by_add_is_not_reported`
 - Trunking the vlan removes the access port finding  
   `test_examples.py::test_trunking_the_vlan_removes_the_access_port_finding`
 - A VLAN the trunk permits leaves the switch, which is the whole of what the rule asks: the port is in a live broadcast domain and reaches its gateway.  
@@ -921,6 +923,8 @@ Silent unless all three timers are stated for the same scope. The standard's def
   `test_bgp_stp_timers.py::test_timers_only_half_stated_are_not_measured_against_defaults`
 - These three are pinned by digest and by finding set, and the tutorial and both scenario READMEs quote what they produce. A rule that fires on one of them has changed what the documentation says the tool does — silently, since the digest they are pinned by would not move. None of the three configures a BGP or spanning-tree timer, so the correct result is silence rather than a clean bill of health.  
   `test_bgp_stp_timers.py::test_no_new_rule_fires_on_a_shipped_corpus`
+- 2s / 15s / 20s satisfies both of the standard's inequalities. The rule fired on it anyway, because the hello time reached it a thousand times too large — a MEDIUM finding against the values every bridge ships with.  
+  `test_bgp_stp_timers.py::test_correct_timers_on_an_l2_only_switch_produce_no_finding`
 
 ### `svi-vlan-not-trunked`
 
@@ -975,6 +979,8 @@ Only checked where both facts are present: a trunk stating no allowed list permi
 
 - A native VLAN the trunk also permits is the ordinary configuration: the untagged frames belong to a VLAN the link is allowed to carry.  
   `test_facts_rules.py::test_native_vlan_inside_the_allowed_list_is_silent`
+- The fix loop, closed end to end: take the finding's own `change`, append it to the interface it names, and the finding must be gone. It was not. The suggested line is `switchport trunk allowed vlan add 900`, and no parser read the `add` form, so the second run produced the same finding plus one more unparsed line — a tool telling the operator to type something it cannot then read.  
+  `test_nxos_builder.py::test_the_suggested_change_for_a_native_vlan_actually_removes_the_finding`
 
 ### `bgp-timers-disagree`
 
@@ -1023,6 +1029,8 @@ Silent when the top priority is shared. There is then no preferred master to fai
 
 **Stays silent when:**
 
+- RFC 3768 section 6.1 and RFC 5798 make `Preempt_Mode` default True, and every platform this tool parses ships VRRP that way. A group that omits the line is a group that preempts, so this rule firing on it would be a finding about a failover that does happen, whose suggested change is a line already in effect.  
+  `test_facts_rules.py::test_a_vrrp_preferred_master_that_states_no_preempt_line_is_not_reported`
 - Preempt on a backup governs nothing: it never has a higher priority to reclaim with. Only the highest-priority member can fail to take the group back, so the setting is reported there and nowhere else.  
   `test_facts_rules.py::test_preempt_left_off_on_the_backup`
 - With every member at the same priority there is no preferred master to fail to return to — whoever wins the address comparison is entitled to keep the group. The tie is worth reporting, and `fhrp-priority-tie` is what reports it.  
@@ -1162,8 +1170,8 @@ The finding names the group's own preempt delay, because two groups on one devic
 
 - A decrement that leaves the master above its peer never moves the group, so the interface it watches can flap as often as it likes without a single handover. The tracking is ineffective, which the FACTS tier reports; it is not a group chasing a link.  
   `test_timing.py::test_tracking_too_weak_to_lose_the_election_cannot_chase`
-- Disabling preempt is the standard cure for a group that chases a flapping uplink: a backup will not displace a master that is still advertising, however far the master's priority has been decremented. Nothing hands the group back and forth, so there is nothing to report.  
-  `test_timing.py::test_a_group_without_preempt_cannot_be_taken_from_a_live_master`
+- Disabling preempt is the standard cure for a group that chases a flapping uplink: a backup will not displace a master that is still advertising, however far the master's priority has been decremented. Nothing hands the group back and forth, so there is nothing to report. Written as `no vrrp <n> preempt`, because that is the only way a VRRP group can be that group. This test used to delete the `preempt` line instead, which made it pass for the wrong reason: preemption was on at the device and off in the fact pack, and the silence it asserted was the timing tier being switched off for the group rather than the group holding steady.  
+  `test_timing.py::test_a_group_with_preempt_turned_off_cannot_be_taken_from_a_live_master`
 - The knife-edge case §2.4's perturbation control exists to reject. The model does see the chasing at the nominal interval — asserted here, so that this cannot pass because the tier found nothing to talk about — and sees none of it twenty percent below. Counting the nominal run among the perturbed ones made that two of three, which shipped.  
   `test_timing.py::test_an_observable_absent_at_one_perturbation_is_not_reported`
 

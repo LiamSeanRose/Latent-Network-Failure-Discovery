@@ -61,7 +61,57 @@ MIN_INTERFACES_WITHOUT_HOSTNAME: Final = 2
 
 
 def parse(text: str, *, device_id: str | None = None) -> ParsedDevice:
-    """Parse with the best-fitting dialect."""
+    """Parse with the best-fitting dialect.
+
+    A marker decides where one is decisive. Otherwise every parser runs and the
+    one that leaves least of the file unexplained wins, which is a measurement
+    rather than a guess — right up until two of them explain all of it, and then
+    it used to be a coin toss resolved by `DIALECTS` order.
+
+    A tie happens constantly, and it is not by itself a defect: on an L2-only
+    switch, IOS, EOS and NX-OS genuinely share every line they need, so a tie
+    often means the file contains nothing that distinguishes them. Seven of the
+    eighteen configs shipped with this tool are decided that way. What matters is
+    what the tie was allowed to decide.
+
+    Units used to ride on it. `spanning-tree hello-time` is milliseconds on EOS
+    and seconds on its two siblings, and spanning-tree timers live on exactly the
+    L2-only switch where every parser ties, so list order was choosing between
+    2 seconds and 2 milliseconds. That is fixed where it belongs, in
+    `common._stp_ms`, which reads the unit off the number rather than off the
+    dialect. Nothing about a fact's *value* now depends on which of two tied
+    parsers won.
+
+    What still depends on it is which facts get read at all, and that is the half
+    worth resolving rather than tossing for. Leftover lines measure a parse from
+    one side only — what the parser could not account for — and every dialect also
+    has a list of lines it absorbs as carrying no fact. Two parsers can therefore
+    both account for the whole file while one of them quietly threw away a timer
+    the other kept: `ip ospf hello-interval 5` is an IGP hello record to the EOS
+    parser and an uninteresting line to the NX-OS one, and both report nothing
+    unparsed. So a tie is broken by what was actually read out of the file, most
+    facts first, with `DIALECTS` order — oldest first — still deciding between
+    parsers that read the same amount. A parser that understood more of a file is
+    not tied with one that understood less; it only looked that way from the
+    leftovers.
+
+    What is left after that — same leftovers, same number of facts — is not
+    reported, and the reason is worth writing down because it is a property of
+    these four parsers rather than a principle. Wherever two of them differ, one
+    of them almost always *reports* the line rather than absorbing it, so equal
+    leftovers plus equal fact counts has meant identical facts every time it
+    occurs, on all eighteen shipped configs and every fixture in the suite. There
+    is nothing to tell the reader: every reading of the file was the same
+    reading, and the only thing the choice decided was the label, which is on the
+    device as `nos_family` for anyone who wants it. A fifth dialect could break
+    that, and the place to notice would be here.
+
+    Deliberately not done: inventing a `looks_like_eos` to break ties by marker.
+    EOS is the one dialect with no marker function, and giving it one would be a
+    rule about which dialect a marker-free file *probably* is — a guess dressed as
+    a measurement, and one that would silently re-label files this tool already
+    reads correctly.
+    """
     # IOS-XR is checked first, ahead of the marker it would otherwise lose to.
     # NX-OS is recognised by an indented `hsrp <n>` header, and IOS-XR writes one
     # of those too — four levels inside `router hsrp` rather than inside an
@@ -78,11 +128,51 @@ def parse(text: str, *, device_id: str | None = None) -> ParsedDevice:
     if ios.looks_like_ios(text):
         return ios.parse_device(text, device_id=device_id)
 
-    # No decisive marker: run them all and keep whichever explains more of the
-    # file. `DIALECTS` is ordered oldest first and `min` keeps the first of a
-    # tie, so a dialect added later only wins where it is strictly better.
+    # No decisive marker: run them all and rank them by how much of the file each
+    # one accounted for — fewest leftovers first, then most facts read, then
+    # `DIALECTS` order, which is oldest first so a dialect added later only wins
+    # where it is strictly better.
     candidates = [module.parse_device(text, device_id=device_id) for module in DIALECTS]
-    return min(candidates, key=lambda parsed: len(parsed.unparsed_lines))
+    return min(candidates, key=_fit)
+
+
+def _fit(parsed: ParsedDevice) -> tuple[int, int]:
+    """How well one parser accounted for a file. Lower is better.
+
+    Two numbers because leftovers alone see half of it. A parser explains a file
+    by reading its lines into facts *and* by knowing which lines carry none, and
+    the second half is a per-dialect list of absorbed constructs — so a parser
+    that absorbs a line another one reads as a timer scores identically on
+    leftovers while having taken less out of the file. The fact count is negated
+    so that "more facts" sorts alongside "fewer leftovers" as better.
+    """
+    return len(parsed.unparsed_lines), -sum(len(family) for family in _facts_of(parsed))
+
+
+# Every fact family `build_fact_pack` collects off a parsed device, which is the
+# whole of what a dialect choice can decide. `nos_family` is the deliberate
+# omission: it is the label the choice puts on the device rather than anything
+# read out of the file.
+_FACT_FAMILIES: Final = (
+    "vlans",
+    "tracked",
+    "timers",
+    "fhrp_records",
+    "bfd",
+    "igp_hello",
+    "dampening",
+    "bgp_timers",
+    "stp",
+    "bgp",
+)
+
+
+def _facts_of(parsed: ParsedDevice) -> tuple[tuple[object, ...], ...]:
+    """Every fact one parse claims, family by family."""
+    return (
+        parsed.device.interfaces,
+        *(tuple(getattr(parsed, family, ())) for family in _FACT_FAMILIES),
+    )
 
 
 def build_fact_pack(

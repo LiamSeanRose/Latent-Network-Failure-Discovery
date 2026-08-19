@@ -26,6 +26,7 @@ from cassandra.factpack.schema import (
     FhrpProtocol,
     InterfaceKind,
     NosFamily,
+    TimerSource,
 )
 from cassandra.facts.rules import evaluate
 from cassandra.timing.sequences import analyse
@@ -387,3 +388,92 @@ def test_a_far_end_known_only_by_a_password_is_not_a_one_sided_session(
 def test_ios_peer_off_every_local_subnet(tmp_path: Path) -> None:
     pack = bgp_pair(tmp_path, a_neighbors=" neighbor 192.0.2.9 remote-as 65001\n")
     assert "bgp-peer-off-subnet" in {f.rule for f in evaluate(pack)}
+
+
+# --------------------------------------------------------------------------
+# `switchport trunk allowed vlan add`
+# --------------------------------------------------------------------------
+
+
+def test_ios_reads_the_whole_trunk_allowed_command() -> None:
+    """IOS spells this command exactly as EOS and NX-OS do, keywords included,
+    and all three used to match only a bare id list. Extending an allowed list
+    across two lines is the normal way to write it, and the second line read as
+    nothing at all."""
+    parsed = parse_device(
+        "hostname acc1\n"
+        "!\n"
+        "interface GigabitEthernet0/1\n"
+        " switchport mode trunk\n"
+        " switchport trunk allowed vlan 10,20\n"
+        " switchport trunk allowed vlan add 30\n"
+        " switchport trunk allowed vlan remove 10\n",
+        device_id="acc1",
+    )
+    (trunk,) = parsed.device.interfaces
+    assert trunk.allowed_vlans == (20, 30)
+    assert parsed.unparsed_lines == ()
+
+
+# --------------------------------------------------------------------------
+# Preemption defaults per protocol
+#
+# HSRP is the one protocol that ships with preemption off, which is why
+# `standby <n> preempt` is a line people write. VRRPv3 ships with it on, so
+# `no preempt` inside the address-family block is the only line in there that
+# changes anything about preemption — and it used to be matched and discarded.
+# --------------------------------------------------------------------------
+
+HSRP_SILENT: Final = """hostname dist-1
+!
+interface Vlan14
+ ip address 10.14.0.2 255.255.255.0
+ standby 14 ip 10.14.0.1
+ standby 14 priority 110
+"""
+
+VRRPV3_GROUP: Final = """hostname dist-1
+!
+interface Vlan14
+ ip address 10.14.0.2 255.255.255.0
+ vrrp 14 address-family ipv4
+  address 10.14.0.1
+  priority 110
+"""
+
+
+def test_an_hsrp_group_that_says_nothing_does_not_preempt() -> None:
+    """Cisco's default, and the reason the flag was ever written this way."""
+    parsed = parse_device(HSRP_SILENT, device_id="dist-1")
+    (record,) = parsed.fhrp_records
+    assert record.member.preempt is False
+    assert record.member.preempt_source is TimerSource.PLATFORM_DEFAULT
+
+
+def test_no_standby_preempt_is_read_rather_than_left_unparsed() -> None:
+    """It restates the default, so the flag does not move — but it is a decision
+    somebody wrote down, and the pack now says which of the two it is."""
+    parsed = parse_device(HSRP_SILENT + " no standby 14 preempt\n", device_id="dist-1")
+    (record,) = parsed.fhrp_records
+    assert record.member.preempt is False
+    assert record.member.preempt_source is TimerSource.CONFIGURED
+    assert parsed.unparsed_lines == ()
+
+
+def test_a_vrrpv3_group_that_says_nothing_about_preempt_preempts() -> None:
+    parsed = parse_device(VRRPV3_GROUP, device_id="dist-1")
+    (record,) = parsed.fhrp_records
+    assert record.protocol is FhrpProtocol.VRRP
+    assert record.member.preempt is True
+    assert record.member.preempt_source is TimerSource.PLATFORM_DEFAULT
+
+
+def test_no_preempt_inside_the_address_family_block_turns_it_off() -> None:
+    """`_vrrp_setting` matched this line and threw it away, which read as
+    "understood, nothing to record" and meant the opposite: the group it named
+    became indistinguishable from every group that does preempt."""
+    parsed = parse_device(VRRPV3_GROUP + "  no preempt\n", device_id="dist-1")
+    (record,) = parsed.fhrp_records
+    assert record.member.preempt is False
+    assert record.member.preempt_source is TimerSource.CONFIGURED
+    assert parsed.unparsed_lines == ()

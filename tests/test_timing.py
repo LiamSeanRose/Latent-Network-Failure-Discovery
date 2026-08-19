@@ -199,8 +199,14 @@ WEAK14: Final = "   vrrp 14 tracked-object UPLINK decrement 5\n"
 WEAK24: Final = "   vrrp 24 tracked-object UPLINK decrement 5\n"
 
 
-def without_preempt(pack_dir: Path, *, g14: str, g24: str) -> StaticFactPack:
-    """The same pair with preempt removed from both groups on both devices."""
+def preempt_turned_off(pack_dir: Path, *, g14: str, g24: str) -> StaticFactPack:
+    """The same pair with preemption explicitly turned off on both groups.
+
+    `no vrrp <n> preempt` rather than the absence of `vrrp <n> preempt`. RFC 3768
+    and RFC 5798 default VRRP preemption on and every platform this tool parses
+    ships it that way, so a group that says nothing is a group that preempts;
+    removing the line describes the opposite of what it used to be read as.
+    """
     for name, host, priority in (("agg-a", 2, 110), ("agg-b", 3, 100)):
         text = TEMPLATE.format(
             name=name,
@@ -211,7 +217,9 @@ def without_preempt(pack_dir: Path, *, g14: str, g24: str) -> StaticFactPack:
             g24_extra=g24 if name == "agg-a" else "",
         )
         (pack_dir / f"{name}.cfg").write_text(
-            text.replace("   vrrp 14 preempt\n", "").replace("   vrrp 24 preempt\n", "")
+            text.replace("   vrrp 14 preempt\n", "   no vrrp 14 preempt\n").replace(
+                "   vrrp 24 preempt\n", "   no vrrp 24 preempt\n"
+            )
         )
     pack, _ = build_fact_pack(pack_dir)
     return pack
@@ -226,15 +234,51 @@ def test_tracking_too_weak_to_lose_the_election_cannot_chase(tmp_path: Path) -> 
     assert [f for f in analyse(pack) if f.rule == "fhrp-oscillation"] == []
 
 
-def test_a_group_without_preempt_cannot_be_taken_from_a_live_master(
+def test_a_group_with_preempt_turned_off_cannot_be_taken_from_a_live_master(
     tmp_path: Path,
 ) -> None:
     """Disabling preempt is the standard cure for a group that chases a flapping
     uplink: a backup will not displace a master that is still advertising, however
     far the master's priority has been decremented. Nothing hands the group back
-    and forth, so there is nothing to report."""
-    pack = without_preempt(tmp_path, g14=TRACK14, g24=TRACK24)
+    and forth, so there is nothing to report.
+
+    Written as `no vrrp <n> preempt`, because that is the only way a VRRP group
+    can be that group. This test used to delete the `preempt` line instead, which
+    made it pass for the wrong reason: preemption was on at the device and off in
+    the fact pack, and the silence it asserted was the timing tier being switched
+    off for the group rather than the group holding steady.
+    """
+    pack = preempt_turned_off(tmp_path, g14=TRACK14, g24=TRACK24)
+    assert not [m for g in pack.fhrp_groups for m in g.members if m.preempt]
     assert [f for f in analyse(pack) if f.rule == "fhrp-oscillation"] == []
+
+
+def test_a_group_that_states_no_preempt_line_at_all_still_preempts(
+    tmp_path: Path,
+) -> None:
+    """The other half of the same fact, and the one that was wrong.
+
+    A VRRP group omitting `preempt` is the common case, because the default is
+    what people want. Reading it as preempt-off silenced the whole TIMING tier
+    for those groups — `model._settle` gates every challenger on `member.preempt`
+    — so a network that oscillates under a flapping uplink was reported as
+    healthy.
+    """
+    for name, host, priority in (("agg-a", 2, 110), ("agg-b", 3, 100)):
+        text = TEMPLATE.format(
+            name=name,
+            p2p=1 if name == "agg-a" else 3,
+            host=host,
+            priority=priority,
+            g14_extra=TRACK14 if name == "agg-a" else "",
+            g24_extra=TRACK24 if name == "agg-a" else "",
+        )
+        (tmp_path / f"{name}.cfg").write_text(
+            text.replace("   vrrp 14 preempt\n", "").replace("   vrrp 24 preempt\n", "")
+        )
+    pack, _ = build_fact_pack(tmp_path)
+    assert all(m.preempt for g in pack.fhrp_groups for m in g.members)
+    assert [f for f in analyse(pack) if f.rule == "fhrp-oscillation"]
 
 
 def test_a_split_present_with_no_events_is_not_reported_as_caused_by_one() -> None:

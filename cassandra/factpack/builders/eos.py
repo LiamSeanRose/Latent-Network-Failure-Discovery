@@ -21,6 +21,7 @@ from typing import Final
 from cassandra.factpack.builders.common import (
     BGP_HOLD_KEY,
     BGP_KEEPALIVE_KEY,
+    NO_PREEMPT_KEY,
     FhrpRecord,
     ParsedDevice,
     Stanza,
@@ -34,14 +35,15 @@ from cassandra.factpack.builders.common import (
     ipv6_assignment,
     ipv6_states_no_subnet,
     is_out_of_scope,
+    preempt_state,
     read_stp_line,
     seconds_to_ms,
     stanzas,
     states_stp_timer,
     stp_timer_records,
     strip_banners,
+    trunk_allowed_vlans,
     unreadable_vlans,
-    vlan_list,
 )
 from cassandra.factpack.schema import (
     AddressFamily,
@@ -177,9 +179,7 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
         # priorities, the MST region block and its body — is absorbed here rather
         # than reported, exactly as it was when the whole domain was filtered.
         if header.startswith("spanning-tree "):
-            if not read_stp_line(stp, header, hello_in_ms=True) and states_stp_timer(
-                header
-            ):
+            if not read_stp_line(stp, header) and states_stp_timer(header):
                 # A line naming a timer this could not read is a timer the fact
                 # pack has lost, not one it chose not to keep.
                 unparsed.append(header)
@@ -513,13 +513,22 @@ def _parse_interface(
             mode = SwitchportMode.ACCESS
         elif m := re.fullmatch(r"switchport access vlan (\d+)", line):
             access_vlan = int(m.group(1))
-        elif m := re.fullmatch(r"switchport trunk allowed vlan (\S+)", line):
-            allowed = vlan_list(m.group(1))
-            if rejected := unreadable_vlans(m.group(1)):
-                # The line is reported rather than silently reduced: a trunk
-                # missing a VLAN this could not read looks exactly like a trunk
-                # the operator forgot, and the next rule blames them for it.
-                unparsed.append(f"{line}  [unreadable: {', '.join(rejected)}]")
+        elif m := re.fullmatch(r"switchport trunk allowed vlan (.+)", line):
+            update = trunk_allowed_vlans(allowed, m.group(1))
+            if update is None:
+                # A form this cannot read must not reduce the trunk to nothing:
+                # an empty allowed list is what `access-vlan-not-trunked` reports
+                # HIGH, so a guess here becomes an accusation there.
+                unparsed.append(line)
+            else:
+                allowed = update.vlans
+                if update.unreadable:
+                    # The line is reported rather than silently reduced: a trunk
+                    # missing a VLAN this could not read looks exactly like a
+                    # trunk the operator forgot, and the next rule blames them.
+                    unparsed.append(
+                        f"{line}  [unreadable: {', '.join(update.unreadable)}]"
+                    )
         elif m := re.fullmatch(r"ip address (\S+?)/(\d+)( secondary)?", line):
             addresses.append(
                 IpAssignment(
@@ -559,6 +568,15 @@ def _parse_interface(
             isis["multiplier"] = m.group(1)
         elif line == "isis bfd":
             bfd_clients.add("isis")
+        elif m := re.fullmatch(r"no vrrp (\d+) preempt", line):
+            # The only `no vrrp` form this reads. EOS ships VRRP preemption on,
+            # so this line is the whole difference between a group that takes
+            # mastership back and one that does not, and it used to fall through
+            # to `unparsed_lines` while the group it names was recorded as
+            # preempt-off anyway — the right answer by accident, for a group that
+            # states nothing, and therefore no answer at all.
+            groups.setdefault(int(m.group(1)), {})[NO_PREEMPT_KEY] = "true"
+            group_lines.setdefault(int(m.group(1)), number)
         elif m := re.fullmatch(r"vrrp (\d+) (.+)", line):
             group = int(m.group(1))
             rest = m.group(2)
@@ -649,13 +667,13 @@ def _parse_interface(
     members: list[FhrpRecord] = []
     timers: list[FhrpTimers] = []
     for group, settings in sorted(groups.items()):
+        preempt, preempt_source = preempt_state(FhrpProtocol.VRRP, settings)
         member = FhrpMember(
             device=device,
             interface=name,
             priority=int(settings.get("priority", "100")),
-            preempt="preempt" in settings
-            or "preempt_delay_minimum_s" in settings
-            or "preempt_delay_reload_s" in settings,
+            preempt=preempt,
+            preempt_source=preempt_source,
             tracked_objects=tuple(
                 TrackedObject(
                     id=track_id,

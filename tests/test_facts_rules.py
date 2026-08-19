@@ -42,6 +42,21 @@ interface Vlan14
 """
 
 
+# One HSRP member, in the dialect that writes HSRP flat. HSRP is the one protocol
+# whose preemption defaults off, so a group here that states no `preempt` line
+# genuinely will not reclaim — the case `fhrp-no-preempt-on-preferred` exists for.
+HSRP_MEMBER: Final = """hostname {name}
+vlan 14
+interface GigabitEthernet0/1
+ switchport mode trunk
+ switchport trunk allowed vlan 14
+interface Vlan14
+ ip address 10.14.0.{host} 255.255.255.0
+ standby 14 ip 10.14.0.1
+ standby 14 priority {priority}
+"""
+
+
 TWO_VLAN_PAIR: Final = """hostname {name}
 vlan 14,24
 interface Ethernet1
@@ -256,13 +271,52 @@ def test_duplicate_address_across_devices(tmp_path: Path) -> None:
     assert "duplicate-address" in rules_fired(pack)
 
 
-def test_preferred_master_without_preempt(tmp_path: Path) -> None:
+def test_a_vrrp_preferred_master_that_states_no_preempt_line_is_not_reported(
+    tmp_path: Path,
+) -> None:
+    """RFC 3768 section 6.1 and RFC 5798 make `Preempt_Mode` default True, and
+    every platform this tool parses ships VRRP that way. A group that omits the
+    line is a group that preempts, so this rule firing on it would be a finding
+    about a failover that does happen, whose suggested change is a line already
+    in effect."""
     a = GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110).replace(
         "   vrrp 14 preempt\n", ""
     )
     b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100)
     pack = pack_from(tmp_path, **{"agg-a": a, "agg-b": b})
+    assert "fhrp-no-preempt-on-preferred" not in rules_fired(pack)
+
+
+def test_a_vrrp_preferred_master_that_turns_preempt_off_is_reported(
+    tmp_path: Path,
+) -> None:
+    """The rule is not dead, its trigger moved. On VRRP the only way to reach the
+    configuration it describes is to write the negation, and that is a decision
+    worth surfacing precisely because it contradicts the protocol's default."""
+    a = GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110).replace(
+        "   vrrp 14 preempt\n", "   no vrrp 14 preempt\n"
+    )
+    b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100)
+    pack = pack_from(tmp_path, **{"agg-a": a, "agg-b": b})
     assert "fhrp-no-preempt-on-preferred" in rules_fired(pack)
+
+
+def test_an_hsrp_preferred_master_that_never_turned_preempt_on_is_reported(
+    tmp_path: Path,
+) -> None:
+    """HSRP is the protocol that defaults preemption off, which is why
+    `standby <n> preempt` is a line people write and `vrrp <n> preempt` mostly
+    is not. Saying nothing here really does mean the group never comes back, so
+    this is where the rule earns its place."""
+    pack = pack_from(
+        tmp_path,
+        **{
+            "dist-1": HSRP_MEMBER.format(name="dist-1", host=2, priority=110),
+            "dist-2": HSRP_MEMBER.format(name="dist-2", host=3, priority=100),
+        },
+    )
+    finding = _found(pack, "fhrp-no-preempt-on-preferred")
+    assert finding.device == "dist-1"
 
 
 def test_every_finding_carries_a_remedy(tmp_path: Path) -> None:
@@ -1308,6 +1362,10 @@ def test_a_one_sided_peering_carries_the_statement_the_far_end_needs(
 def test_a_preferred_master_carries_the_line_that_makes_it_reclaim(
     tmp_path: Path,
 ) -> None:
+    """`no vrrp 14 preempt` rather than an omitted `preempt`, because VRRP
+    preempts by default and the omission does not reach this rule at all. The
+    negation is what actually produces a preferred master that will not come
+    back, and it is the configuration the suggested change has to undo."""
     without = pack_from(
         tmp_path,
         r1="""hostname r1
@@ -1316,6 +1374,7 @@ interface Vlan14
    ip address 10.14.0.2/24
    vrrp 14 ipv4 10.14.0.1
    vrrp 14 priority-level 110
+   no vrrp 14 preempt
 """,
         r2="""hostname r2
 vlan 14

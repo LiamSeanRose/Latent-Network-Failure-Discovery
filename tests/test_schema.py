@@ -191,3 +191,36 @@ def test_unimplemented_sections_are_absent_not_stubbed() -> None:
         "incidents",
     ):
         assert absent not in present
+
+
+def test_a_member_records_where_its_preempt_flag_came_from() -> None:
+    """`preempt` stays a bool, because everything that reads it asks one
+    yes-or-no question. What the bool cannot say is whether the answer was
+    written down: VRRP preempts by default and HSRP does not, so two members with
+    `preempt=True` can be one operator's decision and one protocol's default, and
+    a finding about them reads differently in each case.
+
+    `TimerSource` is reused rather than a second enum invented. It already draws
+    exactly this line for timers — configured, inherited, platform default — and
+    the distinction it exists for is the same one.
+    """
+    configured = schema.FhrpMember(
+        device="agg-a",
+        interface="Vlan14",
+        priority=110,
+        preempt=True,
+        preempt_source=schema.TimerSource.CONFIGURED,
+    )
+    inherited = schema.FhrpMember(
+        device="agg-b",
+        interface="Vlan14",
+        priority=100,
+        preempt=True,
+        preempt_source=schema.TimerSource.PLATFORM_DEFAULT,
+    )
+    assert configured.preempt is inherited.preempt
+    assert configured.preempt_source is not inherited.preempt_source
+
+    # A member built without the field says so rather than claiming provenance.
+    bare = schema.FhrpMember(device="agg-a", interface="Vlan14", priority=100)
+    assert bare.preempt_source is schema.TimerSource.UNKNOWN

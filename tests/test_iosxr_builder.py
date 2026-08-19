@@ -891,3 +891,85 @@ def test_the_corpus_still_reports_the_divergence_it_was_written_to_hold(
         if t.scope.device == "metro-a"
     }
     assert delays == {"14": 30000, "14 ipv6": 30000, "24": 90000}
+
+
+# --------------------------------------------------------------------------
+# Preemption
+#
+# `router vrrp` ships with preemption on and `router hsrp` ships with it off, on
+# this dialect as on every other. `preempt disable` was matched here and thrown
+# away, under a comment saying off is what an unstated preempt already reads as —
+# which is exactly backwards for IOS-XR, and made the one group in a config that
+# does not preempt indistinguishable from every group that does.
+# --------------------------------------------------------------------------
+
+XR_SILENT_PREEMPT: Final = """hostname metro-a
+!
+interface BVI14
+ ipv4 address 203.0.113.130 255.255.255.192
+!
+router vrrp
+ interface BVI14
+  address-family ipv4
+   vrrp 14
+    priority 110
+    address 203.0.113.129
+!
+router hsrp
+ interface BVI14
+  address-family ipv4
+   hsrp 24 version 2
+    priority 110
+    address 203.0.113.131
+!
+"""
+
+
+def _member(parsed: object, protocol: FhrpProtocol) -> object:
+    return next(
+        record.member
+        for record in parsed.fhrp_records  # type: ignore[attr-defined]
+        if record.protocol is protocol
+    )
+
+
+def test_vrrp_preempts_by_default_and_hsrp_does_not() -> None:
+    """One config, two protocols, opposite defaults — which is the whole reason
+    the default has to be applied per protocol rather than per parser."""
+    parsed = parse_device(XR_SILENT_PREEMPT, device_id="metro-a")
+    vrrp = _member(parsed, FhrpProtocol.VRRP)
+    hsrp = _member(parsed, FhrpProtocol.HSRP)
+    assert vrrp.preempt is True
+    assert vrrp.preempt_source is TimerSource.PLATFORM_DEFAULT
+    assert hsrp.preempt is False
+    assert hsrp.preempt_source is TimerSource.PLATFORM_DEFAULT
+    assert parsed.unparsed_lines == ()
+
+
+def test_preempt_disable_turns_preemption_off_rather_than_being_discarded() -> None:
+    parsed = parse_device(
+        XR_SILENT_PREEMPT.replace(
+            "    priority 110\n    address 203.0.113.129\n",
+            "    priority 110\n    preempt disable\n    address 203.0.113.129\n",
+        ),
+        device_id="metro-a",
+    )
+    vrrp = _member(parsed, FhrpProtocol.VRRP)
+    assert vrrp.preempt is False
+    assert vrrp.preempt_source is TimerSource.CONFIGURED
+    assert parsed.unparsed_lines == ()
+
+
+def test_a_preempt_delay_still_counts_as_stating_preemption() -> None:
+    """`preempt delay 30` is preemption with a wait on it, not an absence of it,
+    and it is what both shipped IOS-XR configs write."""
+    parsed = parse_device(
+        XR_SILENT_PREEMPT.replace(
+            "    priority 110\n    address 203.0.113.129\n",
+            "    priority 110\n    preempt delay 30\n    address 203.0.113.129\n",
+        ),
+        device_id="metro-a",
+    )
+    vrrp = _member(parsed, FhrpProtocol.VRRP)
+    assert vrrp.preempt is True
+    assert vrrp.preempt_source is TimerSource.CONFIGURED
