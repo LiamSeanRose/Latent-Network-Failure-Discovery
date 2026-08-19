@@ -89,6 +89,9 @@ _UNINTERESTING: Final = re.compile(
     r"^(end|!.*|(no )?ip routing|(no )?ipv6 unicast-routing|spanning-tree portfast|"
     r"router ospf .*|\s*(network|router-id|passive-interface|max-lsa) .*|"
     r"\s*ip ospf network .*|\s*description .*|\s*no switchport|"
+    r"\s*ip access-group \S+ (in|out)|\s*ipv6 traffic-filter \S+ (in|out)|"
+    r"\s*(ip helper-address|ip dhcp relay address) \S+|"
+    r"\s*(no )?ip proxy-arp|\s*(no )?ip redirects|"
     r"\s*(no )?ipv6 enable|\s*ipv6 nd .*)$"
 )
 

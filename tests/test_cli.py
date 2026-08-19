@@ -46,12 +46,12 @@ def test_unparsed_lines_are_shown_not_hidden(
     """A construct the parser does not know must be visible in the output. Silent
     omission is how a fact pack quietly stops describing the network."""
     (tmp_path / "r.cfg").write_text(
-        "hostname r\ninterface Ethernet1\n   ip helper-address 10.0.0.9\n"
+        "hostname r\ninterface Ethernet1\n   vrrp 14 bfd ip 10.14.0.3\n"
     )
     main(["facts", str(tmp_path)])
     out = capsys.readouterr().out
     assert "unparsed" in out
-    assert "ip helper-address 10.0.0.9" in out
+    assert "vrrp 14 bfd ip 10.14.0.3" in out
 
 
 def test_missing_directory_is_an_error(capsys: pytest.CaptureFixture[str]) -> None:

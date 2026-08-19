@@ -484,7 +484,10 @@ OUT_OF_SCOPE: Final = re.compile(
     r"boot |service |transceiver|hardware|agent |daemon|platform|"
     r"clock|ntp|dns |ip name-server|ip domain|ip host|"
     r"snmp-server|logging|event-handler|sflow|monitor |archive|"
-    r"management|line (con|vty|aux)|"
+    # `line console` as well as `line con 0`: the word boundary after `con`
+    # rejected the long form, so a console stanza and its body leaked into
+    # unparsed_lines on every IOS and NX-OS config that spells it out.
+    r"management|line (con(sole)?|vty|aux)|"
     r"crypto|certificate|key |pki|ssl|"
     r"ip (prefix-list|access-list|community-list|as-path)|"
     r"mac access-list|route-map|class-map|policy-map|qos |errdisable|"

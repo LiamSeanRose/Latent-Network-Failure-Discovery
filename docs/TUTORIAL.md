@@ -67,13 +67,13 @@ Trimmed after the second device — the other four print the same way. The tail 
 reading twice:
 
 ```
-fhrp vrrp group=10 virtual=10.10.0.1
+fhrp VRRP 10 virtual=10.10.0.1
   north-agg1:Vlan10  priority=110  preempt=yes  tracks=UPLINK->Ethernet1 -40
   north-agg2:Vlan10  priority=100  preempt=yes  tracks=none
-fhrp vrrp group=20 virtual=10.20.0.1
+fhrp VRRP 20 virtual=10.20.0.1
   north-agg1:Vlan20  priority=110  preempt=yes  tracks=UPLINK->Ethernet1 -40
   north-agg2:Vlan20  priority=100  preempt=yes  tracks=none
-fhrp vrrp group=30 virtual=10.30.0.1
+fhrp VRRP 30 virtual=10.30.0.1
   south-agg1:Vlan30  priority=110  preempt=yes  tracks=none
 
 timers
@@ -83,6 +83,11 @@ timers
   north-agg2:Vlan20  group=20  hello=1000ms  source=configured
   south-agg1:Vlan30  group=30  hello=1000ms  source=configured
 ```
+
+Each `fhrp` header names the protocol, the group number and, when it is not IPv4, the address
+family. An interface running both `vrrp 14 ipv4` and `vrrp 14 ipv6` produces two groups —
+`VRRP 14` and `VRRP 14 IPv6` — because they elect separately and can land on different devices.
+This corpus is IPv4 only, so every group appears once.
 
 Two facts there do the work in the rest of this document. Groups 10 and 20 have the same members,
 the same priorities and the same tracked interface — and group 20 has a 60-second preempt delay
@@ -291,11 +296,20 @@ north-agg1 goes down once and comes back ten seconds later, here is what the mod
 control plane does.
 
 The tool arrives at that sequence by enumerating, not by guessing. It flaps only interfaces some
-group actually tracks — nothing else can change an election — one, two and three times, always
-ten seconds down, with an up-interval of twenty seconds by default and, for every preempt delay
-it found in the configs, one interval well inside that delay and one comfortably past it. The
-boundary is where behaviour changes, so that is where it looks. The trigger you see is the
-sequence that exposed the finding, not the only one that would.
+group actually tracks — nothing else about a link can change an election — one, two and three
+times, always ten seconds down, with an up-interval of twenty seconds by default and, for every
+preempt delay it found in the configs, one interval well inside that delay and one comfortably
+past it. The boundary is where behaviour changes, so that is where it looks. The trigger you see
+is the sequence that exposed the finding, not the only one that would.
+
+Flaps are not the only event class. It also reloads each device in turn — every interface on it
+down together and back together after five minutes — which no sequence of single-interface flaps
+reproduces, and which is the case where a member's own gateway interface returns at the same
+instant as the uplink it tracks. Reloads are enumerated last and only report pairs a flap did not
+already reach, because where both expose the same divergence the flap is the better trigger to
+hand a reader: one link, one interval, an argument you can follow. On this corpus every finding
+is a flap, which is the enumerator saying the reload found nothing the flap had missed — not that
+it was not tried.
 
 That is why the two `fhrp-oscillation` findings in the first run carry different triggers:
 `3x (10s down, 20s up)` for group 10 and `3x (10s down, 90s up)` for group 20. Ninety seconds is
@@ -599,6 +613,11 @@ whatever about BFD or IGP timers, because there are none to say anything about. 
 catching a parser gap. If a check is inert for want of a fact you know is in your files —
 `mtu-mismatch` reporting no interface sets an MTU when half of them do — the fact did not survive
 parsing, and `cassandra facts` will show you what did.
+
+The same verdict reaches the catalogue in the browser: `/rules?dir=<your configs>` tags each
+inert check `nothing to look at` and says underneath it *This check did not run on these configs:
+no BFD timers in these configs*, so the rule's own documentation and its verdict on your files
+are in one place rather than two.
 
 ## 9. In CI
 

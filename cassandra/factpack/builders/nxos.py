@@ -93,6 +93,9 @@ _UNINTERESTING: Final = re.compile(
     r"(no )?ip domain-lookup|(no )?ip routing|spanning-tree .*|"
     r"router ospf .*|router-id \S+|log-adjacency-changes|passive-interface .*|"
     r"medium \S+|(speed|duplex) \S+|logging event .*|"
+    r"\s*ip access-group \S+ (in|out)|\s*ipv6 traffic-filter \S+ (in|out)|"
+    r"\s*(ip helper-address|ip dhcp relay address) \S+|"
+    r"\s*(no )?ip proxy-arp|\s*(no )?ip redirects|"
     r"no ip(v6)? redirects|ip (router ospf|ospf) .*|"
     r"ipv6 link-local \S+|ipv6 nd .*)$"
 )

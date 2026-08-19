@@ -82,6 +82,10 @@ _UNINTERESTING = re.compile(
     r"negotiation auto|duplex .*|speed .*|no shutdown|description .*|"
     r"delay (up|down) \d+)\s*.*|router ospf .*|\s*network .*|\s*router-id .*|"
     r"\s*passive-interface .*|spanning-tree .*|\s*spanning-tree .*|"
+    r"\s*ip access-group \S+ (in|out)|\s*ipv6 traffic-filter \S+ (in|out)|"
+    r"\s*(ip helper-address|ip dhcp relay address) \S+|"
+    r"\s*(no )?ip proxy-arp|\s*(no )?ip redirects|"
+    r"\s*standby version \d+|\s*switchport trunk encapsulation \S+|"
     r"\s*(no )?ipv6 enable|\s*ipv6 nd .*)$"
 )
 

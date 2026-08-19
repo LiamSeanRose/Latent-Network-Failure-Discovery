@@ -21,6 +21,7 @@ from typing import Final
 import pytest
 
 from cassandra import baseline, coverage
+from cassandra.cli import render_facts
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.facts import rules
 from cassandra.findings import Finding, Severity, Tier, locate
@@ -230,6 +231,28 @@ def test_every_timing_finding_records_the_falsification_controls() -> None:
     for found in timing:
         assert found.evidence[-1].startswith("held in 3 of 3 runs at")
         assert "absent with no events" in found.evidence[-1]
+
+
+def test_every_trigger_on_this_corpus_is_a_flap() -> None:
+    """Section 6 tells the reader the reload was tried and found nothing new.
+
+    The enumerator runs reloads last and skips pairs a flap already reached, so
+    a reload trigger appearing here would mean that ordering changed — and the
+    section's argument, which walks one link down and up, would no longer
+    describe the run it quotes.
+    """
+    timing = [f for f in evaluate(CORPUS) if f.tier is Tier.TIMING]
+    assert timing
+    assert all(f.trigger is not None and f.trigger.startswith("flap") for f in timing)
+
+
+def test_the_fhrp_header_names_the_protocol_not_the_word_group() -> None:
+    """Section 1 quotes `fhrp VRRP 10 virtual=…`, which address families moved."""
+    pack, _ = build_fact_pack(CORPUS)
+    rendered = render_facts(pack, {})
+    assert "fhrp VRRP 10 virtual=10.10.0.1" in rendered
+    # IPv4 groups carry no family suffix; the corpus has no IPv6 to carry one.
+    assert "IPv6" not in rendered
 
 
 def test_the_two_oscillations_differ_in_trigger_and_in_remedy() -> None:
