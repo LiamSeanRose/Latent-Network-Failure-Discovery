@@ -54,6 +54,49 @@ operation, so there is no second route.
 
 ---
 
+## 2026-08-19 — Layer 1 is refused, and the corpus is why
+
+**Context:** the schema has had `L1Link` since it was written. Deriving it would complete the
+topology and make the adjacency figure show cabling rather than subnets.
+
+**The tempting heuristic:** exactly two addresses in a /30 or /31 must be the two ends of a
+cable.
+
+**Why it is wrong, demonstrated by this project's own corpus:** `10.99.0.0/30` holds precisely
+two addresses, `agg-a Vlan99` and `agg-b Vlan99`. They are SVIs. They reach each other through
+acc1, over two cables and a device. The heuristic would assert a cable that does not exist.
+
+That is not a small error. `L1Link` is what failure analysis reads to decide that downing one
+interface downs its peer, so a guessed cable does not weaken a result — it inverts one.
+Interface descriptions were also considered and rejected: they are prose, and they go stale.
+
+**Chosen:** `l1_links` stays empty, and a test pins that nothing claims layer 1. L2 segments,
+L2 adjacency and L3 adjacency are all derived, because all three are decidable.
+
+**One thing to know about L2 adjacency:** it is co-membership of a VLAN, not a cable. It pairs
+agg-a:Ethernet2 with agg-b:Ethernet2, which is true as "both trunk the same VLANs and frames
+pass between them" and false as wiring. It is also quadratic in trunks per VLAN — 400 devices
+takes about twelve seconds — because a flat VLAN across n trunks genuinely has n²/2 sharing
+pairs. Ask the segment who is in a broadcast domain; ask the pairs only who faces whom.
+
+---
+
+## 2026-08-19 — Only new findings fail a regression check
+
+**Context:** `--since` compares a run against a saved baseline. What should its exit code mean?
+
+**Chosen:** non-zero for new findings only. A pre-existing finding was known and accepted when
+the baseline was taken; failing on it makes every run red until the whole backlog is cleared,
+and a check that is always red gets switched off. Fixed and unchanged findings are reported and
+do not affect the status.
+
+**Finding identity across runs** is the subtle part, and the choice is deliberate: rule plus
+device plus the entities a finding names, not its prose. Rule-and-device alone collapses two
+BFD findings on one device into one; the full detail string means rewording a message reads as
+a regression. A test asserts a cosmetic rewrite shows up as neither new nor fixed.
+
+---
+
 ## 2026-08-19 — Model BGP peerings, one side at a time
 
 **Context:** after the noise filter, exactly one line still went unaccounted for on a realistic
