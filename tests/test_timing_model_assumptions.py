@@ -306,6 +306,39 @@ def test_a1_hsrp_defaults_to_three_seconds_and_vrrp_to_one() -> None:
     assert advert_interval_ms(pack, hsrp) == 3000
 
 
+def test_a1_the_longest_stated_interval_wins_over_a_duplicate_scope() -> None:
+    """A group is only as fast as the member that has to notice, and that rule
+    has to hold for two records on one scope as well as across two members.
+
+    The intervals are indexed rather than scanned — scanning every FHRP timer in
+    the pack for every group is quadratic in a collection's size — and an index
+    built the obvious way keeps whichever of two duplicates the inventory listed
+    last, which turns a stated four-second hello into a coin toss between four
+    and one.
+    """
+    from cassandra.factpack.schema import (
+        FhrpProtocol,
+        FhrpTimers,
+        TimerInventory,
+        TimerScope,
+    )
+    from cassandra.timing.model import advert_interval_ms
+
+    pack = fact_pack(tracked_pair())
+    group = pack.fhrp_groups[0]
+    member = group.members[0]
+    scope = TimerScope(device=member.device, interface=member.interface, instance="10")
+
+    def stating(ms: int) -> FhrpTimers:
+        return FhrpTimers(protocol=FhrpProtocol.VRRP, scope=scope, hello_interval_ms=ms)
+
+    for order in ((stating(4000), stating(1000)), (stating(1000), stating(4000))):
+        duplicated = dataclasses.replace(pack, timers=TimerInventory(fhrp=order))
+        assert advert_interval_ms(duplicated, group) == 4000, (
+            "the answer moved with the order the records happen to be in"
+        )
+
+
 def test_a2_events_take_effect_at_the_next_sample() -> None:
     """A2: an event between samples is rounded up to the next one."""
     pack = fact_pack(tracked_pair())

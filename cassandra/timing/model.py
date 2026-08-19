@@ -83,14 +83,17 @@ def advert_interval_ms(pack: StaticFactPack, group: FhrpGroup) -> int:
     The longest stated interval wins where two members disagree: the group is
     only as fast as the member that has to notice.
     """
+    # Indexed rather than scanned. This is called once per group per simulation
+    # and the simulation is run once per candidate sequence, so a linear pass
+    # over every FHRP timer in the pack for every one of them is quadratic in a
+    # collection's size — which was measurable at eighty devices and dominant at
+    # two hundred.
+    hellos = _cached_hellos(pack)
+    instance = fhrp_instance(group.group_number, group.family)
     stated = [
-        timer.hello_interval_ms
-        for timer in pack.timers.fhrp
+        interval
         for member in group.members
-        if timer.hello_interval_ms
-        and timer.scope.device == member.device
-        and timer.scope.interface == member.interface
-        and timer.scope.instance == fhrp_instance(group.group_number, group.family)
+        if (interval := hellos.get((member.device, member.interface, instance)))
     ]
     if stated:
         return max(stated)
@@ -253,23 +256,46 @@ def _preempt_delays(pack: StaticFactPack) -> dict[tuple[str, str, FhrpProtocol],
 # on how many packs this keeps alive.
 type _Delays = dict[tuple[str, str, FhrpProtocol], int]
 type _Addresses = dict[tuple[str, str], int]
+type _Hellos = dict[tuple[str, str, str], int]
 
-_LOOKUPS: dict[int, tuple[StaticFactPack, _Delays, _Addresses]] = {}
+_LOOKUPS: dict[int, tuple[StaticFactPack, _Delays, _Addresses, _Hellos]] = {}
 
 
-def _cached_lookups(pack: StaticFactPack) -> tuple[_Delays, _Addresses]:
+def _cached_lookups(pack: StaticFactPack) -> tuple[_Delays, _Addresses, _Hellos]:
     cached = _LOOKUPS.get(id(pack))
     if cached is not None and cached[0] is pack:
-        return cached[1], cached[2]
+        return cached[1], cached[2], cached[3]
     if len(_LOOKUPS) >= 2:
         _LOOKUPS.clear()
-    delays, addresses = _preempt_delays(pack), _primary_ipv4s(pack)
-    _LOOKUPS[id(pack)] = (pack, delays, addresses)
-    return delays, addresses
+    built = (_preempt_delays(pack), _primary_ipv4s(pack), _hello_intervals(pack))
+    _LOOKUPS[id(pack)] = (pack, *built)
+    return built
+
+
+def _cached_hellos(pack: StaticFactPack) -> _Hellos:
+    return _cached_lookups(pack)[2]
+
+
+def _hello_intervals(pack: StaticFactPack) -> _Hellos:
+    """Every stated advertisement interval, by the scope that states it.
+
+    Two records on one scope keep the larger, which is the same rule
+    `advert_interval_ms` applies across members and for the same reason: a group
+    is only as fast as the member that has to notice. A dict built without it
+    would silently keep whichever record the inventory happened to list last,
+    turning a duplicate into a coin toss.
+    """
+    intervals: _Hellos = {}
+    for timer in pack.timers.fhrp:
+        if not timer.hello_interval_ms:
+            continue
+        key = (timer.scope.device, timer.scope.interface, timer.scope.instance)
+        intervals[key] = max(intervals.get(key, 0), timer.hello_interval_ms)
+    return intervals
 
 
 def _members(group: FhrpGroup, pack: StaticFactPack) -> list[_MemberState]:
-    delays, addresses = _cached_lookups(pack)
+    delays, addresses, _ = _cached_lookups(pack)
     return [
         _MemberState(
             device=member.device,
