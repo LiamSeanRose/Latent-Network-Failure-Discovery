@@ -17,8 +17,8 @@ from typing import Final
 
 # Same categorical slots the figures use, so the illustration and the real
 # timeline below it do not teach two different colour languages.
-_A: Final = "#2a78d6"
-_B: Final = "#eb6834"
+_A: Final = "#2873cf"
+_B: Final = "#c94714"
 _SPLIT: Final = "#d03b3b"
 
 

@@ -27,10 +27,42 @@ from cassandra.factpack.schema import StaticFactPack
 from cassandra.findings import Finding
 from cassandra.timing.model import Event, EventKind, simulate
 
-# Categorical slots 1-3, light / dark. Validated as a set in both modes.
-SERIES: Final = (("#2a78d6", "#3987e5"), ("#eb6834", "#d95926"), ("#1baf7a", "#199e70"))
+# Categorical slots 1-3, light / dark. Measured as a set in tests/test_palette.py:
+# each has to stay distinguishable from the others under red-green colour
+# blindness, and each has to carry a readable label — which is what fixes the
+# light values darker than the dark ones rather than the other way round.
+SERIES: Final = (("#2873cf", "#3987e5"), ("#c94714", "#d95926"), ("#14835c", "#199e70"))
 SPLIT_COLOUR: Final = ("#d03b3b", "#d03b3b")  # status: critical
 NO_MASTER: Final = ("#8c8b86", "#6f6e69")
+
+# The two candidates for text drawn on a band.
+LABEL_LIGHT: Final = "#ffffff"
+LABEL_DARK: Final = "#0b0b0b"
+
+
+def _relative_luminance(colour: str) -> float:
+    raw = colour.lstrip("#")
+    channels = []
+    for index in (0, 2, 4):
+        value = int(raw[index : index + 2], 16) / 255
+        channels.append(
+            value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+        )
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+
+def label_for(fill: str) -> str:
+    """Whichever of white or near-black reads better on this fill.
+
+    Band labels are eleven-pixel bold text sitting on the band's own colour, and
+    a mid-tone fill cannot carry white text at that size. Choosing per fill
+    rather than per theme is what lets the slots stay the colours they are.
+    """
+    luminance = _relative_luminance(fill)
+    against_white = (_relative_luminance(LABEL_LIGHT) + 0.05) / (luminance + 0.05)
+    against_dark = (luminance + 0.05) / (_relative_luminance(LABEL_DARK) + 0.05)
+    return LABEL_DARK if against_dark > against_white else LABEL_LIGHT
+
 
 _BAND_H: Final = 26
 _BAND_GAP: Final = 10
@@ -153,9 +185,11 @@ def timeline_svg(pack: StaticFactPack, finding: Finding) -> str:
                 light, dark = colours[master]
                 title = master
             parts.append(
-                f'<g class="band"><rect x="{x(start):.1f}" y="{y}" '
-                f'width="{width:.1f}" height="{_BAND_H}" rx="4" '
-                f'style="--c:{light};--cd:{dark}"><title>{html.escape(title)} '
+                f'<g class="band" style="--c:{light};--cd:{dark};'
+                f'--l:{label_for(light)};--ld:{label_for(dark)}">'
+                f'<rect x="{x(start):.1f}" y="{y}" '
+                f'width="{width:.1f}" height="{_BAND_H}" rx="4">'
+                f"<title>{html.escape(title)} "
                 f"{start // 1000}s-{end // 1000}s</title></rect>"
             )
             if width > 54 and master:

@@ -57,18 +57,23 @@ _LIGHT: Final = """
   --surface-0: #f6f6f4; --surface-1: #fcfcfb; --surface-2: #eeeeea;
   --ink-1: #0b0b0b; --ink-2: #52514e; --ink-3: #85847e;
   --line: #e0e0da; --accent: #256abf;
-  --s-critical: #d03b3b; --s-serious: #ec835a; --s-warning: #fab219;
-  --s-good: #0ca30c;
-  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+  --s-critical: #d03b3b; --s-serious: #c84917; --s-warning: #9a6a03;
+  --s-good: #0a860a;
+  --series-1: #2873cf; --series-2: #c94714; --series-3: #14835c;
   --grid: rgba(37,106,191,.07);
 """
 
-# Stepped for the dark surface, not flipped. Status hues are inherited from the
-# light block on purpose: red still has to read as red.
+# Stepped for the dark surface, not flipped: same hues, moved to where they read
+# on a dark ground. Every value in both blocks is measured in tests/test_palette.py
+# against the surface it sits on — the light status colours in particular are
+# deeper than the obvious ones because amber text on near-white cannot be read,
+# whatever it looks like in a swatch.
 _DARK: Final = """
   --surface-0: #131312; --surface-1: #1a1a19; --surface-2: #232320;
   --ink-1: #ffffff; --ink-2: #c3c2b7; --ink-3: #8e8d85;
   --line: #2e2c28; --accent: #6da7ec;
+  --s-critical: #d85b5b; --s-serious: #ec835a; --s-warning: #fab219;
+  --s-good: #0ca30c;
   --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
   --grid: rgba(109,167,236,.10);
 """
@@ -273,7 +278,10 @@ svg.viz { width: 100%; min-width: 520px; height: auto; display: block; }
 svg.viz text { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
   fill: var(--ink-2); }
 svg.viz .row-label { fill: var(--ink-1); font-weight: 600; }
-svg.viz .band-label { fill: #fff; font-weight: 600; }
+/* The label sits on the band's own fill, so its colour is chosen per band by
+   contrast rather than by theme — see visuals.py. A mid-tone fill cannot carry
+   white text at eleven pixels, and half these fills are mid-tone. */
+svg.viz .band-label { font-weight: 600; }
 svg.viz .tick { fill: var(--ink-3); }
 svg.viz .ev { stroke: var(--ink-3); stroke-width: 1; opacity: .55; }
 /* --c and --cd live on the band element, so the dark variant has to be
@@ -283,11 +291,16 @@ svg.viz .band rect {
   fill: var(--c); transform-origin: left center;
   animation: grow .5s cubic-bezier(.2,.8,.3,1) both;
 }
+svg.viz .band .band-label { fill: var(--l); }
 :root[data-theme="dark"] svg.viz .band rect,
 :root:has(.theme-input:checked) svg.viz .band rect { fill: var(--cd); }
+:root[data-theme="dark"] svg.viz .band .band-label,
+:root:has(.theme-input:checked) svg.viz .band .band-label { fill: var(--ld); }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) svg.viz .band rect { fill: var(--cd); }
+  :root:where(:not([data-theme="light"])) svg.viz .band .band-label { fill: var(--ld); }
   :root:has(.theme-input:checked) svg.viz .band rect { fill: var(--c); }
+  :root:has(.theme-input:checked) svg.viz .band .band-label { fill: var(--l); }
 }
 @keyframes grow {
   from { transform: scaleX(0); opacity: .2; }
