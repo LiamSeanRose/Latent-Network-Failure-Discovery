@@ -6,7 +6,7 @@ each with the evidence that produced it.**
 Arista EOS, Cisco IOS, NX-OS and IOS-XR, detected automatically. VRRP and HSRP, IPv4 and IPv6.
 No lab, no containers, no account, no network access.
 
-![The web view: an adjacency map, a severity ring and findings grouped by device](docs/images/screenshot.png)
+![The web view: filters, a severity ring, and findings grouped by device, each carrying the line that would fix it](docs/images/screenshot.png)
 
 ## What it looks for
 
@@ -24,7 +24,7 @@ what the first cannot — a group that does not track the uplink is untouched by
 by a reload, and only then does a difference in preempt delay between it and its neighbour
 show.
 
-![Two gateway groups following the same link failure at different speeds, leaving a window where they disagree](docs/images/landing.png)
+![The landing page: two gateway groups following the same link failure at different speeds, and the three shapes a finding takes](docs/images/landing.png)
 
 ## The figure that makes the point
 
