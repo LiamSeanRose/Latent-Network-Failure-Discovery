@@ -55,6 +55,7 @@ uv run cassandra check ./configs --explain     # + evidence, fixes, rule ids
 uv run cassandra check ./configs --json        # machine-readable, with a config digest
 uv run cassandra check ./configs --fail-on high  # print everything, block on high only
 uv run cassandra facts ./configs               # the materialised fact pack
+uv run cassandra facts ./configs --json        # the same, whole, for checking against
 uv run cassandra rules                         # every check, and when each stays quiet
 uv run cassandra rules fhrp-divergence         # one rule in full
 uv run cassandra serve                         # local web view on 127.0.0.1:8765
@@ -62,6 +63,7 @@ uv run cassandra report ./configs -o out.html  # shareable standalone file
 
 uv run cassandra check ./configs --save-baseline base.json   # record a run
 uv run cassandra check ./configs --since base.json           # what changed since
+uv run cassandra report ./configs --since base.json -o out.html   # the same, shareable
 ```
 
 `--since` answers the question a QA tool is actually for: *did I break something?* Only new

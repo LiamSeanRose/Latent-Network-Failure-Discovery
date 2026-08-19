@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 from typing import Final
 
@@ -152,3 +154,67 @@ def test_check_is_quiet_when_it_read_everything(
 ) -> None:
     main(["check", str(CORPUS)])
     assert "not understood" not in capsys.readouterr().err
+
+
+def test_facts_json_is_the_whole_pack(capsys: pytest.CaptureFixture[str]) -> None:
+    """Handing out the fact pack whole is how someone checks the tool's reading
+    of their configs against their own — the only way to catch a parser that is
+    quietly wrong rather than quietly silent."""
+    assert main(["facts", str(CORPUS), "--json"]) == 0
+    pack = json.loads(capsys.readouterr().out)
+    assert sorted(pack) == [
+        "devices",
+        "fhrp_groups",
+        "meta",
+        "timers",
+        "unparsed",
+        "vlans",
+    ]
+    assert {d["id"] for d in pack["devices"]} == {"acc1", "agg-a", "agg-b", "core1"}
+    assert len(pack["fhrp_groups"]) == 3
+    assert pack["meta"]["config_digest"]
+    assert pack["unparsed"] == {}, "the shipped corpus must be read completely"
+
+
+def test_facts_json_carries_the_digest_that_produced_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A fact pack that cannot be tied back to the configs it came from cannot
+    be checked against them later."""
+    main(["facts", str(CORPUS), "--json"])
+    first = json.loads(capsys.readouterr().out)
+    main(["facts", str(CORPUS), "--json"])
+    second = json.loads(capsys.readouterr().out)
+    assert first["meta"]["config_digest"] == second["meta"]["config_digest"]
+
+
+def test_report_since_marks_new_findings_and_judges_only_those(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With a baseline the verdict is the regression, not the backlog."""
+    configs = tmp_path / "configs"
+    shutil.copytree(CORPUS, configs)
+    base = tmp_path / "base.json"
+    assert main(["check", str(configs), "--save-baseline", str(base)]) == 1
+    capsys.readouterr()
+
+    out = tmp_path / "same.html"
+    assert main(["report", str(configs), "-o", str(out), "--since", str(base)]) == 0
+    body = out.read_text()
+    assert "Compared with a baseline taken" in body
+    assert "state new" not in body
+
+    config = configs / "agg-a.cfg"
+    config.write_text(config.read_text().replace("decrement 40", "decrement 5", 1))
+    changed = tmp_path / "changed.html"
+    assert main(["report", str(configs), "-o", str(changed), "--since", str(base)]) == 1
+    assert "1 new" in changed.read_text()
+
+
+def test_report_since_refuses_a_baseline_it_cannot_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "r.html"
+    assert main(["report", str(CORPUS), "-o", str(out), "--since", "/nope.json"]) == 2
+    assert "nope.json" in capsys.readouterr().err
+    assert not out.exists(), "a report nobody asked for should not be written"

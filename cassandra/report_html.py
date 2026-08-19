@@ -11,12 +11,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from cassandra.app import Analysis, Filters, page
+from cassandra.app import Analysis, Comparison, Filters, page
 
 
-def render(analysis: Analysis, config_dir: Path) -> str:
+def render(
+    analysis: Analysis, config_dir: Path, comparison: Comparison | None = None
+) -> str:
     """The standalone page, as a string."""
-    html = page(str(config_dir), analysis, Filters())
+    since = "" if comparison is None else comparison.path
+    html = page(str(config_dir), analysis, Filters(since=since), comparison)
     # Remove the search form outright rather than commenting it out. It posts to
     # a server a reader of the file does not have, and a commented-out control
     # still ships its markup for anyone reading the source.
@@ -26,7 +29,12 @@ def render(analysis: Analysis, config_dir: Path) -> str:
     return re.sub(r'<a href="/rules(\.json)?">[^<]*</a>\s*(·\s*)?', "", html)
 
 
-def write(analysis: Analysis, config_dir: Path, destination: Path) -> Path:
+def write(
+    analysis: Analysis,
+    config_dir: Path,
+    destination: Path,
+    comparison: Comparison | None = None,
+) -> Path:
     """Render an analysis to a standalone HTML file and return the path."""
-    destination.write_text(render(analysis, config_dir), encoding="utf-8")
+    destination.write_text(render(analysis, config_dir, comparison), encoding="utf-8")
     return destination

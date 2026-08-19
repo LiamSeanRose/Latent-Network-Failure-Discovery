@@ -7,11 +7,13 @@ TIMING tiers (PROJECT.md §4.2).
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from cassandra import baseline
-from cassandra.app import analyse, serve
+from cassandra.app import analyse, compare_with, serve
 from cassandra.catalogue import catalogue, render_text
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
@@ -88,6 +90,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cassandra", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     facts = sub.add_parser("facts", help="materialise a fact pack from configs")
+    facts.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit the whole fact pack as JSON instead of structured text",
+    )
     facts.add_argument("config_dir", type=Path)
 
     check = sub.add_parser("check", help="report latent failure modes in configs")
@@ -136,6 +144,15 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument(
         "-o", "--output", type=Path, default=Path("cassandra-report.html")
     )
+    report.add_argument(
+        "--since",
+        type=Path,
+        metavar="FILE",
+        help=(
+            "mark each finding new or known against a saved baseline, and list "
+            "the ones that stopped being reported"
+        ),
+    )
 
     explain_rules = sub.add_parser("rules", help="explain the checks this tool makes")
     explain_rules.add_argument(
@@ -154,6 +171,30 @@ def main(argv: list[str] | None = None) -> int:
         if loaded is None:
             return 2
         pack, unparsed = loaded
+        if args.as_json:
+            # The fact pack is what every tier reasons over. Handing it out
+            # whole lets someone check the tool's reading of their configs
+            # against their own, which is the only way to catch a parser that is
+            # quietly wrong rather than quietly silent.
+            print(
+                json.dumps(
+                    {
+                        "meta": asdict(pack.meta),
+                        "devices": [asdict(device) for device in pack.devices],
+                        "vlans": [asdict(vlan) for vlan in pack.vlans],
+                        "fhrp_groups": [asdict(g) for g in pack.fhrp_groups],
+                        "timers": asdict(pack.timers),
+                        "unparsed": {
+                            device: list(rest)
+                            for device, rest in sorted(unparsed.items())
+                            if rest
+                        },
+                    },
+                    indent=2,
+                    default=str,
+                )
+            )
+            return 0
         print(render_facts(pack, unparsed))
         return 0
 
@@ -211,8 +252,16 @@ def main(argv: list[str] | None = None) -> int:
         if analysis.error:
             print(analysis.error, file=sys.stderr)
             return 2
-        written = write_html(analysis, args.config_dir, args.output)
+        comparison = compare_with(analysis, str(args.since) if args.since else "")
+        if comparison.error:
+            print(comparison.error, file=sys.stderr)
+            return 2
+        written = write_html(analysis, args.config_dir, args.output, comparison)
         print(f"wrote {written}", file=sys.stderr)
+        # With a baseline the verdict is the regression, not the backlog: the
+        # findings that were already there were accepted when it was taken.
+        if comparison.diff is not None:
+            return 1 if comparison.diff.new else 0
         return 1 if analysis.findings else 0
 
     if args.command == "rules":
