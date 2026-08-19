@@ -196,6 +196,20 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
 .rule .src, .rule .mono, .cite { overflow-wrap: anywhere; }
 .rule .undocumented { color: var(--s-serious); font-size: .88rem; }
 .rule .inert-why { color: var(--ink-2); font-size: .88rem; }
+/* ---- what the tool read ---- */
+.device-facts { padding-bottom: .6rem; }
+table.facts { width: 100%; border-collapse: collapse; margin: .4rem 0 .9rem;
+  font-size: .84rem; display: block; overflow-x: auto; }
+table.facts th { text-align: left; font-weight: 640; color: var(--ink-3);
+  text-transform: uppercase; letter-spacing: .05em; font-size: .7rem;
+  padding: .3rem .6rem .3rem 0; border-bottom: 1px solid var(--line);
+  white-space: nowrap; }
+table.facts td { padding: .32rem .6rem .32rem 0; border-bottom: 1px solid var(--line);
+  color: var(--ink-2); vertical-align: top; }
+table.facts tr:last-child td { border-bottom: 0; }
+table.facts .mono { color: var(--ink-1); }
+.state-shutdown { color: var(--s-serious); font-weight: 640; }
+.state-up { color: var(--ink-3); }
 .tag.inert { color: var(--s-warning); border-color: var(--s-warning); }
 /* The linked rule is marked, not merely scrolled to: landing in a list of
    near-identical boxes and having to work out which one you asked for is the

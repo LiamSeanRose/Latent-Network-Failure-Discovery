@@ -33,12 +33,13 @@ from urllib.parse import urlencode
 from cassandra import art, baseline, coverage, visuals
 from cassandra.catalogue import RuleDoc, catalogue
 from cassandra.coverage import RuleCoverage
+from cassandra.factpack.builders.common import fhrp_instance
 from cassandra.findings import Finding, Severity, Tier
 from cassandra.style import STYLE
 
 if TYPE_CHECKING:  # pragma: no cover - types, not dependencies
     from cassandra.app import Analysis
-    from cassandra.factpack.schema import StaticFactPack
+    from cassandra.factpack.schema import Device, StaticFactPack
 
 
 _SEVERITY_ORDER: Final = (
@@ -872,6 +873,8 @@ def page(
             '<p class="provenance">'
             f"fact pack <code>{html.escape(analysis.fact_pack_id)}</code> · "
             f"{devices} · digest <code>{html.escape(analysis.digest[:12])}</code> · "
+            f'<a href="{href("/facts", config_dir, Filters())}">'
+            "what was read</a> · "
             f'<a href="{href("/report.html", config_dir, filters)}">'
             "download report</a> · "
             f'<a href="{href("/findings.json", config_dir, filters)}">'
@@ -999,6 +1002,169 @@ def rules_page(pack: StaticFactPack | None = None, config_dir: str = "") -> str:
         'does. <a href="/">Back to findings</a>.</p>'
         + health
         + "".join(by_tier)
+        + "</section>"
+    )
+
+
+def _row(cells: list[str], *, head: bool = False) -> str:
+    tag = "th" if head else "td"
+    return "<tr>" + "".join(f"<{tag}>{cell}</{tag}>" for cell in cells) + "</tr>"
+
+
+def _interface_rows(device: Device) -> str:
+    rows = [
+        _row(["interface", "kind", "addresses", "mode", "vlans", "state"], head=True)
+    ]
+    for interface in device.interfaces:
+        addresses = ", ".join(a.prefix for a in interface.addresses) or "—"
+        vlans = "—"
+        if interface.access_vlan:
+            vlans = str(interface.access_vlan)
+        elif interface.allowed_vlans:
+            vlans = ",".join(str(v) for v in interface.allowed_vlans)
+        state = "up" if interface.admin_enabled else "shutdown"
+        rows.append(
+            _row(
+                [
+                    f'<span class="mono">{html.escape(interface.name)}</span>',
+                    html.escape(interface.kind.value),
+                    f'<span class="mono">{html.escape(addresses)}</span>',
+                    html.escape(interface.switchport_mode.value),
+                    f'<span class="mono">{html.escape(vlans)}</span>',
+                    f'<span class="state-{state}">{state}</span>',
+                ]
+            )
+        )
+    return '<table class="facts">' + "".join(rows) + "</table>"
+
+
+def _group_rows(pack: StaticFactPack, device: str) -> str:
+    """The FHRP groups this device is a member of, with what decides them."""
+    delays = {
+        (t.scope.device, t.scope.interface, t.scope.instance): t.preempt_delay_ms
+        for t in pack.timers.fhrp
+    }
+    rows = [
+        _row(
+            ["group", "interface", "virtual", "priority", "preempt", "tracks"],
+            head=True,
+        )
+    ]
+    found = False
+    for group in pack.fhrp_groups:
+        for member in group.members:
+            if member.device != device:
+                continue
+            found = True
+            delay = delays.get(
+                (
+                    member.device,
+                    member.interface,
+                    fhrp_instance(group.group_number, group.family),
+                )
+            )
+            preempt = "no"
+            if member.preempt:
+                preempt = f"after {delay // 1000}s" if delay else "immediately"
+            tracks = (
+                ", ".join(
+                    f"{t.target or t.id} \u2212{t.decrement}"
+                    for t in member.tracked_objects
+                )
+                or "—"
+            )
+            rows.append(
+                _row(
+                    [
+                        html.escape(group.label),
+                        f'<span class="mono">{html.escape(member.interface)}</span>',
+                        f'<span class="mono">'
+                        f"{html.escape(group.virtual_address or '—')}</span>",
+                        str(member.priority),
+                        html.escape(preempt),
+                        f'<span class="mono">{html.escape(tracks)}</span>',
+                    ]
+                )
+            )
+    if not found:
+        return ""
+    return '<table class="facts">' + "".join(rows) + "</table>"
+
+
+def facts_page(
+    pack: StaticFactPack | None,
+    unparsed: tuple[tuple[str, int], ...],
+    config_dir: str,
+    error: str | None = None,
+) -> str:
+    """What the tool understood, device by device.
+
+    The command line has printed this from the start and the page never has,
+    which left the one question a reader most needs answered — *did it read my
+    configs the way I read them?* — reachable only from a shell. A finding is
+    only as good as the reading under it, and the reading is not something to
+    take on trust.
+    """
+    if error or pack is None:
+        message = error or "Enter a directory of device configs."
+        return _shell(
+            '<section class="rulebook"><h2>What the tool read</h2>'
+            f'<div class="{"error" if error else "empty"}">'
+            f"{html.escape(message)}</div></section>"
+        )
+
+    missed = dict(unparsed)
+    cards: list[str] = []
+    for device in pack.devices:
+        groups = _group_rows(pack, device.id)
+        left = missed.get(device.id, 0)
+        note = ""
+        if left:
+            note = (
+                f'<p class="note unparsed">{left} line'
+                f"{'' if left == 1 else 's'} on this device were not understood "
+                "and are in no finding. <code>cassandra facts</code> lists "
+                "them.</p>"
+            )
+        cards.append(
+            f'<article class="rule device-facts">'
+            f'<h3><span class="mono">{html.escape(device.id)}</span>'
+            f'<span class="tag">{html.escape(device.nos_family.value)}</span>'
+            + (
+                f'<span class="cite mono">{html.escape(device.config_path)}</span>'
+                if device.config_path
+                else ""
+            )
+            + "</h3>"
+            + note
+            + _interface_rows(device)
+            + (
+                f'<p class="cap">FHRP</p>{groups}'
+                if groups
+                else '<p class="cap">No FHRP group on this device.</p>'
+            )
+            + "</article>"
+        )
+
+    total_missed = sum(count for _, count in unparsed)
+    summary = (
+        f'<p class="cap">{len(pack.devices)} devices, '
+        f"{sum(len(d.interfaces) for d in pack.devices)} interfaces, "
+        f"{len(pack.fhrp_groups)} FHRP groups. "
+        + (
+            f"{total_missed} lines were not understood."
+            if total_missed
+            else "Every line was read."
+        )
+        + "</p>"
+    )
+    back = href("/", config_dir, Filters())
+    return _shell(
+        '<section class="rulebook"><h2>What the tool read</h2>'
+        '<p class="cap">A finding is only as good as the reading under it. '
+        f'This is that reading. <a href="{back}">Back to findings</a>.</p>'
+        + summary
+        + "".join(cards)
         + "</section>"
     )
 

@@ -970,3 +970,44 @@ def test_the_rulebook_links_to_the_catalogue_for_this_directory(
     """Following the link should not lose the corpus the reader is looking at."""
     body = view(base_url, mixed)
     assert f"/rules?dir={quote(str(mixed), safe='')}" in body
+
+
+def test_the_page_shows_what_the_tool_read(base_url: str) -> None:
+    """A finding is only as good as the reading under it, and that reading was
+    reachable only from a shell."""
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    status, body = get(f"{base_url}/facts?dir={quote(str(examples))}")
+    assert status == 200
+    pack = analyse(examples).pack
+    assert pack is not None
+    for device in pack.devices:
+        assert device.id in body
+        assert device.config_path in body
+    assert "Every line was read" in body
+    # The facts a timing finding turns on, in the same place as the interfaces.
+    assert "VRRP 10" in body
+    assert "after 60s" in body, "the preempt delay that causes the divergence"
+
+
+def test_the_facts_page_says_what_it_could_not_read(
+    base_url: str, tmp_path: Path
+) -> None:
+    shutil.copytree(CORPUS, tmp_path / "configs")
+    (tmp_path / "configs" / "odd1.cfg").write_text(
+        "hostname odd1\ninterface Ethernet1\n   no switchport\n"
+        "   ip address 10.0.0.1/31\n   vrrp 9 bfd ip 10.0.0.2\n"
+    )
+    body = get(f"{base_url}/facts?dir={quote(str(tmp_path / 'configs'))}")[1]
+    assert "were not understood" in body
+    assert "Every line was read" not in body
+
+
+def test_the_facts_page_reports_a_bad_directory_rather_than_a_blank(
+    base_url: str,
+) -> None:
+    body = get(f"{base_url}/facts?dir={quote('/definitely/not/here')}")[1]
+    assert "not a directory" in body
+
+
+def test_the_findings_page_links_to_what_was_read(base_url: str, mixed: Path) -> None:
+    assert "/facts?dir=" in view(base_url, mixed)

@@ -94,8 +94,10 @@ if a plausible file is skipped, it says so.
 
 ### The web view and the report
 
-`serve` also answers `/rules` (every check, and when each stays quiet),
-`/rules.json`, `/findings.json`, and `/report.html`, which downloads the standalone file.
+`serve` also answers `/facts` (what the tool read out of your configs, device by device,
+including what it could not read), `/rules` (every check, when each stays quiet, and which of
+them had nothing to look at in your files), `/rules.json`, `/findings.json`, and
+`/report.html`, which downloads the standalone file.
 Findings filter by severity, tier, device and free text, and a device on the adjacency map
 is a link to its own findings. Every filter is in the query string, so any state the page
 shows is a link you can send, bookmark or curl.

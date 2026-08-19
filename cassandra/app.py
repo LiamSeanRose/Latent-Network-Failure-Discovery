@@ -34,6 +34,7 @@ from cassandra.view import (
     Filters,
     as_json,
     compare_with,
+    facts_page,
     page,
     parse_filters,
     rules_json,
@@ -51,6 +52,7 @@ __all__ = [
     "analyse_directory",
     "as_json",
     "compare_with",
+    "facts_page",
     "page",
     "parse_filters",
     "rules_json",
@@ -151,6 +153,15 @@ class Handler(BaseHTTPRequestHandler):
                 render(analysis, Path(config_dir)),
                 "text/html; charset=utf-8",
                 filename="cassandra-report.html",
+            )
+            return
+
+        if parsed.path == "/facts":
+            self._respond(
+                facts_page(
+                    analysis.pack, analysis.unparsed, config_dir, analysis.error
+                ),
+                "text/html; charset=utf-8",
             )
             return
 
