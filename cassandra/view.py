@@ -442,6 +442,15 @@ def _finding_html(finding: Finding, figure: str = "", state: str = "") -> str:
         )
     if finding.remedy:
         parts.append(f'<div class="remedy">fix: {html.escape(finding.remedy)}</div>')
+    if finding.change:
+        # The edit, in the dialect the device speaks. Marked as a suggestion
+        # because it is one: the tool knows the timers, not the change window,
+        # the standards or whatever else the operator is holding in their head.
+        lines = "\n".join(html.escape(line) for line in finding.change)
+        parts.append(
+            f'<div class="change"><span class="label">suggested change</span>'
+            f"<pre>{lines}</pre></div>"
+        )
     if figure:
         parts.append(
             '<div class="figure"><h2>gateway ownership over time</h2>'
@@ -1122,9 +1131,7 @@ def facts_page(
     )
 
 
-def facts_cards(
-    pack: StaticFactPack, unparsed: tuple[tuple[str, int], ...]
-) -> str:
+def facts_cards(pack: StaticFactPack, unparsed: tuple[tuple[str, int], ...]) -> str:
     """The reading itself, without a page around it.
 
     Separate so the standalone report can carry it too. A report is the copy

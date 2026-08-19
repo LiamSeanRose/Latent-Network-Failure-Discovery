@@ -438,6 +438,12 @@ svg.topology a.node-link:focus-visible circle { outline: 2px solid var(--accent)
   font-size: .8rem; background: var(--surface-2); border-radius: 6px;
   padding: .38rem .55rem; margin-bottom: .35rem; overflow-x: auto; }
 .remedy { border-left: 2px solid var(--s-good); }
+.change { background: var(--surface-2); border-radius: 6px; border-left: 2px solid
+  var(--s-good); padding: .4rem .55rem; margin-bottom: .35rem; overflow-x: auto; }
+.change .label { display: block; color: var(--ink-3); font-size: .68rem;
+  text-transform: uppercase; letter-spacing: .06em; margin-bottom: .2rem; }
+.change pre { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .8rem; color: var(--ink-1); white-space: pre; }
 details summary { cursor: pointer; color: var(--ink-3); font-size: .82rem; }
 details ul { margin: .45rem 0 0; padding-left: 1.1rem; font-family: ui-monospace,
   SFMono-Regular, Menlo, monospace; font-size: .78rem; color: var(--ink-2); }

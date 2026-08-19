@@ -8,6 +8,12 @@ One type for every tier, because a user does not care which engine found a probl
 narrowed that far the line, that has to change. `locate` fills it in from the
 fact pack after the rules have run, so a rule states what is wrong and the fact
 pack says where it is written.
+
+`change` is the third part, and PROJECT.md §5.4 asks for it directly: a finding
+nobody can act on is noise, so where a rule can state the edit in the dialect the
+device speaks, it does. Only where it can state it — most rules cannot, because
+the right edit depends on which of two devices was meant to be preferred, or on a
+VLAN plan the configuration does not contain.
 """
 
 from __future__ import annotations
@@ -52,6 +58,12 @@ class Finding:
     trigger: str | None = None
     remedy: str | None = None
     source: SourceRef | None = None
+    # The change itself, in the dialect the device speaks, where a rule can
+    # state it without guessing. `remedy` says what to do; this says what to
+    # type. Empty wherever the edit depends on intent the configuration does not
+    # contain — most of them do, and a suggestion that is wrong half the time is
+    # worse than none at all.
+    change: tuple[str, ...] = ()
 
     @property
     def sort_key(self) -> tuple[int, str, str]:

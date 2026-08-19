@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import re
 from pathlib import Path
 from typing import Final
 
 from cassandra.factpack.builders import build_fact_pack
-from cassandra.factpack.schema import StaticFactPack
+from cassandra.factpack.schema import NosFamily, StaticFactPack
 from cassandra.findings import Severity, Tier
 from cassandra.timing import sequences
 from cassandra.timing.model import Event, EventKind, simulate
@@ -396,3 +397,60 @@ def test_the_trigger_states_the_duration_it_actually_used() -> None:
     for finding in sequences.analyse(pack):
         if finding.trigger and finding.trigger.startswith("reload"):
             assert f"({seconds}s down)" in finding.trigger
+
+
+def test_a_chasing_group_carries_the_line_that_would_stop_it() -> None:
+    """PROJECT.md §5.4: a finding nobody can act on is noise.
+
+    `remedy` says what to do. This says what to type, in the dialect the device
+    speaks, which is the difference between advice and a change.
+    """
+    pack, _ = build_fact_pack(CORPUS)
+    chasing = [f for f in sequences.analyse(pack) if f.rule == "fhrp-oscillation"]
+    assert chasing
+    for finding in chasing:
+        assert finding.change, f"{finding.title} suggests no change"
+        assert finding.change[0].startswith("interface ")
+        assert "preempt delay minimum" in finding.change[-1]
+
+
+def test_the_suggested_delay_outlasts_the_interval_that_caused_the_finding() -> None:
+    """A delay shorter than the flap interval leaves the group still chasing,
+    which would make the suggestion worse than useless."""
+    pack, _ = build_fact_pack(CORPUS)
+    for finding in sequences.analyse(pack):
+        if finding.rule != "fhrp-oscillation" or not finding.change:
+            continue
+        interval = int(re.search(r"(\d+)s up", finding.trigger or "").group(1))
+        suggested = int(re.search(r"minimum (\d+)", finding.change[-1]).group(1))
+        assert suggested > interval, finding.trigger
+
+
+def test_the_change_is_written_in_the_dialect_of_the_device() -> None:
+    """Three dialects say this three ways, and getting one wrong is worse than
+    saying nothing — a line that does not parse costs more than no line."""
+    from cassandra.factpack.builders import build_fact_pack as build
+
+    nxos, _ = build(
+        Path(__file__).resolve().parents[1]
+        / "scenarios"
+        / "hsrp_preempt_split"
+        / "configs"
+    )
+    changes = [f.change for f in sequences.analyse(nxos) if f.change]
+    assert changes
+    for change in changes:
+        assert any(line.strip().startswith("hsrp ") for line in change)
+        assert not any("vrrp" in line for line in change)
+
+
+def test_an_unknown_dialect_suggests_nothing_rather_than_guessing() -> None:
+    pack, _ = build_fact_pack(CORPUS)
+    unknown = dataclasses.replace(
+        pack,
+        devices=tuple(
+            dataclasses.replace(device, nos_family=NosFamily.UNKNOWN)
+            for device in pack.devices
+        ),
+    )
+    assert all(not f.change for f in sequences.analyse(unknown))

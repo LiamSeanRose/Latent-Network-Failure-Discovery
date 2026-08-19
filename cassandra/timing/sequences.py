@@ -15,7 +15,13 @@ from __future__ import annotations
 
 from typing import Final
 
-from cassandra.factpack.schema import StaticFactPack
+from cassandra.factpack.schema import (
+    AddressFamily,
+    FhrpGroup,
+    FhrpMember,
+    NosFamily,
+    StaticFactPack,
+)
 from cassandra.findings import Finding, Severity, Tier
 from cassandra.timing.model import (
     DEFAULT_ADVERT_MS,
@@ -198,6 +204,50 @@ def _transitions(timeline: list[Placement], group_id: str) -> int:
     return count
 
 
+def _preempt_delay_line(
+    pack: StaticFactPack, group: FhrpGroup, member: FhrpMember, seconds: int
+) -> tuple[str, ...]:
+    """The lines that set a preempt delay on one member, in its own dialect.
+
+    PROJECT.md §5.4 asks a finding to carry the change that would remove it, not
+    only a description of it. The dialects say the same thing three ways and
+    getting one wrong is worse than saying nothing, so this returns nothing at
+    all for a device whose dialect is not one of the three.
+    """
+    nos = next(
+        (d.nos_family for d in pack.devices if d.id == member.device), None
+    )
+    if nos is None:
+        return ()
+    number = group.group_number
+    family = " ipv6" if group.family is AddressFamily.IPV6_UNICAST else ""
+    context = f"interface {member.interface}"
+    if nos is NosFamily.EOS:
+        return (context, f"   vrrp {number}{family} preempt delay minimum {seconds}")
+    if nos is NosFamily.IOS_XE:
+        return (context, f" standby {number} preempt delay minimum {seconds}")
+    if nos is NosFamily.NX_OS:
+        return (
+            context,
+            f"  hsrp {number}{family}",
+            f"    preempt delay minimum {seconds}",
+        )
+    return ()
+
+
+def _change_for(
+    pack: StaticFactPack, group_id: str, device: str, seconds: int
+) -> tuple[str, ...]:
+    """The preempt-delay edit for one group on one device, if it can be stated."""
+    for group in pack.fhrp_groups:
+        if group.id != group_id:
+            continue
+        for member in group.members:
+            if member.device == device:
+                return _preempt_delay_line(pack, group, member, seconds)
+    return ()
+
+
 def _control_note(held: int | None) -> str:
     """What the controls established, in the evidence where it can be weighed.
 
@@ -281,6 +331,7 @@ def _oscillation(
     events: tuple[Event, ...],
     held: int = PERTURBED_RUNS,
     delay_ms: int = 0,
+    change: tuple[str, ...] = (),
 ) -> Finding:
     """A group that changes master repeatedly while one interface flaps.
 
@@ -319,6 +370,7 @@ def _oscillation(
         ),
         trigger=trigger,
         evidence=(*(e.describe() for e in events), _control_note(held)),
+        change=change,
         remedy=(
             f"raise the preempt delay past {delay_ms // 1000}s, or damp the "
             f"interface so it stops flapping"
@@ -486,6 +538,10 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                         if _transitions(control, group_id) >= MIN_TRANSITIONS:
                             continue
                         seen.add(key)
+                        # Long enough that the interval this trigger used cannot
+                        # bounce the group again, rounded to whole seconds
+                        # because that is the unit every dialect takes.
+                        suggested = (up_ms + SETTLE_MS) // 1000
                         findings.append(
                             _oscillation(
                                 device=device,
@@ -496,6 +552,9 @@ def analyse(pack: StaticFactPack) -> list[Finding]:
                                 events=events,
                                 held=held,
                                 delay_ms=delays.get(group_id, 0),
+                                change=_change_for(
+                                    pack, group_id, device, suggested
+                                ),
                             )
                         )
     # A reload is its own event class: every interface on the device drops

@@ -460,6 +460,8 @@ def _lines_for(finding: Finding, *, explain: bool) -> list[str]:
         lines.extend(f"        evidence: {item}" for item in finding.evidence)
         if finding.remedy:
             lines.append(f"        fix: {finding.remedy}")
+        for change in finding.change:
+            lines.append(f"          {change}")
         lines.append(f"        rule: {finding.rule} ({finding.tier.value})")
     lines.append("")
     return lines

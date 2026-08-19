@@ -44,6 +44,10 @@ def render(findings: list[Finding], *, explain: bool = False) -> str:
                 lines.append(f"        evidence: {item}")
             if finding.remedy:
                 lines.append(f"        fix: {finding.remedy}")
+            # The edit itself, indented under the prose that describes it. Most
+            # rules cannot state one, and those simply have nothing here.
+            for change in finding.change:
+                lines.append(f"          {change}")
             lines.append(f"        rule: {finding.rule} ({finding.tier.value})")
         lines.append("")
 
@@ -93,6 +97,7 @@ def as_json(findings: list[Finding], *, pack_id: str = "", digest: str = "") -> 
                     "remedy": finding.remedy,
                     "evidence": list(finding.evidence),
                     "source": _source_json(finding),
+                    "change": list(finding.change),
                 }
                 for finding in rank(findings)
             ],
