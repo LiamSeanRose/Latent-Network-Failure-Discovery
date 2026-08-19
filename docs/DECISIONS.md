@@ -60,6 +60,31 @@ Carried over, owner-only, not blocking any phase:
       `main`, so there is nothing stale in either — the remaining work is tidying the branch
       list and setting `main` as default, neither of which can be done from a session.
 
+- [ ] Owner action, one command: fifty commits between `9b5f23f` and `e44e83b` were authored
+      under the build tooling's own identity rather than the repository owner's. The working
+      identity is now corrected, so everything from that point forward is attributed properly,
+      but the earlier fifty are visible in the history on the remote. Rewriting them is a
+      history rewrite and a force push, which this session is not permitted to perform. The
+      whole fix, from a clone with push rights and no other clones outstanding:
+
+      ```sh
+      git filter-branch -f --env-filter '
+        if [ "$GIT_AUTHOR_EMAIL" = "<the tooling address>" ]; then
+          export GIT_AUTHOR_NAME="Liam Rose"
+          export GIT_AUTHOR_EMAIL="liam.sean.rose@gmail.com"
+        fi
+        if [ "$GIT_COMMITTER_EMAIL" = "<the tooling address>" ]; then
+          export GIT_COMMITTER_NAME="Liam Rose"
+          export GIT_COMMITTER_EMAIL="liam.sean.rose@gmail.com"
+        fi
+      ' -- 9b5f23f..main
+      git push --force-with-lease origin main
+      ```
+
+      There are no pull requests open against this repository and no other branch carries
+      those commits, so nothing is lost by the rewrite. It changes every commit hash after
+      `9b5f23f`; any existing clone needs a fresh one.
+
 **Why these cannot be automated from a session:** the session's git credentials permit
 creating and updating refs but not deleting them. Verified by experiment rather than inferred:
 pushing a throwaway non-default branch succeeded and deleting that same branch returned
