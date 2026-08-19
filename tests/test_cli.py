@@ -130,3 +130,25 @@ def test_rules_rejects_a_name_that_is_not_a_rule(
     """Mistyping a rule id is a user error, not a result. It must not exit 0."""
     assert main(["rules", "fhrp-divergance"]) == 2
     assert "no such rule" in capsys.readouterr().err
+
+
+def test_check_says_how_much_it_did_not_understand(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Findings derived from a partial reading must not read as complete ones."""
+    (tmp_path / "odd1.cfg").write_text(
+        "hostname odd1\n"
+        "interface Ethernet1\n"
+        "   no switchport\n"
+        "   ip address 10.0.0.1/31\n"
+        "   some-feature that-nobody-parses\n"
+    )
+    main(["check", str(tmp_path)])
+    assert "were not understood" in capsys.readouterr().err
+
+
+def test_check_is_quiet_when_it_read_everything(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["check", str(CORPUS)])
+    assert "not understood" not in capsys.readouterr().err

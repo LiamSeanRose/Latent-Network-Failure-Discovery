@@ -500,3 +500,35 @@ def test_the_downloaded_report_has_no_links_to_this_server(
         report = response.read().decode()
     assert 'href="/rules"' not in report
     assert 'href="/rules.json"' not in report
+
+
+UNREADABLE: Final = """hostname odd1
+vlan 20
+interface Ethernet1
+   switchport mode trunk
+   switchport trunk allowed vlan 20
+   some-feature that-nobody-parses here
+   another-unknown directive
+"""
+
+
+def test_lines_that_were_not_read_are_reported_beside_the_findings(
+    base_url: str, tmp_path: Path
+) -> None:
+    """A rule can only reason about facts that were extracted.
+
+    A group whose priority line was missed still produces findings, and they
+    are confident and wrong. Showing what was not read is what stops a partial
+    reading from being taken for a complete one.
+    """
+    shutil.copytree(CORPUS, tmp_path / "configs")
+    (tmp_path / "configs" / "odd1.cfg").write_text(UNREADABLE)
+    body = view(base_url, tmp_path / "configs")
+    assert "Not everything was read" in body
+    assert "odd1" in body
+    assert "cassandra facts" in body
+
+
+def test_a_fully_understood_directory_says_nothing_about_reading(base_url: str) -> None:
+    """The notice has to mean something when it appears."""
+    assert "Not everything was read" not in view(base_url, CORPUS)

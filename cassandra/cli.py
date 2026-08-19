@@ -161,7 +161,8 @@ def main(argv: list[str] | None = None) -> int:
         loaded = _load(args.config_dir)
         if loaded is None:
             return 2
-        pack, _ = loaded
+        pack, unparsed = loaded
+        _warn_unparsed(unparsed)
         findings = (
             rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack)
         )
@@ -228,6 +229,28 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     return 2
+
+
+def _warn_unparsed(unparsed: dict[str, tuple[str, ...]]) -> None:
+    """Say how much of the input was not understood, before the findings.
+
+    A rule can only reason about facts that were extracted, and a line nobody
+    read is not neutral: a group whose priority line was missed still produces
+    findings, and they are confident and wrong. This goes to stderr so it does
+    not pollute a piped result, and it goes first so it is read.
+    """
+    leftovers = {device: rest for device, rest in unparsed.items() if rest}
+    if not leftovers:
+        return
+    total = sum(len(rest) for rest in leftovers.values())
+    lines = "line" if total == 1 else "lines"
+    where = "device" if len(leftovers) == 1 else "devices"
+    print(
+        f"note: {total} {lines} across {len(leftovers)} {where} were not "
+        "understood and are not represented in these findings. "
+        "`cassandra facts` on the same directory lists them.",
+        file=sys.stderr,
+    )
 
 
 def _blocking(findings: list[Finding], threshold: str | None) -> list[Finding]:

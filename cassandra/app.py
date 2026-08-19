@@ -389,6 +389,8 @@ details ul { margin: .45rem 0 0; padding-left: 1.1rem; font-family: ui-monospace
 .empty, .error, .note { background: var(--surface-1); border: 1px solid var(--line);
   border-radius: 10px; padding: 1.1rem; }
 .error { border-left: 3px solid var(--s-critical); }
+.note.unparsed { border-left: 3px solid var(--s-warning); margin-bottom: 1rem; }
+.note.unparsed .mono { color: var(--ink-1); }
 .caveat { color: var(--ink-3); font-size: .84rem; margin-top: 2rem;
   border-top: 1px solid var(--line); padding-top: .9rem; }
 footer.meta-foot { color: var(--ink-3); font-size: .78rem; margin-top: 1.6rem; }
@@ -438,6 +440,10 @@ class Analysis:
     # Kept so the figures can be drawn from the same facts the findings came
     # from, rather than re-parsing and risking a picture of a different network.
     pack: StaticFactPack | None = None
+    # Lines the parsers did not understand, per device. Carried because a result
+    # is only as complete as the reading that produced it, and a page that shows
+    # findings without showing what it failed to read is overstating itself.
+    unparsed: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -469,7 +475,7 @@ def analyse(config_dir: Path) -> Analysis:
     """Analyse a directory, keeping the fact pack's identity alongside the result."""
     if not config_dir.is_dir():
         return Analysis(error=f"not a directory: {config_dir}")
-    pack, _ = build_fact_pack(config_dir)
+    pack, unparsed = build_fact_pack(config_dir)
     if not pack.devices:
         return Analysis(error=f"no .cfg files in {config_dir}")
     findings = rank(
@@ -481,6 +487,9 @@ def analyse(config_dir: Path) -> Analysis:
         digest=pack.meta.config_digest,
         device_count=pack.meta.device_count or len(pack.devices),
         pack=pack,
+        unparsed=tuple(
+            (device, len(lines)) for device, lines in sorted(unparsed.items()) if lines
+        ),
     )
 
 
@@ -882,6 +891,34 @@ def _rulebook_html(findings: list[Finding]) -> str:
     ).format(plural, len(book), "".join(_rule_entry(doc) for doc in seen))
 
 
+def _unparsed_html(analysis: Analysis) -> str:
+    """What the parsers did not understand, said out loud.
+
+    A rule can only reason about facts that were extracted. Lines nobody read
+    are not neutral — a group whose priority line was missed still produces
+    findings, and they will be confident and wrong. Showing the count next to
+    the result is what stops a partial reading from reading as a complete one.
+    """
+    total = sum(count for _, count in analysis.unparsed)
+    devices = len(analysis.unparsed)
+    lines = "line" if total == 1 else "lines"
+    where = "device" if devices == 1 else "devices"
+    worst = sorted(analysis.unparsed, key=lambda item: -item[1])[:6]
+    listed = ", ".join(
+        f'<span class="mono">{html.escape(device)}</span> ({count})'
+        for device, count in worst
+    )
+    if devices > len(worst):
+        listed += f", and {devices - len(worst)} more"
+    return (
+        '<div class="note unparsed"><strong>Not everything was read.</strong> '
+        f"{total} {lines} across {devices} {where} are not represented in these "
+        "findings, so anything that depended on them was not checked. "
+        f"{listed}. Run <code>cassandra facts</code> on the same directory to "
+        "see them.</div>"
+    )
+
+
 def _hidden_filters(filters: Filters) -> str:
     """Keep the active filters when the directory form is submitted."""
     return "".join(
@@ -960,6 +997,9 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
 
     if visible:
         sections.append(_rulebook_html(visible))
+
+    if analysis.unparsed:
+        sections.append(_unparsed_html(analysis))
 
     if any(finding.tier is Tier.TIMING for finding in visible):
         sections.append(f'<p class="caveat">{_TIMING_CAVEAT}</p>')
