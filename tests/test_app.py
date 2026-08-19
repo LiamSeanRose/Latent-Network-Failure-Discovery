@@ -1011,3 +1011,15 @@ def test_the_facts_page_reports_a_bad_directory_rather_than_a_blank(
 
 def test_the_findings_page_links_to_what_was_read(base_url: str, mixed: Path) -> None:
     assert "/facts?dir=" in view(base_url, mixed)
+
+
+@pytest.mark.parametrize(
+    "path", ["/", "/rules", "/facts"], ids=["findings", "rules", "facts"]
+)
+def test_every_page_fetches_nothing(base_url: str, mixed: Path, path: str) -> None:
+    """Checked per page rather than once, because each new route is a new place
+    for a stylesheet or a font to creep in — and the promise is about the tool,
+    not about one of its pages."""
+    body = view(base_url, mixed, path=path)
+    for pattern in (r"<script", r"https?://", r"<link[^>]+href", r"@import", r"<img"):
+        assert not re.search(pattern, body), f"{path}: {pattern}"
