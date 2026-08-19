@@ -434,6 +434,7 @@ details ul { margin: .45rem 0 0; padding-left: 1.1rem; font-family: ui-monospace
 .compare .c.new { color: var(--s-critical); }
 .compare .c.fixed { color: var(--s-good); }
 .compare .c.known { color: var(--ink-3); }
+.compare .moved { margin: .4rem 0 .3rem; }
 .tag.state { font-weight: 660; }
 .tag.state.new { color: var(--s-critical); border-color: var(--s-critical); }
 .tag.state.fixed { color: var(--s-good); border-color: var(--s-good); }
@@ -1043,11 +1044,22 @@ def _comparison_html(comparison: Comparison) -> str:
 
     taken = diff.baseline_taken_at.strftime("%Y-%m-%d %H:%M")
     verdict = "regressed" if diff.new else "clean"
-    moved = (
-        "The configs have not changed since it was taken."
-        if not diff.configs_changed
-        else ""
-    )
+
+    # The most useful sentence this tool can print, and the easiest to bury. If
+    # the configs are byte-identical and the findings are not, the network did
+    # not change — the checks did. Nobody reading a diff expects to be told
+    # that, and nobody works it out on their own either.
+    unchanged_configs = not diff.configs_changed
+    differences = bool(diff.new or diff.fixed)
+    moved = ""
+    if unchanged_configs and differences:
+        moved = (
+            "<strong>The configs are byte-identical to the baseline.</strong> "
+            "Every difference below is a change in the checks, not in the "
+            "network."
+        )
+    elif unchanged_configs:
+        moved = "The configs are byte-identical to the baseline."
     counts = (
         f'<span class="c new">{len(diff.new)} new</span>'
         f'<span class="c fixed">{len(diff.fixed)} fixed</span>'
@@ -1076,8 +1088,9 @@ def _comparison_html(comparison: Comparison) -> str:
         f'<div class="compare {verdict}"><strong>Compared with a baseline taken '
         f"{html.escape(taken)}.</strong> "
         f'<div class="counts-inline">{counts}</div>'
-        f'<p class="cap">{html.escape(moved)} Only new findings are a '
-        "regression: the rest were known when the baseline was taken.</p>"
+        + (f'<p class="moved">{moved}</p>' if moved else "")
+        + '<p class="cap">Only new findings are a regression: the rest were '
+        "known when the baseline was taken.</p>"
         f"{churn}</div>{fixed}"
     )
 

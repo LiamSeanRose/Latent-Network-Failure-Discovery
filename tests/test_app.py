@@ -821,3 +821,31 @@ def test_free_text_survives_the_form_and_the_chips(base_url: str, mixed: Path) -
 def test_free_text_reaches_the_json_endpoint(base_url: str, mixed: Path) -> None:
     document = json.loads(view(base_url, mixed, "q=Vlan99", "/findings.json"))
     assert {f["rule"] for f in document["findings"]} == {"svi-vlan-not-trunked"}
+
+
+def test_identical_configs_with_different_findings_say_which_changed(
+    base_url: str, tmp_path: Path
+) -> None:
+    """The most useful sentence this tool can print, and the easiest to bury.
+
+    If the configs are byte-identical and the findings are not, the network did
+    not change — the checks did. Nobody expects to be told that by a diff, and
+    nobody works it out on their own either.
+    """
+    configs = tmp_path / "configs"
+    shutil.copytree(CORPUS, configs)
+    result = analyse(configs)
+    base = tmp_path / "base.json"
+    baseline.save(list(result.findings)[:-1], result.pack, base)  # one short
+
+    body = view(base_url, configs, f"since={quote(str(base))}")
+    assert "byte-identical to the baseline" in body
+    assert "change in the checks, not in the network" in body
+
+
+def test_changed_configs_do_not_claim_the_checks_moved(
+    base_url: str, regressed: tuple[Path, Path]
+) -> None:
+    configs, base = regressed
+    body = view(base_url, configs, f"since={quote(str(base))}")
+    assert "change in the checks" not in body
