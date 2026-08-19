@@ -288,6 +288,9 @@ svg.viz .band rect {
   from { transform: scaleX(0); opacity: .2; }
   to { transform: scaleX(1); opacity: 1; }
 }
+/* The map has three or four nodes in it. Letting it stretch to the full column
+   turns a small graph into a page of whitespace with dots in the corners. */
+svg.topology { max-width: 560px; min-width: 380px; margin: 0 auto; }
 svg.topology .edge line { stroke: var(--accent); stroke-width: 2; opacity: .5;
   stroke-dasharray: 260; stroke-dashoffset: 260;
   animation: draw .8s ease-out forwards; animation-delay: calc(var(--i) * .09s); }
