@@ -541,6 +541,43 @@ sequence that leaves a group masterless for minutes should not be silent.
 
 ---
 
+## What the search does to its own results
+
+The entries above are what the model assumes. This is what the enumeration in
+`cassandra/timing/sequences.py` does before it reports anything the model said — PROJECT.md
+§2.4's controls, applied to the tier they were not written for.
+
+**No-trigger control.** Every reported observation is re-checked against the same window with
+no events in it. A pair of groups that sits split with nothing happening was not split by any
+trigger, and reporting it under one would send the reader to a link that had nothing to do with
+it. That is a configuration wrong at rest, which is the FACTS tier's finding, not this one's.
+The control's criterion is inverted rather than skipped, exactly as §2.4 requires.
+
+**Perturbation control.** The flap interval is varied by ±20% and the observation must survive
+in at least two of the three runs. The model samples on a one-second grid (A2), so a divergence
+that exists at exactly ninety seconds and nowhere near it is an artifact of that grid rather
+than a property of the configuration. Reporting one spends the reader's trust on a number the
+model invented.
+
+**Repetition does not apply.** §2.4's third control asks for three runs and a two-of-three
+majority, to separate deterministic behaviour from flaky. This model is deterministic by
+construction: three runs of one sequence are one run, three times. Repetition is a control for
+the emulator, where message loss and scheduling are real. Saying so here is the point — a
+control listed as satisfied when it was never run is worse than one honestly marked
+inapplicable.
+
+What each finding survived is written into its own evidence, so a reader weighing a
+model-derived claim can see what it withstood rather than take the tier's word for it:
+
+```
+evidence: held in 3 of 3 runs at ±20% of the interval; absent with no events
+```
+
+None of this makes the model right. It removes the results that would be wrong even if the
+model were.
+
+---
+
 ## Corrections made while compiling this register
 
 Extracting the assumptions turned up four things that were not "unvalidated" but wrong, and they
