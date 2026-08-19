@@ -971,6 +971,8 @@ def page(config_dir: str, analysis: Analysis, filters: Filters) -> str:
             '<p class="provenance">'
             f"fact pack <code>{html.escape(analysis.fact_pack_id)}</code> · "
             f"{devices} · digest <code>{html.escape(analysis.digest[:12])}</code> · "
+            f'<a href="{href("/report.html", config_dir, filters)}">'
+            "download report</a> · "
             f'<a href="{href("/findings.json", config_dir, filters)}">'
             "findings.json</a> · "
             '<a href="/rules.json">rules.json</a></p>'
@@ -1125,6 +1127,18 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as exc:
                 analysis = Analysis(error=f"could not read {config_dir}: {exc}")
 
+        if parsed.path == "/report.html":
+            # Imported here rather than at module scope: report_html imports
+            # this module for the renderer, and one of the two has to be late.
+            from cassandra.report_html import render
+
+            self._respond(
+                render(analysis, Path(config_dir)),
+                "text/html; charset=utf-8",
+                filename="cassandra-report.html",
+            )
+            return
+
         if parsed.path == "/rules":
             self._respond(rules_page(), "text/html; charset=utf-8")
             return
@@ -1147,11 +1161,22 @@ class Handler(BaseHTTPRequestHandler):
 
         self._respond(page(config_dir, analysis, filters), "text/html; charset=utf-8")
 
-    def _respond(self, body: str, content_type: str, *, status: int = 200) -> None:
+    def _respond(
+        self,
+        body: str,
+        content_type: str,
+        *,
+        status: int = 200,
+        filename: str | None = None,
+    ) -> None:
         encoded = body.encode()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
+        if filename is not None:
+            self.send_header(
+                "Content-Disposition", f'attachment; filename="{filename}"'
+            )
         self.end_headers()
         self.wfile.write(encoded)
 

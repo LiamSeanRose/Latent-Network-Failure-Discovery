@@ -16,6 +16,7 @@ from cassandra.catalogue import catalogue, render_text
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
+from cassandra.findings import Finding, Severity
 from cassandra.report import as_json, render
 from cassandra.report_html import write as write_html
 from cassandra.timing import sequences, timer_rules
@@ -113,6 +114,17 @@ def main(argv: list[str] | None = None) -> int:
         help="emit findings as JSON for a pipeline instead of text",
     )
     check.add_argument(
+        "--fail-on",
+        choices=[severity.value for severity in Severity],
+        metavar="SEVERITY",
+        help=(
+            "exit non-zero only at this severity or worse "
+            f"({', '.join(s.value for s in Severity)}). The report is unchanged; "
+            "this decides the verdict, so a pipeline can block on high while "
+            "still printing everything"
+        ),
+    )
+    check.add_argument(
         "--since",
         type=Path,
         metavar="FILE",
@@ -188,7 +200,10 @@ def main(argv: list[str] | None = None) -> int:
             print(render(findings, explain=args.explain))
         # Exit status is the verdict: non-zero when something needs attention, so
         # this is usable in a pre-commit hook or CI without parsing the output.
-        return 1 if findings else 0
+        # --fail-on narrows what counts as attention without narrowing the
+        # report, because a pipeline that only blocks on high still wants the
+        # low ones printed where someone will see them.
+        return 1 if _blocking(findings, args.fail_on) else 0
 
     if args.command == "report":
         analysis = analyse(args.config_dir)
@@ -213,6 +228,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     return 2
+
+
+def _blocking(findings: list[Finding], threshold: str | None) -> list[Finding]:
+    """The findings that decide the exit status."""
+    if threshold is None:
+        return findings
+    order = list(Severity)
+    limit = order.index(Severity(threshold))
+    return [f for f in findings if order.index(f.severity) <= limit]
 
 
 def _load(config_dir: Path) -> tuple[StaticFactPack, dict[str, tuple[str, ...]]] | None:

@@ -14,12 +14,19 @@ from pathlib import Path
 from cassandra.app import Analysis, Filters, page
 
 
-def write(analysis: Analysis, config_dir: Path, destination: Path) -> Path:
-    """Render an analysis to a standalone HTML file and return the path."""
+def render(analysis: Analysis, config_dir: Path) -> str:
+    """The standalone page, as a string."""
     html = page(str(config_dir), analysis, Filters())
     # Remove the search form outright rather than commenting it out. It posts to
     # a server a reader of the file does not have, and a commented-out control
     # still ships its markup for anyone reading the source.
     html = re.sub(r'<form class="finder".*?</form>', "", html, flags=re.S)
-    destination.write_text(html, encoding="utf-8")
+    # Same for the links to endpoints only the server has. A dead link in a file
+    # someone was sent reads as the file being broken.
+    return re.sub(r'<a href="/rules(\.json)?">[^<]*</a>\s*(·\s*)?', "", html)
+
+
+def write(analysis: Analysis, config_dir: Path, destination: Path) -> Path:
+    """Render an analysis to a standalone HTML file and return the path."""
+    destination.write_text(render(analysis, config_dir), encoding="utf-8")
     return destination

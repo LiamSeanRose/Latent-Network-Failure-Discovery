@@ -53,6 +53,7 @@ uv sync                                        # install
 uv run cassandra check ./configs               # findings, ranked; exit 1 if any
 uv run cassandra check ./configs --explain     # + evidence, fixes, rule ids
 uv run cassandra check ./configs --json        # machine-readable, with a config digest
+uv run cassandra check ./configs --fail-on high  # print everything, block on high only
 uv run cassandra facts ./configs               # the materialised fact pack
 uv run cassandra rules                         # every check, and when each stays quiet
 uv run cassandra rules fhrp-divergence         # one rule in full
@@ -76,6 +77,11 @@ an empty device. Nothing is written, nothing is uploaded, and no `.cfg` is refus
 if a plausible file is skipped, it says so.
 
 ### The web view and the report
+
+`serve` also answers `/rules` (every check, and when each stays quiet),
+`/rules.json`, `/findings.json`, and `/report.html`, which downloads the standalone file.
+Every filter is in the query string, so any state the page shows is a link you can send,
+bookmark or curl.
 
 Both are one renderer, so the file cannot drift from what the app shows. Both are entirely
 self-contained: no stylesheet, script, font or image is fetched, and there is no script tag at

@@ -477,3 +477,26 @@ def test_the_catalogue_page_fetches_nothing_either(base_url: str) -> None:
     _, body = get(f"{base_url}/rules")
     for pattern in (r"<script", r"https?://", r"<link[^>]+href", r"@import", r"<img"):
         assert not re.search(pattern, body), f"external reference: {pattern}"
+
+
+def test_the_report_can_be_downloaded_from_the_page(base_url: str, mixed: Path) -> None:
+    """Someone reading findings in the browser is one step from wanting to send
+    them to a colleague. Making them go back to a shell for that is a step."""
+    body = view(base_url, mixed)
+    assert "/report.html?dir=" in body
+
+    with urlopen(f"{base_url}/report.html?dir={quote(str(mixed))}") as response:
+        assert "attachment" in response.headers["Content-Disposition"]
+        report = response.read().decode()
+    assert "svi-vlan-not-trunked" in report
+    assert "<form" not in report, "the search form posts to a server the file has not"
+
+
+def test_the_downloaded_report_has_no_links_to_this_server(
+    base_url: str, mixed: Path
+) -> None:
+    """A dead link in a file someone was sent reads as the file being broken."""
+    with urlopen(f"{base_url}/report.html?dir={quote(str(mixed))}") as response:
+        report = response.read().decode()
+    assert 'href="/rules"' not in report
+    assert 'href="/rules.json"' not in report

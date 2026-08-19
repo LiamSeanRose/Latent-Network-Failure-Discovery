@@ -7,6 +7,7 @@ from typing import Final
 
 import pytest
 
+from cassandra.catalogue import catalogue
 from cassandra.cli import main
 
 CORPUS: Final = (
@@ -61,3 +62,71 @@ def test_empty_directory_is_an_error(
 ) -> None:
     assert main(["facts", str(tmp_path)]) == 2
     assert "no .cfg files" in capsys.readouterr().err
+
+
+# A pair whose only defect is a tie for the top priority: one medium finding and
+# nothing worse. Enough to tell "found nothing" from "found nothing that blocks".
+TIED_PAIR: Final = """hostname {name}
+vlan 14
+interface Vlan14
+   ip address 10.14.0.{host}/24
+   vrrp 14 ip 10.14.0.1
+   vrrp 14 priority 100
+"""
+
+
+@pytest.fixture
+def tied(tmp_path: Path) -> Path:
+    for index, name in enumerate(("agg-a", "agg-b"), start=2):
+        (tmp_path / f"{name}.cfg").write_text(TIED_PAIR.format(name=name, host=index))
+    return tmp_path
+
+
+def test_fail_on_narrows_the_verdict_without_narrowing_the_report(
+    tied: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pipeline that blocks only on high still wants the rest printed.
+
+    Otherwise the way to get a green build is to stop looking, which is how a
+    check gets switched off.
+    """
+    assert main(["check", str(tied)]) == 1
+    assert main(["check", str(tied), "--fail-on", "high"]) == 0
+    printed = capsys.readouterr().out
+    assert "fhrp-priority-tie" not in printed  # not without --explain
+    assert "no preferred master" in printed
+
+
+def test_fail_on_at_or_below_the_worst_finding_still_fails(tied: Path) -> None:
+    assert main(["check", str(tied), "--fail-on", "medium"]) == 1
+    assert main(["check", str(tied), "--fail-on", "low"]) == 1
+    assert main(["check", str(tied), "--fail-on", "info"]) == 1
+
+
+def test_fail_on_rejects_a_severity_that_does_not_exist(tied: Path) -> None:
+    """A typo must not quietly become 'never fail'."""
+    with pytest.raises(SystemExit) as exit_info:
+        main(["check", str(tied), "--fail-on", "critical"])
+    assert exit_info.value.code == 2
+
+
+def test_rules_lists_every_check(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["rules"]) == 0
+    printed = capsys.readouterr().out
+    for rule_id in {doc.id for doc in catalogue()}:
+        assert rule_id in printed
+
+
+def test_rules_explains_one_check(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["rules", "fhrp-divergence"]) == 0
+    printed = capsys.readouterr().out
+    assert "fhrp-divergence" in printed
+    assert "stays silent when" in printed
+
+
+def test_rules_rejects_a_name_that_is_not_a_rule(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mistyping a rule id is a user error, not a result. It must not exit 0."""
+    assert main(["rules", "fhrp-divergance"]) == 2
+    assert "no such rule" in capsys.readouterr().err
