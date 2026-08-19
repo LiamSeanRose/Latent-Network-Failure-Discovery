@@ -780,3 +780,44 @@ def test_the_cap_survives_clicking_a_filter(base_url: str, crowded: Path) -> Non
     body = view(base_url, configs, "all=1&severity=high")
     assert "Showing the worst" not in body
     assert "all=1" in body
+
+
+def test_free_text_narrows_to_what_was_typed(base_url: str, mixed: Path) -> None:
+    """The chips cover the dimensions the tool knows about. This covers the one
+    it does not: an interface, a VLAN, an address someone is chasing."""
+    body = view(base_url, mixed, "q=Vlan99")
+    assert "svi-vlan-not-trunked" in body
+    assert "fhrp-divergence" not in body
+
+
+def test_free_text_reaches_the_evidence(base_url: str) -> None:
+    """Someone searching for an interface is often searching for it because it
+    turned up in the evidence of something else."""
+    body = view(base_url, CORPUS, "q=Ethernet1")
+    assert "fhrp-divergence" in body
+
+
+def test_free_text_is_case_insensitive(base_url: str, mixed: Path) -> None:
+    assert "svi-vlan-not-trunked" in view(base_url, mixed, "q=VLAN99")
+
+
+def test_free_text_that_matches_nothing_says_so_and_offers_a_way_back(
+    base_url: str, mixed: Path
+) -> None:
+    body = view(base_url, mixed, "q=nothinghere")
+    assert "No findings match these filters" in body
+    assert "Show all" in body
+
+
+def test_free_text_survives_the_form_and_the_chips(base_url: str, mixed: Path) -> None:
+    body = view(base_url, mixed, "q=Vlan99")
+    assert 'name="q"' in body
+    assert 'value="Vlan99"' in body
+    assert "q=Vlan99" in body
+    # ...and is not also sent as a hidden field, which would submit it twice.
+    assert '<input type="hidden" name="q"' not in body
+
+
+def test_free_text_reaches_the_json_endpoint(base_url: str, mixed: Path) -> None:
+    document = json.loads(view(base_url, mixed, "q=Vlan99", "/findings.json"))
+    assert {f["rule"] for f in document["findings"]} == {"svi-vlan-not-trunked"}

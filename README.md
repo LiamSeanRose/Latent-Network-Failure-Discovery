@@ -85,8 +85,9 @@ if a plausible file is skipped, it says so.
 
 `serve` also answers `/rules` (every check, and when each stays quiet),
 `/rules.json`, `/findings.json`, and `/report.html`, which downloads the standalone file.
-Every filter is in the query string, so any state the page shows is a link you can send,
-bookmark or curl.
+Findings filter by severity, tier, device and free text, and a device on the adjacency map
+is a link to its own findings. Every filter is in the query string, so any state the page
+shows is a link you can send, bookmark or curl.
 
 Both are one renderer, so the file cannot drift from what the app shows. Both are entirely
 self-contained: no stylesheet, script, font or image is fetched, and there is no script tag at

@@ -267,7 +267,8 @@ input[type=text]:focus {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
-input[type=text].since { flex: 0 1 13rem; font-size: .92rem; }
+input[type=text].since, input[type=text].query {
+  flex: 0 1 11rem; font-size: .92rem; }
 button.go {
   padding: .62rem 1.15rem; border: 0; border-radius: 8px; background: var(--accent);
   color: #fff; font: inherit; font-weight: 620; cursor: pointer;
@@ -508,6 +509,10 @@ class Filters:
     severities: frozenset[Severity] = frozenset()
     tiers: frozenset[Tier] = frozenset()
     devices: frozenset[str] = frozenset()
+    # Free text, matched against everything a finding says. The chips cover the
+    # dimensions the tool knows about; this covers the one it does not — an
+    # interface name, a VLAN, an address someone is chasing across a change.
+    query: str = ""
     unknown: tuple[str, ...] = ()
     # Not a filter: it selects nothing and hides nothing. It lives here because
     # every link and every hidden form field on the page is built from this
@@ -520,14 +525,37 @@ class Filters:
 
     @property
     def active(self) -> bool:
-        return bool(self.severities or self.tiers or self.devices)
+        return bool(self.severities or self.tiers or self.devices or self.query)
 
     def matches(self, finding: Finding) -> bool:
         if self.severities and finding.severity not in self.severities:
             return False
         if self.devices and finding.device not in self.devices:
             return False
-        return not (self.tiers and finding.tier not in self.tiers)
+        if self.tiers and finding.tier not in self.tiers:
+            return False
+        return not self.query or self.query.lower() in _searchable(finding)
+
+
+def _searchable(finding: Finding) -> str:
+    """Everything a finding says, folded, for a free-text match.
+
+    Evidence is included: someone searching for an interface name is often
+    searching for it because it appeared in the evidence of something else.
+    """
+    return "\n".join(
+        part
+        for part in (
+            finding.rule,
+            finding.device,
+            finding.title,
+            finding.detail,
+            finding.trigger or "",
+            finding.remedy or "",
+            *finding.evidence,
+        )
+        if part
+    ).lower()
 
 
 def analyse(config_dir: Path) -> Analysis:
@@ -641,6 +669,7 @@ def parse_filters(params: dict[str, list[str]]) -> Filters:
         tiers=frozenset(tiers),
         devices=frozenset(devices),
         unknown=tuple(unknown),
+        query=(params.get("q") or [""])[0].strip(),
         since=(params.get("since") or [""])[0].strip(),
         show_all=bool(params.get("all")),
     )
@@ -655,6 +684,8 @@ def _query_pairs(config_dir: str, filters: Filters) -> list[tuple[str, str]]:
     )
     pairs.extend(("tier", t.value) for t in _TIER_ORDER if t in filters.tiers)
     pairs.extend(("device", device) for device in sorted(filters.devices))
+    if filters.query:
+        pairs.append(("q", filters.query))
     if filters.since:
         pairs.append(("since", filters.since))
     if filters.show_all:
@@ -1082,13 +1113,13 @@ def _unparsed_html(analysis: Analysis) -> str:
 def _hidden_filters(filters: Filters) -> str:
     """Keep the active filters when the directory form is submitted.
 
-    `since` is skipped: the form carries it in a visible field, and submitting
-    two inputs of the same name sends both.
+    `since` and `q` are skipped: the form carries both in visible fields, and
+    submitting two inputs of the same name sends both.
     """
     return "".join(
         f'<input type="hidden" name="{name}" value="{html.escape(value)}">'
         for name, value in _query_pairs("", filters)
-        if name != "since"
+        if name not in {"since", "q"}
     )
 
 
@@ -1202,6 +1233,7 @@ def page(
                     severities=frozenset(),
                     tiers=frozenset(),
                     devices=frozenset(),
+                    query="",
                 ),
             )
             sections.append(
@@ -1273,6 +1305,10 @@ def page(
          value="{html.escape(config_dir)}" autofocus accesskey="d"
          aria-label="directory of device configs to analyse"
          spellcheck="false" autocapitalize="off" autocorrect="off">
+  <input type="text" name="q" class="query" placeholder="search findings"
+         value="{html.escape(filters.query)}" spellcheck="false"
+         aria-label="filter findings by text"
+         autocapitalize="off" autocorrect="off">
   <input type="text" name="since" class="since" placeholder="baseline.json"
          value="{html.escape(filters.since)}" spellcheck="false"
          aria-label="a saved baseline to compare this run against"
