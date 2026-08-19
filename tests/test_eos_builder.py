@@ -14,8 +14,15 @@ from typing import Final
 import pytest
 
 from cassandra.factpack.builders import build_fact_pack
-from cassandra.factpack.builders.eos import parse_device
-from cassandra.factpack.schema import FhrpProtocol, InterfaceKind, SwitchportMode
+from cassandra.factpack.builders.eos import EosDevice, parse_device
+from cassandra.factpack.schema import (
+    DampeningKind,
+    FhrpProtocol,
+    IgpProtocol,
+    InterfaceKind,
+    SwitchportMode,
+    TimerSource,
+)
 
 CORPUS: Final = (
     Path(__file__).resolve().parents[1]
@@ -150,3 +157,176 @@ def test_digest_changes_when_a_config_changes(tmp_path: Path) -> None:
 def test_vlan_ranges_expand() -> None:
     parsed = parse_device("hostname r\nvlan 10-12,20\n")
     assert parsed.unparsed_lines == ()
+
+
+# --------------------------------------------------------------------------
+# Timer inventory beyond FHRP: BFD, IGP hello/dead, and BGP dampening
+# --------------------------------------------------------------------------
+
+ROUTED: Final = """hostname agg-a
+interface Ethernet1
+   no switchport
+   ip address 10.0.0.1/31
+{extra}"""
+
+
+def routed(*lines: str, trailer: str = "") -> EosDevice:
+    body = "".join(f"   {line}\n" for line in lines)
+    return parse_device(ROUTED.format(extra=body) + trailer, device_id="agg-a")
+
+
+def test_bfd_interval_line_becomes_a_session() -> None:
+    parsed = routed("bfd interval 300 min_rx 300 multiplier 3")
+    assert len(parsed.bfd) == 1
+    session = parsed.bfd[0]
+    assert session.desired_min_tx_ms == 300
+    assert session.required_min_rx_ms == 300
+    assert session.detect_multiplier == 3
+    assert session.scope.device == "agg-a"
+    assert session.scope.interface == "Ethernet1"
+    assert session.scope.source is TimerSource.CONFIGURED
+    assert parsed.unparsed_lines == ()
+
+
+def test_bfd_accepts_the_hyphenated_min_rx_spelling() -> None:
+    parsed = routed("bfd interval 300 min-rx 300 multiplier 3")
+    assert parsed.bfd[0].required_min_rx_ms == 300
+    assert parsed.unparsed_lines == ()
+
+
+def test_a_session_with_nothing_registered_has_no_clients() -> None:
+    """The empty tuple is the fact the analysis reads, so it has to be real
+    absence rather than something the parser never looked for."""
+    parsed = routed("bfd interval 300 min_rx 300 multiplier 3")
+    assert parsed.bfd[0].clients == ()
+
+
+def test_interface_protocols_register_as_bfd_clients() -> None:
+    parsed = routed(
+        "bfd interval 300 min_rx 300 multiplier 3", "ip ospf bfd", "isis bfd"
+    )
+    assert parsed.bfd[0].clients == ("isis", "ospf")
+    assert parsed.unparsed_lines == ()
+
+
+def test_a_bgp_neighbour_registers_by_address() -> None:
+    parsed = routed(
+        "bfd interval 300 min_rx 300 multiplier 3",
+        trailer="router bgp 65001\n   neighbor 10.0.0.0 bfd\n",
+    )
+    assert parsed.bfd[0].clients == ("bgp",)
+
+
+def test_a_bgp_neighbour_off_the_subnet_registers_nothing() -> None:
+    parsed = routed(
+        "bfd interval 300 min_rx 300 multiplier 3",
+        trailer="router bgp 65001\n   neighbor 198.51.100.9 bfd\n",
+    )
+    assert parsed.bfd[0].clients == ()
+
+
+def test_bfd_default_under_a_process_registers_that_process() -> None:
+    parsed = routed(
+        "bfd interval 300 min_rx 300 multiplier 3",
+        trailer="router ospf 1\n   bfd default\n",
+    )
+    assert parsed.bfd[0].clients == ("ospf",)
+
+
+def test_ospf_hello_and_dead_intervals_are_read_in_milliseconds() -> None:
+    parsed = routed("ip ospf hello-interval 10", "ip ospf dead-interval 40")
+    assert len(parsed.igp_hello) == 1
+    timers = parsed.igp_hello[0]
+    assert timers.protocol is IgpProtocol.OSPFV2
+    assert timers.hello_interval_ms == 10_000
+    assert timers.dead_interval_ms == 40_000
+    assert timers.scope.interface == "Ethernet1"
+    assert parsed.unparsed_lines == ()
+
+
+def test_ospf_area_is_kept_when_the_interface_states_it() -> None:
+    parsed = routed("ip ospf area 0.0.0.0", "ip ospf hello-interval 10")
+    assert parsed.igp_hello[0].ospf_area == "0.0.0.0"
+
+
+def test_isis_records_the_multiplier_rather_than_a_derived_hold_time() -> None:
+    """The hold time is hello x multiplier, and deriving it here would hide which
+    of the two an operator actually wrote."""
+    parsed = routed("isis hello-interval 3", "isis hello-multiplier 3")
+    timers = parsed.igp_hello[0]
+    assert timers.protocol is IgpProtocol.ISIS
+    assert timers.hello_interval_ms == 3_000
+    assert timers.hello_multiplier == 3
+    assert timers.dead_interval_ms is None
+    assert timers.hold_time_ms is None
+
+
+def test_ospf_and_isis_on_one_interface_produce_one_record_each() -> None:
+    parsed = routed(
+        "ip ospf dead-interval 40", "isis hello-interval 3", "isis hello-multiplier 3"
+    )
+    assert {t.protocol for t in parsed.igp_hello} == {
+        IgpProtocol.OSPFV2,
+        IgpProtocol.ISIS,
+    }
+
+
+def test_bgp_dampening_is_stated_in_minutes_and_stored_in_seconds() -> None:
+    parsed = parse_device(
+        "hostname agg-a\nrouter bgp 65001\n"
+        "   bgp dampening half-life 15 reuse 750 suppress 2000 max-suppress-time 60\n",
+        device_id="agg-a",
+    )
+    assert len(parsed.dampening) == 1
+    profile = parsed.dampening[0]
+    assert profile.kind is DampeningKind.BGP_ROUTE
+    assert profile.half_life_s == 900
+    assert profile.reuse_threshold == 750
+    assert profile.suppress_threshold == 2000
+    assert profile.max_suppress_s == 3600
+    assert profile.scope.instance == "65001"
+    assert profile.scope.source is TimerSource.CONFIGURED
+    assert parsed.unparsed_lines == ()
+
+
+def test_bare_bgp_dampening_records_the_platform_defaults() -> None:
+    """A bare `bgp dampening` is not an absence of timers — it selects an
+    hour-long suppression window, and the provenance says it was inherited."""
+    parsed = parse_device(
+        "hostname agg-a\nrouter bgp 65001\n   bgp dampening\n", device_id="agg-a"
+    )
+    profile = parsed.dampening[0]
+    assert profile.max_suppress_s == 3600
+    assert profile.half_life_s == 900
+    assert profile.scope.source is TimerSource.PLATFORM_DEFAULT
+
+
+def test_the_longer_limit_spellings_are_the_same_thresholds() -> None:
+    parsed = parse_device(
+        "hostname agg-a\nrouter bgp 65001\n"
+        "   bgp dampening half-life 5 reuse-limit 750 suppress-limit 2000 "
+        "max-suppress-time 20\n",
+        device_id="agg-a",
+    )
+    profile = parsed.dampening[0]
+    assert (profile.reuse_threshold, profile.suppress_threshold) == (750, 2000)
+    assert profile.max_suppress_s == 1200
+
+
+def test_an_unrecognised_dampening_argument_is_surfaced_not_guessed() -> None:
+    parsed = parse_device(
+        "hostname agg-a\nrouter bgp 65001\n   bgp dampening route-map DAMP\n",
+        device_id="agg-a",
+    )
+    assert parsed.dampening == ()
+    assert parsed.unparsed_lines == ("bgp dampening route-map DAMP",)
+
+
+def test_the_corpus_still_produces_no_timers_it_does_not_configure(
+    built: tuple,
+) -> None:
+    """Silence is a parser result too: inventing a BFD session or a dampening
+    profile the configs never mention would make every finding over them false."""
+    pack, _ = built
+    assert pack.timers.bfd == ()
+    assert pack.timers.dampening == ()

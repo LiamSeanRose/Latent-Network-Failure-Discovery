@@ -15,7 +15,7 @@ from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
 from cassandra.report import render
-from cassandra.timing import sequences
+from cassandra.timing import sequences, timer_rules
 
 
 def render_facts(pack: StaticFactPack, unparsed: dict[str, tuple[str, ...]]) -> str:
@@ -112,7 +112,9 @@ def main(argv: list[str] | None = None) -> int:
         if loaded is None:
             return 2
         pack, _ = loaded
-        findings = rules.evaluate(pack) + sequences.analyse(pack)
+        findings = (
+            rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack)
+        )
         print(render(findings, explain=args.explain))
         # Exit status is the verdict: non-zero when something needs attention, so
         # this is usable in a pre-commit hook or CI without parsing the output.

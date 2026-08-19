@@ -14,7 +14,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Final
 
-from cassandra.factpack.builders import eos, ios
+from cassandra.factpack.builders import eos, ios, nxos
 from cassandra.factpack.builders.common import ParsedDevice
 from cassandra.factpack.schema import (
     Device,
@@ -29,11 +29,15 @@ from cassandra.factpack.schema import (
 )
 
 SCHEMA_VERSION: Final = 1
-DIALECTS: Final[tuple[ModuleType, ...]] = (ios, eos)
+DIALECTS: Final[tuple[ModuleType, ...]] = (ios, eos, nxos)
 
 
 def parse(text: str, *, device_id: str | None = None) -> ParsedDevice:
     """Parse with the best-fitting dialect."""
+    # NX-OS is checked first: its `hsrp <n>` block is distinctive, whereas an
+    # NX-OS config could otherwise be mistaken for EOS on addressing alone.
+    if nxos.looks_like_nxos(text):
+        return nxos.parse_device(text, device_id=device_id)
     if ios.looks_like_ios(text):
         return ios.parse_device(text, device_id=device_id)
 

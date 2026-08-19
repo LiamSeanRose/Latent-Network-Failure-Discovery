@@ -173,3 +173,203 @@ def test_every_finding_carries_a_remedy(tmp_path: Path) -> None:
 @pytest.mark.parametrize("severity", list(Severity))
 def test_severity_values_are_usable_labels(severity: Severity) -> None:
     assert severity.value.islower()
+
+
+# ---------------------------------------------------------------------------
+# Subnet-shaped rules
+# ---------------------------------------------------------------------------
+
+
+def test_mtu_mismatch_between_two_interfaces_on_one_subnet(tmp_path: Path) -> None:
+    pack = pair(tmp_path, a_extra="   mtu 9214\n", b_extra="   mtu 1500\n")
+    findings = {f.rule: f for f in evaluate(pack)}
+    assert "mtu-mismatch" in findings
+    assert findings["mtu-mismatch"].severity is Severity.HIGH
+    assert "1500" in findings["mtu-mismatch"].detail
+
+
+def test_matching_mtu_does_not_fire(tmp_path: Path) -> None:
+    pack = pair(tmp_path, a_extra="   mtu 9214\n", b_extra="   mtu 9214\n")
+    assert "mtu-mismatch" not in rules_fired(pack)
+
+
+def test_one_configured_mtu_is_not_a_mismatch(tmp_path: Path) -> None:
+    """An unset MTU is a platform default the tool does not claim to know."""
+    pack = pair(tmp_path, a_extra="   mtu 9214\n")
+    assert "mtu-mismatch" not in rules_fired(pack)
+
+
+def test_trunk_carrying_a_vlan_nothing_terminates(tmp_path: Path) -> None:
+    a = GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110).replace(
+        "switchport trunk allowed vlan 14", "switchport trunk allowed vlan 14,77"
+    )
+    b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100)
+    findings = {
+        f.rule: f for f in evaluate(pack_from(tmp_path, **{"agg-a": a, "agg-b": b}))
+    }
+    assert "trunk-vlan-dead" in findings
+    assert findings["trunk-vlan-dead"].severity is Severity.LOW
+    assert "77" in findings["trunk-vlan-dead"].title
+
+
+def test_trunk_vlan_with_an_access_port_somewhere_is_alive(tmp_path: Path) -> None:
+    a = GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110).replace(
+        "switchport trunk allowed vlan 14", "switchport trunk allowed vlan 14,77"
+    )
+    b = (
+        GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100)
+        + "interface Ethernet3\n   switchport mode access\n"
+        "   switchport access vlan 77\n"
+    )
+    assert "trunk-vlan-dead" not in rules_fired(
+        pack_from(tmp_path, **{"agg-a": a, "agg-b": b})
+    )
+
+
+def test_trunk_vlan_with_an_svi_somewhere_is_alive(tmp_path: Path) -> None:
+    assert "trunk-vlan-dead" not in rules_fired(pair(tmp_path))
+
+
+def test_isolated_l3_interface_is_reported_as_info(tmp_path: Path) -> None:
+    pack = pair(tmp_path, a_extra="interface Vlan55\n   ip address 10.55.0.1/24\n")
+    findings = {f.rule: f for f in evaluate(pack)}
+    assert "l3-interface-isolated" in findings
+    assert findings["l3-interface-isolated"].severity is Severity.INFO
+    assert findings["l3-interface-isolated"].device == "agg-a"
+
+
+def test_shared_subnet_is_not_isolated(tmp_path: Path) -> None:
+    assert "l3-interface-isolated" not in rules_fired(pair(tmp_path))
+
+
+def test_point_to_point_link_off_the_corpus_is_not_isolated(tmp_path: Path) -> None:
+    """A /30 or /31 whose far end is not in the directory is the normal case."""
+    pack = pair(tmp_path, a_extra="interface Vlan98\n   ip address 10.98.0.1/30\n")
+    assert "l3-interface-isolated" not in rules_fired(pack)
+
+
+def test_loopback_is_not_isolated(tmp_path: Path) -> None:
+    pack = pair(tmp_path, a_extra="interface Loopback0\n   ip address 10.255.1.1/32\n")
+    assert "l3-interface-isolated" not in rules_fired(pack)
+
+
+# ---------------------------------------------------------------------------
+# Further FHRP rules
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("virtual", ["10.14.0.0", "10.14.0.255"])
+def test_virtual_address_is_network_or_broadcast(tmp_path: Path, virtual: str) -> None:
+    a = GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110).replace(
+        "vrrp 14 ipv4 10.14.0.1", f"vrrp 14 ipv4 {virtual}"
+    )
+    b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100).replace(
+        "vrrp 14 ipv4 10.14.0.1", f"vrrp 14 ipv4 {virtual}"
+    )
+    fired = rules_fired(pack_from(tmp_path, **{"agg-a": a, "agg-b": b}))
+    assert "fhrp-virtual-not-a-host-address" in fired
+    # It is inside the subnet, so the outside-subnet rule must stay quiet.
+    assert "fhrp-virtual-outside-subnet" not in fired
+
+
+def test_host_virtual_address_is_not_flagged(tmp_path: Path) -> None:
+    assert "fhrp-virtual-not-a-host-address" not in rules_fired(pair(tmp_path))
+
+
+def test_same_device_twice_in_one_group_on_one_subnet(tmp_path: Path) -> None:
+    pack = pair(
+        tmp_path,
+        a_extra="interface Vlan114\n   ip address 10.14.0.4/24\n"
+        "   vrrp 14 ipv4 10.14.0.1\n   vrrp 14 priority-level 90\n",
+    )
+    findings = {f.rule: f for f in evaluate(pack)}
+    assert "fhrp-duplicate-member" in findings
+    assert findings["fhrp-duplicate-member"].severity is Severity.HIGH
+    assert findings["fhrp-duplicate-member"].device == "agg-a"
+
+
+def test_group_number_reused_on_another_subnet_is_not_a_duplicate(
+    tmp_path: Path,
+) -> None:
+    """Group 14 on two unrelated subnets is ordinary practice, not a defect."""
+    pack = pair(
+        tmp_path,
+        a_extra="interface Vlan24\n   ip address 10.24.0.2/24\n"
+        "   vrrp 14 ipv4 10.14.0.1\n   vrrp 14 priority-level 90\n",
+    )
+    assert "fhrp-duplicate-member" not in rules_fired(pack)
+
+
+def test_two_groups_on_one_interface_claiming_one_address(tmp_path: Path) -> None:
+    pack = pair(
+        tmp_path,
+        a_extra="   vrrp 15 ipv4 10.14.0.1\n   vrrp 15 priority-level 90\n",
+    )
+    findings = {f.rule: f for f in evaluate(pack)}
+    assert "fhrp-virtual-shared" in findings
+    assert "10.14.0.1" in findings["fhrp-virtual-shared"].title
+
+
+def test_distinct_virtual_addresses_are_not_shared(tmp_path: Path) -> None:
+    pack = pair(
+        tmp_path,
+        a_extra="   vrrp 15 ipv4 10.14.0.9\n   vrrp 15 priority-level 90\n",
+    )
+    assert "fhrp-virtual-shared" not in rules_fired(pack)
+
+
+def test_tracked_interface_that_is_shut_down(tmp_path: Path) -> None:
+    """A track on an admin-down interface is down for good: it never recovers."""
+    a = (
+        GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110).replace(
+            "   ip address 10.0.0.1/31", "   ip address 10.0.0.1/31\n   shutdown"
+        )
+        + "   vrrp 14 tracked-object UPLINK decrement 40\n"
+        + "track UPLINK interface Ethernet1 line-protocol\n"
+    )
+    b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100)
+    findings = {
+        f.rule: f for f in evaluate(pack_from(tmp_path, **{"agg-a": a, "agg-b": b}))
+    }
+    assert "fhrp-track-target-shutdown" in findings
+    assert findings["fhrp-track-target-shutdown"].severity is Severity.HIGH
+    assert "Ethernet1" in findings["fhrp-track-target-shutdown"].title
+
+
+def test_tracked_interface_that_is_up_does_not_fire(tmp_path: Path) -> None:
+    a = (
+        GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110)
+        + "   vrrp 14 tracked-object UPLINK decrement 40\n"
+        + "track UPLINK interface Ethernet1 line-protocol\n"
+    )
+    b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100)
+    assert "fhrp-track-target-shutdown" not in rules_fired(
+        pack_from(tmp_path, **{"agg-a": a, "agg-b": b})
+    )
+
+
+def test_widened_rules_all_carry_a_remedy(tmp_path: Path) -> None:
+    """The remedy guarantee (PROJECT.md §5.4) extended to the widened tier: one
+    config that trips several of the new rules at once, all of them actionable."""
+    a = (
+        GOOD_PAIR.format(name="agg-a", p2p=1, host=2, priority=110).replace(
+            "switchport trunk allowed vlan 14", "switchport trunk allowed vlan 14,77"
+        )
+        + "   mtu 9214\n"
+        + "   vrrp 15 ipv4 10.14.0.1\n"
+        + "   vrrp 15 priority-level 90\n"
+        + "interface Vlan55\n   ip address 10.55.0.1/24\n"
+    )
+    b = GOOD_PAIR.format(name="agg-b", p2p=3, host=3, priority=100) + "   mtu 1500\n"
+    findings = evaluate(pack_from(tmp_path, **{"agg-a": a, "agg-b": b}))
+    fired = {f.rule for f in findings}
+    assert {
+        "mtu-mismatch",
+        "trunk-vlan-dead",
+        "l3-interface-isolated",
+        "fhrp-virtual-shared",
+    } <= fired
+    for finding in findings:
+        assert finding.remedy, f"{finding.rule} has no remedy"
+        assert finding.tier is Tier.FACTS
+        assert finding.device
