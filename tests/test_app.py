@@ -1092,3 +1092,29 @@ def test_a_timer_the_config_does_not_state_is_not_shown_as_blank(
     body = get(f"{base_url}/facts?dir={quote(str(examples))}")[1]
     assert "None" not in body
     assert "hold time" not in body
+
+
+def test_the_catalogue_names_facts_no_check_consults(base_url: str) -> None:
+    """The page lists every check this tool makes, so it is where the other
+    half of the coverage question belongs.
+
+    A reader here is finding out what the tool looks for, and the honest answer
+    includes what it read out of their files and then did nothing with. Saying
+    it on the catalogue rather than beside a finding keeps it a statement about
+    the tool instead of about the network.
+    """
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    body = get(f"{base_url}/rules?dir={quote(str(examples))}")[1]
+    assert "no check consults" in body
+    assert "l2_segments" in body
+
+
+def test_the_catalogue_without_a_pack_claims_nothing_about_any_configs(
+    base_url: str,
+) -> None:
+    """With no directory there are no facts to have read and none to report as
+    unread, and a heading promising a list of them would be a claim about
+    configs that were never opened."""
+    body = get(f"{base_url}/rules")[1]
+    assert "no check consults" not in body
+    assert "had something to look at" not in body

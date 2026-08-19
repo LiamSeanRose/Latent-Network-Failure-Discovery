@@ -207,6 +207,14 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
   stroke-linecap: round; fill: none; opacity: 0;
   animation: split-in .5s ease-out .95s forwards; }
 
+/* Facts the pack states that no check reads. A list rather than a table: the
+   labels are generated and vary in length, and a column of them ragged against
+   a path column reads worse than a sentence per line. */
+.unread-facts ul { margin: .3rem 0 .2rem; padding-left: 1.1rem; }
+.unread-facts li { margin: .18rem 0; color: var(--ink-2); font-size: .86rem; }
+.unread-facts .src { color: var(--ink-3); font-size: .78rem; }
+.unread-facts .n { color: var(--ink-3); font-size: .74rem; }
+
 /* ---- ring ---- */
 .ring { flex: none; }
 .ring .track { fill: none; stroke: var(--surface-2); stroke-width: 13; }

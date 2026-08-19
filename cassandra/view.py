@@ -996,10 +996,13 @@ def rules_page(pack: StaticFactPack | None = None, config_dir: str = "") -> str:
     """
     docs = catalogue()
     inert: dict[str, RuleCoverage] = {}
+    unread: tuple[coverage.UnreadFact, ...] = ()
     if pack is not None:
+        assessment = coverage.assess_all(pack)
         inert = {
-            entry.rule: entry for entry in coverage.assess(pack) if not entry.applicable
+            entry.rule: entry for entry in assessment.rules if not entry.applicable
         }
+        unread = assessment.unread
     undocumented = sum(1 for doc in docs if not doc.documented)
     untested = sum(1 for doc in docs if not doc.silence)
     by_tier: list[str] = []
@@ -1038,8 +1041,38 @@ def rules_page(pack: StaticFactPack | None = None, config_dir: str = "") -> str:
         "describe a check the tool no longer makes, and cannot omit one it "
         'does. <a href="/">Back to findings</a>.</p>'
         + health
+        + _unread_html(unread, config_dir)
         + "".join(by_tier)
         + "</section>"
+    )
+
+
+def _unread_html(unread: tuple[coverage.UnreadFact, ...], config_dir: str) -> str:
+    """Facts these configs state that no check on this page consults.
+
+    On the page that lists every check, because that is where the question
+    belongs: a reader is here to find out what this tool looks for, and the
+    honest answer includes what it read out of their files and then did nothing
+    with. Every entry is a check nobody has written rather than a check that
+    passed, and saying so on the catalogue rather than beside a finding keeps it
+    a statement about the tool instead of about the network.
+    """
+    if not unread:
+        return ""
+    items = "".join(
+        f"<li>{html.escape(fact.label)} "
+        f'<span class="src mono">{html.escape(fact.path)}</span> '
+        f'<span class="n">{fact.records}</span></li>'
+        for fact in unread
+    )
+    where = html.escape(config_dir) if config_dir else "these configs"
+    return (
+        f'<details class="device-group unread-facts"><summary>'
+        f"{len(unread)} facts read out of {where} that no check consults"
+        "</summary>"
+        f'<p class="cap">Each was parsed into the fact pack and no rule opens '
+        f"it. The number is how many records state it.</p>"
+        f"<ul>{items}</ul></details>"
     )
 
 
