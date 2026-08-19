@@ -5,11 +5,9 @@
 # unvalidated surface rather than closing it. See the scenario README.
 name: validate-election
 
-# Manual only until the lab itself works. Two runs have failed during setup, not
-# during the comparison — FRR's VRRP needs a macvlan device that is not coming up
-# the way the documentation implies inside a containerlab node. A workflow that is
-# always red teaches people to ignore CI, so this stays off the push path until it
-# can pass. Progress notes: docs/DECISIONS.md.
+# Manual dispatch until it has passed once. The cause of the first two failures is
+# understood and fixed (missing NET_ADMIN on the macvlan creation), but a workflow
+# that has never gone green does not belong on the push path.
 on:
   workflow_dispatch:
 
@@ -33,16 +31,23 @@ jobs:
         run: sudo containerlab deploy -t topology.clab.yml
 
       # FRR's vrrpd will not start a group until a macvlan with the RFC virtual
-      # MAC (00:00:5e:00:01:<vrid>) exists on the parent interface. Each command
-      # is checked, because the first attempt at this failed silently.
+      # MAC (00:00:5e:00:01:<vrid>) exists on the parent interface.
+      #
+      # `--privileged` on the exec is load-bearing. Without it this fails with
+      # "RTNETLINK answers: Operation not permitted" — the node does not carry
+      # NET_ADMIN, and creating a macvlan needs it. Reproduced locally against the
+      # same image: identical command succeeds with the capability and fails
+      # without it. That was what killed the first two runs.
       - name: create the macvlan devices FRR requires
         run: |
           set -euxo pipefail
           for node in r1 r2; do
             c="clab-frr-vrrp-election-$node"
-            sudo docker exec "$c" ip link add vrrp4-14 link eth1 type macvlan mode bridge
-            sudo docker exec "$c" ip link set dev vrrp4-14 address 00:00:5e:00:01:0e
-            sudo docker exec "$c" ip link set dev vrrp4-14 up
+            sudo docker exec --privileged "$c" \
+              ip link add vrrp4-14 link eth1 type macvlan mode bridge
+            sudo docker exec --privileged "$c" \
+              ip link set dev vrrp4-14 address 00:00:5e:00:01:0e
+            sudo docker exec --privileged "$c" ip link set dev vrrp4-14 up
             sudo docker exec "$c" ip -br link show vrrp4-14
           done
 
