@@ -7,6 +7,7 @@ it claims to draw, and that a device drawn as detached really is detached.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from pathlib import Path
 from typing import Final
@@ -140,3 +141,34 @@ def test_marks_are_escaped_like_everything_else() -> None:
     pack = corpus_pack()
     svg = visuals.topology_svg(pack, marks={"agg-a": '"><script>'})
     assert "<script>" not in svg
+
+
+def test_the_reaction_figure_shows_the_asymmetry_that_causes_a_divergence() -> None:
+    """The timeline draws the effect. This draws the cause.
+
+    On the shipped corpus the three groups differ in exactly two ways — one has
+    no preempt delay, one does not track — and those two differences are the
+    whole finding.
+    """
+    svg = visuals.reaction_svg(corpus_pack())
+    assert "VRRP 14" in svg and "VRRP 24" in svg and "VRRP 34" in svg
+    assert "90s" in svg, "the delay the two slower groups wait"
+    assert "none" in svg, "the group that waits for nothing"
+    assert "no tracking" in svg, "the group that never steps aside"
+
+
+def test_one_group_is_not_a_comparison() -> None:
+    """A single row compared against nothing repeats what the finding said."""
+    pack, _ = build_fact_pack(CORPUS)
+    single = dataclasses.replace(pack, fhrp_groups=pack.fhrp_groups[:1])
+    assert visuals.reaction_svg(single) == ""
+    assert visuals.reaction_svg(dataclasses.replace(pack, fhrp_groups=())) == ""
+
+
+def test_the_reaction_figure_keeps_its_numbers_inside_the_frame() -> None:
+    """Each value is written after its bar, so a full-width bar would push the
+    number off the edge of the picture."""
+    svg = visuals.reaction_svg(corpus_pack())
+    width = float(re.search(r'viewBox="0 0 ([\d.]+)', svg).group(1))
+    for x in re.findall(r'<text class="value[^"]*" x="([\d.]+)"', svg):
+        assert float(x) < width - 20, f"a value starts at {x} in a {width}-wide figure"

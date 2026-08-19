@@ -376,3 +376,106 @@ def sparkbar(counts: dict[str, int], colours: dict[str, str]) -> str:
         )
     parts.append("</div>")
     return "".join(parts)
+
+
+# --------------------------------------------------------------------------
+# How the groups are configured to react
+# --------------------------------------------------------------------------
+
+_ROW_H: Final = 30
+_REACT_W: Final = 720
+
+
+def _group_reaction(pack: StaticFactPack) -> list[tuple[str, int, int, bool]]:
+    """Per group: label, preempt delay in seconds, tracked decrement, preempt.
+
+    The delay and the decrement are taken from the member that has them. A group
+    where one member tracks and the other does not still reacts, and it is the
+    tracking member's numbers that decide how.
+    """
+    delays: dict[tuple[str, str | None, str | None], int] = {}
+    for timer in pack.timers.fhrp:
+        if timer.preempt_delay_ms:
+            key = (timer.scope.device, timer.scope.interface, timer.scope.instance)
+            delays[key] = timer.preempt_delay_ms
+
+    rows: list[tuple[str, int, int, bool]] = []
+    for group in pack.fhrp_groups:
+        delay_ms = 0
+        decrement = 0
+        preempt = False
+        for member in group.members:
+            key = (member.device, member.interface, str(group.group_number))
+            delay_ms = max(delay_ms, delays.get(key, 0))
+            decrement = max(
+                decrement,
+                *(t.decrement for t in member.tracked_objects),
+                0,
+            )
+            preempt = preempt or member.preempt
+        label = f"{group.protocol.value.upper()} {group.group_number}"
+        rows.append((label, delay_ms // 1000, decrement, preempt))
+    return rows
+
+
+def reaction_svg(pack: StaticFactPack) -> str:
+    """What each group does when the thing it tracks goes down.
+
+    The timeline draws the effect; this draws the cause. A divergence is two
+    rows here that do not match — one group waiting ninety seconds to take back
+    what another took back immediately — and seeing the rows side by side is
+    what turns "these two ended up apart" into "of course they did".
+
+    Empty for fewer than two groups: one row compared against nothing is a fact
+    already stated in the finding.
+    """
+    rows = _group_reaction(pack)
+    if len(rows) < 2:
+        return ""
+
+    height = _TOP + len(rows) * _ROW_H + 34
+    max_delay = max((delay for _, delay, _, _ in rows), default=0)
+    max_decrement = max((d for _, _, d, _ in rows), default=0)
+    left, gap = 92, 26
+    column = (_REACT_W - left - _RIGHT - gap) / 2
+
+    parts = [
+        f'<svg class="viz reaction" viewBox="0 0 {_REACT_W} {height}" role="img" '
+        f'aria-label="Preempt delay and tracked decrement for each group">'
+        f'<text class="col" x="{left}" y="16">preempt delay</text>'
+        f'<text class="col" x="{left + column + gap:.0f}" y="16">'
+        f"tracked decrement</text>"
+    ]
+    for index, (label, delay, decrement, preempt) in enumerate(rows):
+        y = _TOP + index * _ROW_H
+        mid = y + _ROW_H / 2 - 2
+        parts.append(
+            f'<text class="row-label" x="{left - 10}" y="{mid + 4}" '
+            f'text-anchor="end">{html.escape(label)}</text>'
+        )
+        for offset, value, ceiling, unit in (
+            (0.0, delay, max_delay, "s"),
+            (column + gap, decrement, max_decrement, ""),
+        ):
+            x = left + offset
+            # The value is written after the bar, so the bar cannot use the
+            # whole column or the number falls off the edge of the figure.
+            span = column - 46
+            width = 0.0 if not ceiling else span * value / ceiling
+            if value:
+                parts.append(
+                    f'<g class="bar" style="--i:{index}">'
+                    f'<rect x="{x:.1f}" y="{y}" width="{max(width, 3):.1f}" '
+                    f'height="{_ROW_H - 12}" rx="3"/></g>'
+                    f'<text class="value" x="{x + max(width, 3) + 6:.1f}" '
+                    f'y="{mid + 4}">{value}{unit}</text>'
+                )
+            else:
+                # A zero bar is invisible, and "none" is the whole point of the
+                # row it appears in: this group does not wait, or does not track.
+                parts.append(
+                    f'<text class="value none" x="{x:.1f}" y="{mid + 4}">'
+                    f"{'none' if not preempt or unit else 'no tracking'}</text>"
+                )
+    parts.append("</svg>")
+    return "".join(parts)

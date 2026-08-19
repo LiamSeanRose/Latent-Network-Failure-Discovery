@@ -33,7 +33,7 @@ from cassandra.catalogue import RuleDoc, catalogue
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import StaticFactPack
 from cassandra.facts import rules
-from cassandra.findings import Finding, Severity, Tier, rank
+from cassandra.findings import Finding, Severity, Tier, locate, rank
 from cassandra.timing import sequences, timer_rules
 
 _SEVERITY_ORDER: Final = (
@@ -295,6 +295,14 @@ svg.viz .row-label { fill: var(--ink-1); font-weight: 600; }
    white text at eleven pixels, and half these fills are mid-tone. */
 svg.viz .band-label { font-weight: 600; }
 svg.viz .tick { fill: var(--ink-3); }
+svg.reaction .col { fill: var(--ink-3); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; }
+svg.reaction .bar rect { fill: var(--accent); opacity: .8;
+  transform-origin: left center;
+  animation: grow .5s cubic-bezier(.2,.8,.3,1) both;
+  animation-delay: calc(var(--i) * 70ms); }
+svg.reaction .value { fill: var(--ink-1); font-weight: 620; }
+svg.reaction .value.none { fill: var(--ink-3); font-weight: 500; }
 svg.viz .ev { stroke: var(--ink-3); stroke-width: 1; opacity: .55; }
 /* --c and --cd live on the band element, so the dark variant has to be
    selected here rather than folded into the palette: a custom property declared
@@ -411,6 +419,9 @@ svg.topology a.node-link:focus-visible circle { outline: 2px solid var(--accent)
 .sev.low { color: var(--s-warning); } .sev.info { color: var(--series-1); }
 .tag { border: 1px solid var(--line); border-radius: 999px; padding: 0 .45rem;
   font-size: .72rem; color: var(--ink-3); }
+/* Where to open, not what is wrong. Quiet, in the row that already carries the
+   device and the rule id. */
+.cite { color: var(--ink-3); font-size: .76rem; }
 .detail { margin: 0 0 .55rem; }
 .trigger, .remedy { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: .8rem; background: var(--surface-2); border-radius: 6px;
@@ -567,7 +578,10 @@ def analyse(config_dir: Path) -> Analysis:
     if not pack.devices:
         return Analysis(error=f"no .cfg files in {config_dir}")
     findings = rank(
-        rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack)
+        locate(
+            rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack),
+            pack,
+        )
     )
     return Analysis(
         findings=tuple(findings),
@@ -877,6 +891,11 @@ def _finding_html(finding: Finding, figure: str = "", state: str = "") -> str:
             else ""
         )
         + (f' <span class="tag state {state}">{state}</span>' if state else "")
+        + (
+            f' <span class="mono cite">{html.escape(str(finding.source))}</span>'
+            if finding.source
+            else ""
+        )
         + "</p>",
         f'<p class="detail">{html.escape(finding.detail)}</p>',
     ]
@@ -1312,6 +1331,15 @@ def page(
                 "link to them.</p>"
                 f"{drawn}</div>"
             )
+        reaction = visuals.reaction_svg(analysis.pack)
+        if reaction:
+            topology += (
+                '<div class="figure"><h2>how each group reacts</h2>'
+                '<p class="cap">The timeline below draws the effect; this draws '
+                "the cause. Two rows that do not match are two groups that will "
+                "answer the same event at different speeds.</p>"
+                f"{reaction}</div>"
+            )
 
     finder = f"""<form class="finder" method="get" action="/">
   <input type="text" name="dir" placeholder="/path/to/configs"
@@ -1425,6 +1453,13 @@ def _finding_dicts(findings: list[Finding]) -> list[dict[str, object]]:
             "trigger": finding.trigger,
             "remedy": finding.remedy,
             "evidence": list(finding.evidence),
+            # Split rather than "file:line", because a path may contain a colon
+            # and a consumer should not have to guess where to cut.
+            "source": (
+                None
+                if finding.source is None
+                else {"file": finding.source.file, "line": finding.source.line}
+            ),
         }
         for finding in findings
     ]

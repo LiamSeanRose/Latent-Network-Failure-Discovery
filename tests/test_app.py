@@ -849,3 +849,26 @@ def test_changed_configs_do_not_claim_the_checks_moved(
     configs, base = regressed
     body = view(base_url, configs, f"since={quote(str(base))}")
     assert "change in the checks" not in body
+
+
+def test_a_finding_says_which_file_to_open(base_url: str) -> None:
+    """PROJECT.md §5.4. On a corpus filed in per-site directories, naming the
+    device leaves the reader to go and find the file."""
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    body = view(base_url, examples)
+    assert "north/north-agg1.cfg:" in body
+    assert 'class="mono cite"' in body
+
+
+def test_the_citation_reaches_the_json(base_url: str) -> None:
+    examples = Path(__file__).resolve().parents[1] / "examples" / "two-site"
+    document = json.loads(view(base_url, examples, path="/findings.json"))
+    cited = [f for f in document["findings"] if f["source"]]
+    assert cited, "something should be locatable"
+    for finding in cited:
+        # Split rather than "file:line": a path may contain a colon and a
+        # consumer should not have to guess where to cut.
+        assert set(finding["source"]) == {"file", "line"}
+        assert not finding["source"]["file"].startswith("/"), (
+            "an absolute path from someone else's machine is noise in a report"
+        )
