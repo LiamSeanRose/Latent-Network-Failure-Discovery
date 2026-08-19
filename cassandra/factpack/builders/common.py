@@ -67,18 +67,67 @@ def stanzas(text: str) -> list[Stanza]:
     return out
 
 
+# 802.1Q: 1 to 4094. Zero is the priority-tag id and 4095 is reserved, so
+# neither can be a VLAN a port belongs to, and nothing exists above 4094.
+MIN_VLAN_ID: Final = 1
+MAX_VLAN_ID: Final = 4094
+
+
 def vlan_list(spec: str) -> tuple[int, ...]:
-    """Expand `14,24,34` and `10-12` into explicit VLAN ids."""
+    """Expand `14,24,34` and `10-12` into explicit VLAN ids.
+
+    Returns only the ids it could read. Anything it could not is reported by
+    `unreadable_vlans` so the caller can list it as unparsed rather than let it
+    vanish — a dropped VLAN spec makes the next rule blame the operator for a
+    port in a VLAN "that is not declared", when the declaration was there and
+    this function could not read it.
+    """
+    vlans, _ = _read_vlans(spec)
+    return vlans
+
+
+def unreadable_vlans(spec: str) -> tuple[str, ...]:
+    """The parts of a VLAN spec that named no usable id."""
+    _, rejected = _read_vlans(spec)
+    return rejected
+
+
+def _read_vlans(spec: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
     vlans: list[int] = []
-    for part in spec.split(","):
-        part = part.strip()
+    rejected: list[str] = []
+    for raw in spec.split(","):
+        part = raw.strip()
+        if not part:
+            continue
         if "-" in part:
             lo, _, hi = part.partition("-")
-            if lo.isdigit() and hi.isdigit():
-                vlans.extend(range(int(lo), int(hi) + 1))
+            if not (lo.isdigit() and hi.isdigit()):
+                rejected.append(part)
+                continue
+            first, last = int(lo), int(hi)
+            # Clamped, not expanded. `1-99999999` is a typo, and expanding it
+            # allocates until the process is killed; there are only 4094 ids it
+            # could have meant.
+            low = max(first, MIN_VLAN_ID)
+            high = min(last, MAX_VLAN_ID)
+            if first > last or high < low:
+                rejected.append(part)
+                continue
+            if first < MIN_VLAN_ID or last > MAX_VLAN_ID:
+                rejected.append(part)
+            vlans.extend(range(low, high + 1))
         elif part.isdigit():
-            vlans.append(int(part))
-    return tuple(vlans)
+            value = int(part)
+            if MIN_VLAN_ID <= value <= MAX_VLAN_ID:
+                vlans.append(value)
+            else:
+                # A VLAN id outside the standard is not a VLAN. Recording one
+                # puts a segment in the topology that cannot exist, and judges
+                # interfaces against it.
+                rejected.append(part)
+        else:
+            rejected.append(part)
+    return tuple(vlans), tuple(rejected)
 
 
 def netmask_to_prefix_length(netmask: str) -> int | None:

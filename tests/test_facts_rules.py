@@ -1126,3 +1126,61 @@ def test_the_shipped_corpus_stays_quiet_under_the_new_rules() -> None:
         "bgp-router-id-duplicate",
     ):
         assert rule_id not in rules_fired(pack)
+
+
+# ---------------------------------------------------------------------------
+# Malformed input that used to be read as healthy
+# ---------------------------------------------------------------------------
+
+
+def test_a_virtual_address_that_is_not_an_address_is_reported(tmp_path: Path) -> None:
+    pack = pack_from(
+        tmp_path,
+        r1="""hostname r1
+vlan 14
+interface Vlan14
+   ip address 10.14.0.2/24
+   vrrp 14 ipv4 10.14.0.300
+   vrrp 14 priority-level 110
+""",
+    )
+    assert "fhrp-virtual-not-an-address" in rules_fired(pack)
+
+
+def test_a_mistyped_virtual_address_does_not_take_the_run_down(
+    tmp_path: Path,
+) -> None:
+    """Every other rule about the virtual address skips a group it cannot read.
+
+    One of them used to raise instead, which cost the reader every finding on
+    every other device as well.
+    """
+    pack = pack_from(
+        tmp_path,
+        r1="""hostname r1
+vlan 14
+interface Vlan14
+   ip address 10.14.0.2/24
+   vrrp 14 ipv4 not-an-address
+""",
+        r2="""hostname r2
+vlan 24
+interface Ethernet1
+   switchport mode trunk
+   switchport trunk allowed vlan 24
+interface Ethernet2
+   switchport access vlan 99
+""",
+    )
+    fired = rules_fired(pack)
+    assert "fhrp-virtual-not-an-address" in fired
+    assert "vlan-not-declared" in fired, "the other device still got checked"
+
+
+def test_a_readable_virtual_address_is_not_reported_as_unreadable(
+    tmp_path: Path,
+) -> None:
+    """The rule exists for a string that names no address, not for one that
+    names an address someone dislikes."""
+    pack = pair(tmp_path)
+    assert "fhrp-virtual-not-an-address" not in rules_fired(pack)

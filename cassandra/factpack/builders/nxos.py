@@ -48,6 +48,7 @@ from cassandra.factpack.builders.common import (
     register_bgp_peer,
     seconds_to_ms,
     strip_banners,
+    unreadable_vlans,
     vlan_list,
 )
 from cassandra.factpack.schema import (
@@ -202,6 +203,11 @@ def parse_device(text: str, *, device_id: str | None = None) -> NxosDevice:
 
         if m := re.fullmatch(r"vlan (\S+)", header):
             declared_vlans.extend(declared_vlans_from(hostname, block))
+            if rejected := unreadable_vlans(m.group(1)):
+                # A declaration this could not read is worse than none: the
+                # ports in that VLAN then trip `vlan-not-declared`, blaming the
+                # operator for a line they did write.
+                unparsed.append(f"{header}  [unreadable: {', '.join(rejected)}]")
             continue
 
         # `track 1 interface Ethernet1/1 line-protocol`
@@ -452,6 +458,11 @@ def _parse_interface(
             native_vlan = int(m.group(1))
         elif m := re.fullmatch(r"switchport trunk allowed vlan (\S+)", line):
             allowed = vlan_list(m.group(1))
+            if rejected := unreadable_vlans(m.group(1)):
+                # The line is reported rather than silently reduced: a trunk
+                # missing a VLAN this could not read looks exactly like a trunk
+                # the operator forgot, and the next rule blames them for it.
+                unparsed.append(f"{line}  [unreadable: {', '.join(rejected)}]")
         elif m := re.fullmatch(r"vrf member (\S+)", line):
             vrf = m.group(1)
         elif m := re.fullmatch(r"channel-group (\d+)( mode (\S+))?", line):

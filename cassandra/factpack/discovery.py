@@ -34,17 +34,26 @@ file the operator named `.cfg` is, and so is a file that reads as a config but
 yields no device. Those come back as `notes`, and everything skipped is
 enumerable in the result for a caller that wants the full list.
 
-Nothing here raises on a hostile tree: unreadable files, dangling symlinks and
-symlink loops are recorded and stepped over.
+**What encoding it is in.** A byte-order mark is believed, because it is the
+only statement a file makes about itself; UTF-8 is assumed otherwise, and
+latin-1 is the fallback that cannot fail. Without a mark, NUL bytes still mean
+binary — a UTF-16 file that omits its mark is refused rather than guessed at,
+and the refusal is reported because the operator named the file.
+
+Nothing here raises on a hostile tree, and nothing here blocks on one:
+unreadable files, dangling symlinks, symlink loops and anything that is not a
+regular file are recorded and stepped over.
 """
 
 from __future__ import annotations
 
+import codecs
 import os
 import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from stat import S_ISREG
 from typing import Final
 
 from cassandra.factpack.builders.common import strip_banners
@@ -206,6 +215,19 @@ MAX_CONFIG_BYTES: Final[int] = 8 * 1024 * 1024
 # How much of a candidate is read before deciding whether to read the rest.
 SNIFF_BYTES: Final[int] = 16 * 1024
 
+# Byte-order marks, longest first: a UTF-32-LE mark begins with a UTF-16-LE one,
+# so checking the short mark first would decode a UTF-32 file as UTF-16. A config
+# arrives with a mark when it has been through an editor on Windows or been
+# exported by a management station, and the mark is the only reliable statement
+# a file makes about its own encoding.
+_BYTE_ORDER_MARKS: Final[tuple[tuple[bytes, str], ...]] = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
 # Bound on how much walking a hostile tree can cost, on top of the loop
 # detection below: a symlink farm can be finite and still absurdly deep.
 MAX_DEPTH: Final[int] = 24
@@ -300,16 +322,20 @@ class Discovery:
         would not hand over — those are the cases where silence would read as
         "there was nothing there".
         """
-        loud = {SkipReason.UNREADABLE, SkipReason.SYMLINK_LOOP}
+        loud = {
+            SkipReason.UNREADABLE,
+            SkipReason.SYMLINK_LOOP,
+            # A directory refused for depth takes every config under it with
+            # it, so silence here reads as "that site has no devices".
+            SkipReason.TOO_DEEP,
+        }
+        named = {SkipReason.NOT_CONFIG, SkipReason.TOO_LARGE, SkipReason.BINARY}
         return tuple(
             f"skipped {skip.path}: {skip.reason.value}"
             + (f" ({skip.detail})" if skip.detail else "")
             for skip in self.skipped
             if skip.reason in loud
-            or (
-                skip.reason in {SkipReason.NOT_CONFIG, SkipReason.TOO_LARGE}
-                and skip.path.suffix.lower() in ASSERTED_SUFFIXES
-            )
+            or (skip.reason in named and skip.path.suffix.lower() in ASSERTED_SUFFIXES)
         )
 
 
@@ -369,10 +395,30 @@ def _device_id(relative: Path) -> str:
     return "/".join([*relative.parts[:-1], name])
 
 
-def _decode(raw: bytes) -> str:
+def _declared_encoding(raw: bytes) -> str | None:
+    """The encoding this file's byte-order mark declares, if it carries one."""
+    for mark, encoding in _BYTE_ORDER_MARKS:
+        if raw.startswith(mark):
+            return encoding
+    return None
+
+
+def _decode(raw: bytes, encoding: str | None = None) -> str:
     """Config text is usually UTF-8 and occasionally an 8-bit encoding from a
     device that predates the question. Latin-1 cannot fail, and the binary check
-    has already run, so this never turns a JPEG into a device."""
+    has already run, so this never turns a JPEG into a device.
+
+    A file that declared its encoding with a byte-order mark is decoded by that
+    declaration instead, and the mark is consumed rather than left on the front
+    of the first line. That matters because the first line of a config is very
+    often `hostname`, and a mark in front of it matches neither the hostname
+    pattern nor any parser, so the device silently loses its name and answers to
+    its filename. Errors are replaced rather than falling back to latin-1,
+    because the sniff reads a fixed number of bytes and will routinely cut a
+    multi-byte unit in half.
+    """
+    if encoding is not None:
+        return raw.decode(encoding, errors="replace")
     try:
         return raw.decode()
     except UnicodeDecodeError:
@@ -391,14 +437,17 @@ def _read_candidate(path: Path, size: int) -> tuple[str, SkipReason | None, str]
     try:
         with path.open("rb") as handle:
             head = handle.read(SNIFF_BYTES)
-            if b"\x00" in head:
+            encoding = _declared_encoding(head)
+            # UTF-16 and UTF-32 are full of NULs by construction, so the binary
+            # check only applies to a file that did not say it was either.
+            if encoding is None and b"\x00" in head:
                 return "", SkipReason.BINARY, ""
-            if not looks_like_config(_decode(head)):
+            if not looks_like_config(_decode(head, encoding)):
                 return "", SkipReason.NOT_CONFIG, ""
             raw = head + handle.read()
     except OSError as error:
         return "", SkipReason.UNREADABLE, error.strerror or type(error).__name__
-    return _decode(raw), None, ""
+    return _decode(raw, encoding), None, ""
 
 
 def _walk(root: Path, skipped: list[Skipped]) -> list[Path]:
@@ -488,7 +537,7 @@ def discover(root: Path) -> Discovery:
             skipped.append(Skipped(path=path, reason=SkipReason.IGNORED_NAME))
             continue
         try:
-            size = path.stat().st_size
+            status = path.stat()
         except OSError as error:
             skipped.append(
                 Skipped(
@@ -498,7 +547,19 @@ def discover(root: Path) -> Discovery:
                 )
             )
             continue
-        text, reason, detail = _read_candidate(path, size)
+        # A named pipe with no writer blocks in `open` forever, and a device
+        # node is worse. Nothing but a regular file is ever a config, so the
+        # kind is checked before anything opens it.
+        if not S_ISREG(status.st_mode):
+            skipped.append(
+                Skipped(
+                    path=path,
+                    reason=SkipReason.UNREADABLE,
+                    detail="not a regular file",
+                )
+            )
+            continue
+        text, reason, detail = _read_candidate(path, status.st_size)
         if reason is not None:
             skipped.append(Skipped(path=path, reason=reason, detail=detail))
             continue

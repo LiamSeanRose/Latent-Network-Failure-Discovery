@@ -96,7 +96,15 @@ def virtual_address_outside_subnet(pack: StaticFactPack) -> Iterator[Finding]:
     for group in pack.fhrp_groups:
         if not group.virtual_ipv4:
             continue
-        virtual = ipaddress.ip_address(group.virtual_ipv4)
+        try:
+            virtual = ipaddress.ip_address(group.virtual_ipv4)
+        except ValueError:
+            # A mistyped octet is the commonest malformation there is, and the
+            # parsers accept any token here. `fhrp-virtual-not-a-host-address`
+            # is the rule that reports it; this one has nothing to say about a
+            # string that names no address, and crashing the whole run over it
+            # would take every other finding down with it.
+            continue
         for member in group.members:
             interface = interfaces.get((member.device, member.interface))
             if interface is None:
@@ -549,6 +557,37 @@ def isolated_l3_interface(pack: StaticFactPack) -> Iterator[Finding]:
 # --------------------------------------------------------------------------
 # Further FHRP rules
 # --------------------------------------------------------------------------
+
+
+@rule
+def virtual_address_is_not_an_address(pack: StaticFactPack) -> Iterator[Finding]:
+    """A virtual address that is not an IP address at all.
+
+    A mistyped octet — `10.14.0.300` — is the commonest malformation a config
+    has, and the parsers accept whatever token follows the keyword rather than
+    guessing at what was meant. Every other rule about the virtual address
+    skips a group it cannot read, so without this one the group would be
+    checked by nothing and reported as healthy.
+    """
+    for group in pack.fhrp_groups:
+        if not group.virtual_ipv4:
+            continue
+        try:
+            ipaddress.ip_address(group.virtual_ipv4)
+        except ValueError:
+            yield Finding(
+                rule="fhrp-virtual-not-an-address",
+                tier=Tier.FACTS,
+                severity=Severity.HIGH,
+                device=group.members[0].device if group.members else "?",
+                title=f"{group.protocol.value.upper()} {group.group_number} "
+                f"virtual address is not an address",
+                detail=f"{group.virtual_ipv4!r} does not name an IP address, so "
+                f"the group has no gateway to answer for and every other check "
+                f"on it was skipped",
+                evidence=tuple(f"{m.device}:{m.interface}" for m in group.members),
+                remedy="correct the address",
+            )
 
 
 @rule
