@@ -906,6 +906,39 @@ def test_long_identifiers_are_allowed_to_wrap() -> None:
         assert needed in covered, f"{needed} can push the page sideways"
 
 
+def test_every_entrance_animation_is_cancelled_where_it_cannot_play() -> None:
+    """An entrance that starts hidden must not run where nothing advances it.
+
+    Cards enter with a keyframe that starts at `opacity: 0`, and where the
+    browser supports it the keyframe is driven by scroll position rather than by
+    time. Print has no scroll position: the timeline sits at its start, every
+    card stays at the first keyframe, and a report someone took into a change
+    review comes out of the printer blank. This is the check that caught it.
+
+    Both blocks are asserted, not just print. `prefers-reduced-motion` has the
+    identical failure for the identical reason — a request for no motion is not
+    a request for no content — and one of the two having the reset is exactly
+    the state this was found in.
+    """
+    from cassandra.style import STYLE
+
+    for query in ("@media print", "@media (prefers-reduced-motion: reduce)"):
+        start = STYLE.index(query)
+        depth = 0
+        for end in range(start, len(STYLE)):
+            if STYLE[end] == "{":
+                depth += 1
+            elif STYLE[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        block = STYLE[start : end + 1]
+        assert "animation: none !important" in block, (
+            f"{query} leaves entrance animations running, so anything whose "
+            f"keyframe starts hidden never becomes visible there"
+        )
+
+
 def test_wide_figures_scroll_inside_their_own_card() -> None:
     """Below about 520px the timeline's band labels stop being readable, so it
     must not shrink — but the scrollbar belongs to the figure, not the page."""

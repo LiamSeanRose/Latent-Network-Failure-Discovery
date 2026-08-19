@@ -484,8 +484,17 @@ footer.meta-foot { color: var(--ink-3); font-size: .78rem; margin-top: 1.6rem; }
 }
 /* Print: a finding list is a thing people take into a change review. Drop the
    chrome, keep the figures, and let cards break across pages rather than
-   clipping. */
+   clipping.
+
+   The animation reset is not decoration. Every card's entrance keyframe starts
+   at `opacity: 0` and is driven by `animation-timeline: view()`, and a printed
+   page has no scroll position to drive it from — the timeline sits at its start
+   and the whole finding list prints blank. Cancelling the animation lands each
+   element on its natural style, which is the printed state that was wanted all
+   along. The same reset is what `prefers-reduced-motion` does below, for the
+   same reason: an entrance that never plays must leave nothing hidden. */
 @media print {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
   body { background: #fff; color: #000; background-image: none; }
   main { max-width: none; padding: 0; }
   form.finder, .chips, .pulse, .theme, .theme-input, .progress { display: none; }
