@@ -63,6 +63,19 @@ things a rule may do or not do freely, and nothing breaks when a rule does not.
 Every rule in the catalogue gets an entry, including any this module cannot
 arrange to run, which appears as an explicit "could not be assessed" rather than
 as an absence from the list.
+
+**On cost.** Watching a rule set run is not free, and the collections where the
+question matters most are the large ones — a report nobody waits for answers
+nothing. Three things keep it to roughly a third on top of running the rules
+themselves, and none of them changes an answer, because every question asked
+here is monotone: *did* this line run, *was* this ever set, *was* this ever
+larger than one. Once a path or a line has answered, further reads of it are
+arithmetic nobody looks at. So the line watcher disables each location the first
+time it fires, the recorder stops counting a path once its answer can no longer
+move, and each record is stood in for by one object rather than a fresh one per
+read. `tests/test_coverage.py` runs the whole thing under both watchers and
+requires the verdicts to match, which is what keeps "faster" from quietly
+becoming "different".
 """
 
 from __future__ import annotations
@@ -73,9 +86,10 @@ import inspect
 import re
 import sys
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
-from types import FrameType, ModuleType
+from types import CodeType, FrameType, ModuleType
 from typing import Final
 
 from cassandra.catalogue import SOURCES, RuleDoc, catalogue
@@ -137,6 +151,9 @@ _IDENTITY: Final[frozenset[str]] = frozenset({"device", "devices", "id"})
 
 _SINGLE_DEVICE: Final = "only one device in the collection"
 
+# `sys.monitoring` has six tool ids and hands out none that is already claimed.
+_TOOL_IDS: Final = 6
+
 
 # --------------------------------------------------------------------------
 # What the report says
@@ -177,18 +194,47 @@ class _Reads:
 
     def __init__(self) -> None:
         self.order: list[str] = []
-        self.sizes: dict[str, list[int]] = {}
+        self.sizes: dict[str, int] = {}
         self.unset: dict[str, list[int]] = {}
         self.owner: dict[str, type] = {}
         self.consumed: set[str] = set()
         self.records: set[str] = set()
+        # Paths whose remaining reads cannot change the answer. Every question
+        # asked below is monotone — was this ever set, was this ever larger than
+        # one — so once a path has answered it, it has answered it for good and
+        # the next hundred thousand reads of it are counted and thrown away. The
+        # timing model reads a group's members once per simulated millisecond,
+        # which is where that stops being a micro-optimisation.
+        self.settled: set[str] = set()
+        # One stand-in per object per path, kept alongside the object it stands
+        # for. A rule can read the same interface a thousand times — the timing
+        # model reads every group's members once per simulated millisecond — and
+        # the thousandth read says exactly what the first one said. The counts
+        # above are still taken on every read; only the wrapping is reused.
+        self.stood_in: dict[tuple[str, int], tuple[object, object]] = {}
+        # Per path, the field names whose next read cannot teach this anything:
+        # a plain value, on a path already settled. Held here rather than worked
+        # out each time because it is the answer to the question the stand-in
+        # asks most — the timing model reads a timer field millions of times in
+        # a run and the first read of it settled the matter.
+        self.finished: dict[str, set[str]] = {}
+
+    def nothing_left(self, path: str) -> set[str]:
+        found = self.finished.get(path)
+        if found is None:
+            found = set()
+            self.finished[path] = found
+        return found
 
     def _seen(self, path: str, owner: type) -> None:
-        if path not in self.sizes:
-            self.order.append(path)
-            self.sizes[path] = []
-            self.unset[path] = [0, 0]
-            self.owner[path] = owner
+        if path in self.sizes:
+            return
+        self.order.append(path)
+        # -1 until something reads this path as a collection, which is what
+        # keeps a plain value out of the questions asked about containers.
+        self.sizes[path] = -1
+        self.unset[path] = [0, 0]
+        self.owner[path] = owner
         # A path counts as opened once anything below it is read, which is what
         # tells a container the rule looked inside from one it only counted.
         head = path.rpartition("[].")[0]
@@ -196,25 +242,34 @@ class _Reads:
             self.consumed.add(head)
 
     def collection(self, path: str, owner: type, size: int, *, records: bool) -> None:
+        if path in self.settled:
+            return
         self._seen(path, owner)
-        self.sizes[path].append(size)
+        if size > self.sizes[path]:
+            self.sizes[path] = size
         if records:
             self.records.add(path)
+        if size > 1:
+            # Neither "empty every time" nor "never more than one" can come back
+            # from this, and those are the only two questions asked of a size.
+            self.settled.add(path)
 
     def value(self, path: str, owner: type, value: object) -> None:
+        if path in self.settled:
+            return
         self._seen(path, owner)
         counts = self.unset[path]
         counts[0] += 1
         if value is None:
             counts[1] += 1
+        else:
+            # One value settles it: "unset on every record" is now false and
+            # stays false.
+            self.settled.add(path)
 
     def empty(self) -> list[str]:
         """Collections that held nothing on every read the rule made."""
-        return [
-            path
-            for path in self.order
-            if self.sizes[path] and not any(self.sizes[path])
-        ]
+        return [path for path in self.order if self.sizes[path] == 0]
 
     def never_set(self, field: str) -> list[str]:
         """Paths ending in this field that were unset on every record seen."""
@@ -239,8 +294,7 @@ class _Reads:
             if _field(path) == field
             and path in self.records
             and path not in self.consumed
-            and self.sizes[path]
-            and max(self.sizes[path]) == 1
+            and self.sizes[path] == 1
         ]
 
 
@@ -255,21 +309,36 @@ class _Watched:
     something other than the tool.
     """
 
-    __slots__ = ("_path", "_reads", "_subject")
+    __slots__ = ("_done", "_path", "_reads", "_subject")
 
     def __init__(self, subject: object, path: str, reads: _Reads) -> None:
         object.__setattr__(self, "_subject", subject)
         object.__setattr__(self, "_path", path)
         object.__setattr__(self, "_reads", reads)
+        object.__setattr__(self, "_done", reads.nothing_left(path))
 
     def __getattr__(self, name: str) -> object:
         subject = object.__getattribute__(self, "_subject")
         value = getattr(subject, name)
+        # Every read below this line is one the recorder has already learned
+        # everything it can from, and it hands back exactly what the slow path
+        # would. Shared across every stand-in at this path, so one read of a
+        # field settles it for the whole collection.
+        if name in object.__getattribute__(self, "_done"):
+            return value
         if name.startswith("__"):
             return value
         path = object.__getattribute__(self, "_path")
         reads: _Reads = object.__getattribute__(self, "_reads")
-        return _watch(value, f"{path}.{name}" if path else name, type(subject), reads)
+        full = f"{path}.{name}" if path else name
+        watched = _watch(value, full, name, type(subject), reads)
+        if (
+            watched is value
+            and full in reads.settled
+            and _KINDS.get((type(subject), name)) is _VALUE
+        ):
+            object.__getattribute__(self, "_done").add(name)
+        return watched
 
     def __eq__(self, other: object) -> bool:
         subject = object.__getattribute__(self, "_subject")
@@ -291,19 +360,74 @@ def _is_record(value: object) -> bool:
     return dataclasses.is_dataclass(value) and not isinstance(value, type)
 
 
-def _watch(value: object, path: str, owner: type, reads: _Reads) -> object:
-    if _is_record(value):
-        reads.value(path, owner, value)
-        return _Watched(value, path, reads)
+# What one field of one record type holds. Deciding this costs two `isinstance`
+# calls and a dataclass check, and the answer is a property of the schema rather
+# than of the network, so it is decided once per field and remembered.
+_RECORD: Final = 0
+_COLLECTION: Final = 1
+_VALUE: Final = 2
+
+_KINDS: Final[dict[tuple[type, str], int]] = {}
+
+
+def _kind(owner: type, field: str, value: object) -> int:
+    """Whether a field holds a record, a collection of them, or a plain value.
+
+    Answered from the schema's own annotation wherever the annotation settles
+    it, which is every collection of records in the pack. Two cases are
+    deliberately re-decided on every read rather than remembered: a field that
+    is unset this time says nothing about what it holds when it is set, and a
+    tuple the annotation did not describe has to be judged by what is in it.
+    Remembering either would let the first read of a run decide the rest of it.
+    """
+    key = (owner, field)
+    known = _KINDS.get(key)
+    if known is not None:
+        return known
+    if _element_class(owner, field) is not None:
+        _KINDS[key] = _COLLECTION
+        return _COLLECTION
+    if value is None:
+        return _VALUE
     if isinstance(value, tuple):
-        records = bool(value) and _is_record(value[0])
-        if records or _element_class(owner, _field(path)) is not None:
-            reads.collection(path, owner, len(value), records=records)
-            if records:
-                return tuple(_watch(item, f"{path}[]", owner, reads) for item in value)
-            return value
+        return _COLLECTION if value and _is_record(value[0]) else _VALUE
+    kind = _RECORD if _is_record(value) else _VALUE
+    _KINDS[key] = kind
+    return kind
+
+
+def _watch(value: object, path: str, field: str, owner: type, reads: _Reads) -> object:
+    kind = _kind(owner, field, value)
+    if kind is _VALUE:
+        reads.value(path, owner, value)
+        return value
+
+    if kind is _RECORD:
+        reads.value(path, owner, value)
+        key = (path, id(value))
+        held = reads.stood_in.get(key)
+        if held is None:
+            held = (value, _Watched(value, path, reads))
+            reads.stood_in[key] = held
+        return held[1]
+
+    reads.collection(path, owner, len(value), records=bool(value))  # type: ignore[arg-type]
+    key = (path, id(value))
+    held = reads.stood_in.get(key)
+    if held is None:
+        element = f"{path}[]"
+        held = (
+            value,
+            tuple(_element(item, element, owner, reads) for item in value),  # type: ignore[union-attr]
+        )
+        reads.stood_in[key] = held
+    return held[1]
+
+
+def _element(value: object, path: str, owner: type, reads: _Reads) -> object:
+    """One member of a collection of records, noted and stood in for."""
     reads.value(path, owner, value)
-    return value
+    return _Watched(value, path, reads)
 
 
 # --------------------------------------------------------------------------
@@ -386,10 +510,18 @@ def _one_element(reads: _Reads, path: str) -> str:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Guard:
-    """An `if` whose whole body is a skip — the shape a rejection takes."""
+    """An `if` whose whole body is a skip — the shape a rejection takes.
+
+    `after_line` is the statement standing immediately behind it in the same
+    block, and it is how "every candidate was thrown away here" is read off a
+    run. Within one block that statement is reachable by exactly one route —
+    falling through this guard — so it ran if and only if the test was ever
+    false. That makes the question a membership test rather than a tally, which
+    is what lets each line be watched once and then left alone.
+    """
 
     test_line: int
-    skip_line: int
+    after_line: int
     source: str
     fields: frozenset[str]
     identity: bool
@@ -400,12 +532,15 @@ class _Shape:
     """What one module's source says about how its rules reach a finding.
 
     Parsed once per module and kept, because `assess` asks the same questions of
-    the same source forty-one times in a row.
+    the same source once per rule, and re-walking a fifteen-hundred-line module
+    forty-five times to find one function in it costs more than the rules do on
+    a small pack.
     """
 
     file: str
     tree: ast.Module
     source: str
+    functions: dict[str, ast.FunctionDef]
     guards: dict[str, tuple[_Guard, ...]]
     decisions: dict[tuple[str, str], tuple[tuple[int, int], ...]]
 
@@ -478,6 +613,18 @@ def _bindings(fn: ast.FunctionDef) -> dict[str, ast.expr]:
                     twice.add(target.id)
                 once[target.id] = node.value
     return {name: value for name, value in once.items() if name not in twice}
+
+
+def _blocks(fn: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
+    """Every run of statements in a function, so a statement has neighbours.
+
+    `ast.walk` hands back nodes with no idea what stands beside them, and what
+    stands beside a guard is the whole question here.
+    """
+    for node in ast.walk(fn):
+        for _name, value in ast.iter_fields(node):
+            if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+                yield value
 
 
 def _parents(fn: ast.FunctionDef) -> dict[ast.AST, ast.AST]:
@@ -586,33 +733,39 @@ def _shape(module: ModuleType) -> _Shape:
     except OSError:
         source = ""
     tree = ast.parse(source) if source else ast.Module(body=[], type_ignores=[])
+    functions: dict[str, ast.FunctionDef] = {}
     guards: dict[str, tuple[_Guard, ...]] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
+        functions.setdefault(node.name, node)
         bound = _bindings(node)
         found: list[_Guard] = []
-        for inner in ast.walk(node):
-            if not isinstance(inner, ast.If) or len(inner.body) != 1:
-                continue
-            skip = inner.body[0]
-            if not isinstance(skip, _SKIPS):
-                continue
-            text = ast.get_source_segment(source, inner.test) or ""
-            found.append(
-                _Guard(
-                    test_line=inner.test.lineno,
-                    skip_line=skip.lineno,
-                    source=" ".join(text.split()),
-                    fields=_attributes(inner.test, bound),
-                    identity=_identity(inner.test, bound),
+        for block in _blocks(node):
+            for index, inner in enumerate(block):
+                # A guard with nothing behind it in its block guards nothing,
+                # and there is no statement whose running would show a candidate
+                # got past it. Left out rather than reported on a hunch.
+                if not isinstance(inner, ast.If) or not _skips(inner):
+                    continue
+                if index + 1 >= len(block):
+                    continue
+                text = ast.get_source_segment(source, inner.test) or ""
+                found.append(
+                    _Guard(
+                        test_line=inner.test.lineno,
+                        after_line=block[index + 1].lineno,
+                        source=" ".join(text.split()),
+                        fields=_attributes(inner.test, bound),
+                        identity=_identity(inner.test, bound),
+                    )
                 )
-            )
         guards[node.name] = tuple(found)
     shape = _Shape(
         file=module.__file__ or "",
         tree=tree,
         source=source,
+        functions=functions,
         guards=guards,
         decisions={},
     )
@@ -629,13 +782,12 @@ def _decisions(
     if cached is not None:
         return cached
     ranges: tuple[tuple[int, int], ...] = ()
-    for node in ast.walk(shape.tree):
-        if isinstance(node, ast.FunctionDef) and node.name == entry:
-            parents = _parents(node)
-            ranges = tuple(
-                _decision(goal, parents) for goal in _goals(node, rule_id, function)
-            )
-            break
+    node = shape.functions.get(entry)
+    if node is not None:
+        parents = _parents(node)
+        ranges = tuple(
+            _decision(goal, parents) for goal in _goals(node, rule_id, function)
+        )
     shape.decisions[key] = ranges
     return ranges
 
@@ -709,40 +861,148 @@ def _call(entry: Callable[..., object], pack: object, limits: Limits) -> list[Fi
     return list(produced)  # type: ignore[call-overload]
 
 
+def _code_objects(module: ModuleType) -> list[CodeType]:
+    """Every piece of compiled code in a module, nested ones included.
+
+    A generator expression inside a rule is its own code object and its lines
+    would otherwise go unwatched, which would read as a decision the rule never
+    reached.
+    """
+    where = module.__file__
+    found: dict[int, CodeType] = {}
+    stack: list[CodeType] = []
+    for value in vars(module).values():
+        holders = vars(value).values() if isinstance(value, type) else (value,)
+        for holder in holders:
+            code = getattr(holder, "__code__", None)
+            if isinstance(code, CodeType) and code.co_filename == where:
+                stack.append(code)
+    while stack:
+        code = stack.pop()
+        if id(code) in found:
+            continue
+        found[id(code)] = code
+        stack += [const for const in code.co_consts if isinstance(const, CodeType)]
+    return list(found.values())
+
+
+class _Trace:
+    """Which lines of the rule modules ran, one evaluation at a time.
+
+    Only membership is ever asked of the answer — did this guard reject
+    everything, did this rule reach its decision — so the second execution of a
+    line carries no information and the millionth carries no information twice.
+    `sys.monitoring` is told exactly that: the callback returns `DISABLE`, and
+    that location stops being watched for the rest of the evaluation.
+
+    The difference is the whole reason the report is usable on a real archive.
+    Rules over two hundred devices execute tens of millions of lines and a few
+    hundred distinct ones, and `sys.settrace` charges for every one of them —
+    twice over, because a global trace function also intercepts every call the
+    recorder makes.
+
+    `settrace` remains the fallback for a process where all six monitoring tool
+    ids are already taken, by a debugger or a coverage tool. It records the same
+    set to the same fidelity and is simply slower, so a verdict never depends on
+    which one ran.
+    """
+
+    __slots__ = ("_codes", "_executed", "_files", "_tool")
+
+    def __init__(self, modules: Sequence[ModuleType]) -> None:
+        self._codes = [code for module in modules for code in _code_objects(module)]
+        self._files = frozenset(
+            module.__file__ for module in modules if module.__file__ is not None
+        )
+        self._executed: set[tuple[str, int]] = set()
+        self._tool: int | None = None
+
+    def __enter__(self) -> _Trace:
+        monitoring = sys.monitoring
+        self._tool = next(
+            (tool for tool in range(_TOOL_IDS) if monitoring.get_tool(tool) is None),
+            None,
+        )
+        if self._tool is None:
+            return self
+        monitoring.use_tool_id(self._tool, "cassandra-coverage")
+        try:
+            monitoring.register_callback(self._tool, monitoring.events.LINE, self._line)
+            for code in self._codes:
+                monitoring.set_local_events(self._tool, code, monitoring.events.LINE)
+        except BaseException:
+            # A tool id is process-wide. Handing it back on the way out of a
+            # failed setup keeps a later run — or another tool — from finding
+            # every slot taken by a session that never started.
+            self.__exit__()
+            raise
+        return self
+
+    def __exit__(self, *exception: object) -> None:
+        monitoring = sys.monitoring
+        if self._tool is None:
+            return
+        for code in self._codes:
+            monitoring.set_local_events(self._tool, code, 0)
+        monitoring.register_callback(self._tool, monitoring.events.LINE, None)
+        monitoring.free_tool_id(self._tool)
+        self._tool = None
+
+    @contextmanager
+    def watching(self) -> Iterator[set[tuple[str, int]]]:
+        """Collect one evaluation's lines, starting from nothing."""
+        self._executed = set()
+        if self._tool is not None:
+            # Re-arms the locations the previous evaluation switched off. Every
+            # rule has to be watched from a clean slate or the second rule
+            # inherits the first one's silence.
+            sys.monitoring.restart_events()
+            yield self._executed
+            return
+        previous = sys.gettrace()
+        sys.settrace(self._entering)
+        try:
+            yield self._executed
+        finally:
+            sys.settrace(previous)
+
+    def _line(self, code: CodeType, line_number: int) -> object:
+        self._executed.add((code.co_filename, line_number))
+        return sys.monitoring.DISABLE
+
+    def _inside(self, frame: FrameType, event: str, arg: object) -> object:
+        if event == "line":
+            self._executed.add((frame.f_code.co_filename, frame.f_lineno))
+        return self._inside
+
+    def _entering(self, frame: FrameType, event: str, arg: object) -> object:
+        return self._inside if frame.f_code.co_filename in self._files else None
+
+
 def _observe(
-    group: _Group, pack: StaticFactPack, limits: Limits, files: frozenset[str]
-) -> tuple[list[Finding], _Reads, Counter[tuple[str, int]]]:
-    """Run one group against a watched pack, counting the lines it executes."""
+    group: _Group, pack: StaticFactPack, limits: Limits, trace: _Trace
+) -> tuple[list[Finding], _Reads, frozenset[tuple[str, int]]]:
+    """Run one group against a watched pack, noting the lines it executes."""
     reads = _Reads()
     watched = _Watched(pack, "", reads)
-    hits: Counter[tuple[str, int]] = Counter()
-
-    def inside(frame: FrameType, event: str, arg: object) -> object:
-        if event == "line":
-            hits[(frame.f_code.co_filename, frame.f_lineno)] += 1
-        return inside
-
-    def entering(frame: FrameType, event: str, arg: object) -> object:
-        return inside if frame.f_code.co_filename in files else None
-
-    previous = sys.gettrace()
-    sys.settrace(entering)
-    try:
+    with trace.watching() as executed:
         findings = _call(group.entry, watched, limits)
-    finally:
-        sys.settrace(previous)
-    return findings, reads, hits
+    return findings, reads, frozenset(executed)
 
 
 def _rejections(
-    shape: _Shape, entry: str, hits: Counter[tuple[str, int]]
+    shape: _Shape, entry: str, executed: frozenset[tuple[str, int]]
 ) -> list[_Guard]:
-    """Guards that were reached and threw away every candidate reaching them."""
+    """Guards that were reached and threw away every candidate reaching them.
+
+    The test ran and the statement behind it did not, which within one block
+    says the test was never false.
+    """
     return [
         guard
         for guard in shape.guards.get(entry, ())
-        if hits[(shape.file, guard.test_line)]
-        and hits[(shape.file, guard.test_line)] == hits[(shape.file, guard.skip_line)]
+        if (shape.file, guard.test_line) in executed
+        and (shape.file, guard.after_line) not in executed
     ]
 
 
@@ -804,6 +1064,30 @@ def _entry(
     )
 
 
+_CATALOGUED: Final[dict[tuple[str, ...], tuple[RuleDoc, ...]]] = {}
+
+
+def _catalogued() -> tuple[RuleDoc, ...]:
+    """The rule set, read once per process unless the registries change.
+
+    `catalogue()` re-parses every test file to find what each rule is asserted to
+    stay quiet about. This report does not use those notes and the parse costs
+    more than assessing a small pack does, so the answer is kept — keyed on the
+    registered rule functions, so a test that adds or removes one is handed a
+    fresh reading rather than the previous run's.
+    """
+    key = tuple(
+        f"{module.__name__}.{function.__name__}"
+        for module in SOURCES
+        for function in getattr(module, "RULES", ())
+    )
+    found = _CATALOGUED.get(key)
+    if found is None:
+        found = catalogue()
+        _CATALOGUED[key] = found
+    return found
+
+
 def assess(
     pack: StaticFactPack, *, limits: Limits = DEFAULT_LIMITS
 ) -> tuple[RuleCoverage, ...]:
@@ -812,29 +1096,28 @@ def assess(
     Ordered as the catalogue orders it, so a coverage line and a rule entry read
     side by side.
     """
-    docs = catalogue()
+    docs = _catalogued()
     groups, orphans = _groups(docs)
     by_id = {doc.id: doc for doc in docs}
-    files = frozenset(
-        module.__file__ for module in SOURCES if module.__file__ is not None
-    )
     covered: dict[str, RuleCoverage] = {}
 
-    for group in groups:
-        findings, reads, hits = _observe(group, pack, limits, files)
-        counts = Counter(finding.rule for finding in findings)
-        shape = _shape(group.module)
-        name = group.entry.__name__
-        rejections = _rejections(shape, name, hits)
-        for rule_id in group.rules:
-            doc = by_id[rule_id]
-            reached = any(
-                any(hits[(shape.file, line)] for line in range(start, end + 1))
-                for start, end in _decisions(shape, name, rule_id, doc.function)
-            )
-            covered[rule_id] = _verdict(
-                doc, counts[rule_id], reads, reached, rejections, len(pack.devices)
-            )
+    with _Trace(SOURCES) as trace:
+        for group in groups:
+            findings, reads, executed = _observe(group, pack, limits, trace)
+            counts = Counter(finding.rule for finding in findings)
+            shape = _shape(group.module)
+            name = group.entry.__name__
+            rejections = _rejections(shape, name, executed)
+            for rule_id in group.rules:
+                doc = by_id[rule_id]
+                reached = any(
+                    (shape.file, line) in executed
+                    for start, end in _decisions(shape, name, rule_id, doc.function)
+                    for line in range(start, end + 1)
+                )
+                covered[rule_id] = _verdict(
+                    doc, counts[rule_id], reads, reached, rejections, len(pack.devices)
+                )
 
     for doc in orphans:
         # Visible rather than absent. A rule the catalogue knows about and this
