@@ -496,3 +496,94 @@ owner asked be kept out of the repository entirely.
 pointer file can reference it so the rules load in a terminal session without being published.
 
 **Reversal:** trivial, and blocked by rule 3 unless the owner changes that rule.
+
+---
+
+## 2026-08-19 — Discover configs by walking and sniffing, not by globbing `*.cfg`
+
+**Context:** the tool read one directory level for `.cfg`. Real backup directories are nested,
+use `.conf` and `.txt`, and often name a file after the device with no extension at all, so
+pointing the tool at one found nothing and said "no .cfg files".
+
+**Options:** (a) make the user flatten and rename; (b) accept a glob pattern; (c) walk the tree
+and decide per file, by extension where that is decisive and by reading the head of the file
+where it is not.
+
+**Chosen:** (c). A tool whose first instruction is "reorganise your files" is a tool people
+stop using. The sniff is structural — what fraction of column-zero lines match a command
+vocabulary — rather than keyword counting, so prose fails and an ACL-heavy config passes.
+Sixteen KiB is read to decide; accepted files continue from the same handle.
+
+**Also chosen:** a file that parses but yields no hostname *and* fewer than two interfaces is
+dropped rather than counted. It can only contribute an empty row to every rule that iterates
+devices. Two signals rather than one, because a stub with a hostname is a real boring device
+and several interfaces with no hostname is a real device named by its backup filename.
+
+**Reversal:** cheap. `discover()` sits behind `build_fact_pack`, whose signature did not
+change. The risk is a false accept — something that reads like a config and is not — which
+shows up as a device nobody recognises rather than as silence.
+
+---
+
+## 2026-08-19 — Report identity by hostname, fall back to path, never guess
+
+**Context:** device ids came from filenames. Nested discovery makes collisions likely — two
+sites can both have an `agg-a.cfg`.
+
+**Chosen:** a hostname unique across the collection wins, because operators recognise names
+and not paths. When two configs declare the same hostname, **both** fall back to their
+paths rather than one keeping the name for having been read first, and the collision is
+reported. Renaming rewrites every reference — interfaces, VLANs, tracked objects, FHRP members,
+timer scopes — since a half-renamed device leaves its interfaces in the topology under a name
+its device no longer has.
+
+**Reversal:** trivial, and the shipped corpus pins the behaviour: same four ids, byte-identical
+digest.
+
+---
+
+## 2026-08-19 — Keep a falsifiable assumption register for the timing model
+
+**Context:** PROJECT.md §2.2 says the TIMING tier is the one that can lie, and §2.3 exists to
+check it against real firmware — which needs a machine that can boot a lab. Until then the
+tier ships unvalidated.
+
+**Options:** (a) wait for validation before shipping timing findings; (b) ship with a caveat
+in the output; (c) ship with the caveat *and* an itemised register of every assumption, each
+with the specific lab observation that would falsify it.
+
+**Chosen:** (c). A blanket "model-derived" caveat is honest and useless — it tells a reader to
+distrust everything equally. Twenty-four itemised assumptions tell them which findings are
+solid and which rest on a vendor reading that may be wrong. The register is enforced: every
+entry names a test or states why none can exist, and every assumption cited in code must be a
+registered entry.
+
+**Consequence:** writing it found six defects, four behavioural. A group whose own interface
+went down kept mastership; the preempt delay restarted on unrelated link-ups; preempt delay
+was keyed without protocol, so HSRP 14 and VRRP 14 collided; and the declared failover
+interval was dead code.
+
+**Reversal:** none needed — the register is additive. The open risk is A11: on Cisco's reading
+of `standby delay minimum`, the divergence this tool was built to find would not exist on IOS.
+
+---
+
+## 2026-08-19 — Generate the rule catalogue; never maintain one
+
+**Context:** findings print a rule id and nothing else. Users need what the rule checks, why,
+and when it stays quiet — the last being the only thing that makes a clean run mean anything.
+
+**Options:** (a) write and maintain `docs/RULES.md`; (b) derive it from the rules.
+
+**Chosen:** (b). A hand-written catalogue is correct until the first rule nobody adds to it,
+after which it is confidently wrong. Identifiers, tiers, severities and message templates come
+from the code that builds each `Finding`; prose comes from docstrings; the silence notes come
+from the tests that assert a rule stays quiet. `docs/RULES.md` is compared byte-for-byte with
+what the code renders, so an undocumented rule fails the build rather than shipping.
+
+**Consequence:** ten rules were undocumented and are now written; two of them required the
+timing findings to be lifted out of the enumeration into named functions, which separates the
+search from the conclusions it reaches.
+
+**Reversal:** the generator can be deleted and the file frozen at any point. Doing so re-opens
+exactly the drift the generator exists to prevent.
