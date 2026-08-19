@@ -63,8 +63,9 @@ device north-acc1  nos=eos
   Ethernet4  kind=physical  mode=access  access-vlan=20
 ```
 
-Trimmed after the second device — the other four print the same way. The tail is the part worth
-reading twice:
+Trimmed after the second device — the other four print the same way. Declared VLANs, BGP
+processes and their peerings, and the subnets two interfaces share come next; those are trimmed
+too. The tail is the part worth reading twice:
 
 ```
 fhrp VRRP 10 virtual=10.10.0.1
@@ -76,13 +77,20 @@ fhrp VRRP 20 virtual=10.20.0.1
 fhrp VRRP 30 virtual=10.30.0.1
   south-agg1:Vlan30  priority=110  preempt=yes  tracks=none
 
-timers
-  north-agg1:Vlan10  group=10  hello=1000ms  source=configured
-  north-agg1:Vlan20  group=20  hello=1000ms  preempt-delay=60000ms  source=configured
-  north-agg2:Vlan10  group=10  hello=1000ms  source=configured
-  north-agg2:Vlan20  group=20  hello=1000ms  source=configured
-  south-agg1:Vlan30  group=30  hello=1000ms  source=configured
+fhrp timers
+  north-agg1:Vlan10 [10]  hello=1000ms  source=configured
+  north-agg1:Vlan20 [20]  hello=1000ms  preempt-delay=60000ms  source=configured
+  north-agg2:Vlan10 [10]  hello=1000ms  source=configured
+  north-agg2:Vlan20 [20]  hello=1000ms  source=configured
+  south-agg1:Vlan30 [30]  hello=1000ms  source=configured
 ```
+
+There is a section per timer family the configs actually state — BGP, spanning tree, IGP hello,
+BFD and the rest all print the same way — and a family nothing configures prints nothing rather
+than an empty heading. `preempt=yes` with no qualifier means the configuration says so; a flag
+the protocol supplied instead is written `preempt=no(platform-default)`, because a yes nobody
+typed and a yes somebody chose are two different things to be looking at when a group is not
+where the priorities say it should be.
 
 Each `fhrp` header names the protocol, the group number and, when it is not IPv4, the address
 family. An interface running both `vrrp 14 ipv4` and `vrrp 14 ipv6` produces two groups —
