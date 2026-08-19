@@ -61,3 +61,34 @@ def test_clean_directory_produces_a_report_saying_so(tmp_path: Path) -> None:
     )
     body = write(analyse(configs), configs, tmp_path / "r.html").read_text()
     assert "No findings" in body
+
+
+def test_the_report_holds_every_finding(tmp_path: Path) -> None:
+    """The page caps what it renders because it can offer to render the rest.
+
+    A file cannot, so a report that stopped at two hundred would end with a link
+    inviting the reader to click for findings that are not in the file.
+    """
+    configs = tmp_path / "many"
+    configs.mkdir()
+    for site in range(260):
+        for role, host, priority in (("agg-a", 2, 110), ("agg-b", 3, 100)):
+            vlan = 10 * site + 4
+            (configs / f"s{site}-{role}.cfg").write_text(
+                f"hostname s{site}-{role}\nvlan {vlan}\n"
+                "track UPLINK interface Ethernet1 line-protocol\n"
+                "interface Ethernet1\n   no switchport\n"
+                f"   ip address 10.{site // 250}.{site % 250}.{host}/31\n"
+                f"interface Vlan{vlan}\n"
+                f"   ip address 10.{site // 250}.{vlan % 250}.{host}/24\n"
+                f"   vrrp {vlan} ipv4 10.{site // 250}.{vlan % 250}.1\n"
+                f"   vrrp {vlan} priority-level {priority}\n"
+                f"   vrrp {vlan} preempt\n"
+                f"   vrrp {vlan} tracked-object UPLINK decrement 40\n"
+            )
+    result = analyse(configs)
+    body = write(result, configs, tmp_path / "r.html").read_text()
+    assert len(result.findings) > 200
+    assert body.count('<article style="--i:') == len(result.findings)
+    assert "Render all" not in body
+    assert "Showing the worst" not in body
