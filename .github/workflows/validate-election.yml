@@ -15,35 +15,70 @@ jobs:
   election:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: scenarios/frr_vrrp_election
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
+        working-directory: .
 
       - name: install containerlab
         run: bash -c "$(curl -sL https://get.containerlab.dev)"
 
       - name: deploy
-        working-directory: scenarios/frr_vrrp_election
         run: sudo containerlab deploy -t topology.clab.yml
 
-      - name: validate
-        working-directory: scenarios/frr_vrrp_election
+      # FRR's vrrpd will not start a group until a macvlan with the RFC virtual
+      # MAC (00:00:5e:00:01:<vrid>) exists on the parent interface. Each command
+      # is checked, because the first attempt at this failed silently.
+      - name: create the macvlan devices FRR requires
+        run: |
+          set -euxo pipefail
+          for node in r1 r2; do
+            c="clab-frr-vrrp-election-$node"
+            sudo docker exec "$c" ip link add vrrp4-14 link eth1 type macvlan mode bridge
+            sudo docker exec "$c" ip link set dev vrrp4-14 address 00:00:5e:00:01:0e
+            sudo docker exec "$c" ip link set dev vrrp4-14 up
+            sudo docker exec "$c" ip -br link show vrrp4-14
+          done
+
+      - name: restart frr so vrrpd sees the macvlan
+        run: |
+          set -euxo pipefail
+          for node in r1 r2; do
+            sudo docker exec "clab-frr-vrrp-election-$node" \
+              /usr/lib/frr/frrinit.sh restart
+          done
+
+      - name: confirm vrrpd is actually advertising before judging the model
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            if sudo docker exec clab-frr-vrrp-election-r1 vtysh -c 'show vrrp' \
+                 | grep -qE 'Advertisements Tx \(v4\) +[1-9]'; then
+              echo "vrrpd is advertising"; exit 0
+            fi
+            sleep 3
+          done
+          echo "vrrpd never advertised - the lab is broken, not the model"
+          sudo docker exec clab-frr-vrrp-election-r1 vtysh -c 'show vrrp'
+          exit 1
+
+      - name: validate the model against it
         run: sudo python3 validate.py
 
       - name: diagnostics on failure
         if: failure()
-        working-directory: scenarios/frr_vrrp_election
         run: |
-          sudo containerlab inspect -t topology.clab.yml || true
           for n in r1 r2; do
             echo "=== $n ==="
-            sudo docker logs "clab-frr-vrrp-election-$n" 2>&1 | tail -40 || true
             sudo docker exec "clab-frr-vrrp-election-$n" vtysh -c 'show vrrp' || true
-            sudo docker exec "clab-frr-vrrp-election-$n" ip -d link show || true
+            sudo docker exec "clab-frr-vrrp-election-$n" ip -br link show || true
+            sudo docker logs "clab-frr-vrrp-election-$n" 2>&1 | tail -30 || true
           done
 
       - name: teardown
         if: always()
-        working-directory: scenarios/frr_vrrp_election
         run: sudo containerlab destroy -t topology.clab.yml --cleanup || true

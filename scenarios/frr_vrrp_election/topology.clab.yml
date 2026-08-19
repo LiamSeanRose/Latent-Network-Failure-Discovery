@@ -1,8 +1,10 @@
 # Two FRR routers on one segment, contesting a VRRP group.
 #
-# FRR requires the macvlan device to exist before vrrpd will use it, with the
-# RFC-assigned virtual MAC (00:00:5e:00:01:<vrid>). Containerlab `exec` creates it
-# at boot; doing it in the config file does not work.
+# The macvlan device FRR requires is NOT created here. It was, via containerlab
+# `exec`, and it silently did not happen — the first CI run showed no macvlan and
+# zero advertisements sent, with nothing in the logs to say why. Setup that can
+# fail invisibly does not belong in a topology file, so the workflow does it in
+# explicit steps that print their output and fail loudly.
 name: frr-vrrp-election
 
 topology:
@@ -18,21 +20,11 @@ topology:
       binds:
         - r1/daemons:/etc/frr/daemons
         - r1/frr.conf:/etc/frr/frr.conf
-      exec:
-        - ip link add vrrp4-1-14 link eth1 addrgenmode random type macvlan mode bridge
-        - ip link set dev vrrp4-1-14 address 00:00:5e:00:01:0e
-        - ip link set dev vrrp4-1-14 up
-        - /usr/lib/frr/frrinit.sh start
     r2:
       kind: linux
       binds:
         - r2/daemons:/etc/frr/daemons
         - r2/frr.conf:/etc/frr/frr.conf
-      exec:
-        - ip link add vrrp4-1-14 link eth1 addrgenmode random type macvlan mode bridge
-        - ip link set dev vrrp4-1-14 address 00:00:5e:00:01:0e
-        - ip link set dev vrrp4-1-14 up
-        - /usr/lib/frr/frrinit.sh start
 
   links:
     - endpoints: ["r1:eth1", "r2:eth1"]
