@@ -83,6 +83,32 @@ Work since the phases closed, none of it widening the model:
   per-location disabling instead of a global trace, and a recorder that settles a path once it
   has answered.
 
+Since then, three checks over the broadcast domains the topology builder computes, three over
+where the spanning-tree root lands, a baseline that records the rule set as well as the configs,
+`--version`, and a first run of two words: `cassandra` counts what it can see and prints the
+command, `check` defaults to the directory you are standing in.
+
+Seven more defects a second adversarial read found, in the code that had landed since the first.
+All reproduced before they were fixed, all with a test that fails without the fix:
+
+- Two gateways joined by a cable between two access ports were reported HIGH as a split subnet —
+  a sentence asserting two broadcast domains where the configuration says one. The guard counted
+  trunks and subinterfaces as ways a VLAN leaves a device and not access ports.
+- `switchport trunk allowed vlan none` was stored identically to no allowed line at all, and
+  every consumer reads the second as unknown. Writing `none` — the strictly worse configuration —
+  produced strictly fewer findings.
+- The SARIF fingerprint could not tell `VRRP 14` from `VRRP 14 IPv6`, so `examples/xr-metro`
+  emitted two results under one identity and code scanning would have shown one alert.
+- `fhrp-divergence`'s docstring described a filter replaced two commits earlier, and that
+  docstring is harvested into `docs/RULES.md` as the rule's contract.
+- The sequence enumerator tried intervals in ascending order and stopped at the first one that
+  showed the defect, which at one second is the interval whose perturbation control has one side.
+  True findings were carrying weaker evidence than was available.
+- The coverage report counted an empty tuple and a sentinel enum as stated facts, so it named
+  four things the configs do not contain.
+- The dot1q escape hatch was unreachable from any configuration this tool could read, and its
+  only test supplied its own precondition.
+
 Six defects an adversarial read of the whole repository found, all reproduced before they were
 fixed and all with a test that fails without the fix:
 
