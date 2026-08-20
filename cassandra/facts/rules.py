@@ -24,13 +24,16 @@ from cassandra.factpack.schema import (
     FhrpMember,
     Interface,
     InterfaceKind,
+    L2Segment,
     StaticFactPack,
+    StpMode,
     SwitchportMode,
     TimerSource,
     TrackedObjectKind,
     VlanId,
     VrfName,
 )
+from cassandra.factpack.topology import DEFAULT_BRIDGE_PRIORITY
 from cassandra.findings import Finding, Severity, Tier
 
 Rule = Callable[[StaticFactPack], Iterator[Finding]]
@@ -2079,4 +2082,328 @@ def subnet_terminated_on_two_vlans(pack: StaticFactPack) -> Iterator[Finding]:
             ),
             remedy="put both ends on one VLAN — renumber whichever SVI is on the "
             "wrong one — or give this half a subnet of its own",
+        )
+
+
+# --------------------------------------------------------------------------
+# Spanning tree
+#
+# Where the root of a VLAN's tree lands decides which ports block, which path
+# every frame in that broadcast domain takes, and whose timers govern how long
+# a reconvergence lasts — and none of it appears anywhere in the running
+# configuration of the bridge it happens to. The election is the one fact in
+# this file that no single device states: it is a comparison between the
+# bridges in a segment, so it can only be read off the segment.
+#
+# Two things bound what may be concluded from it, and both are in
+# `topology.BridgePriorities` rather than here.
+#
+# The first is that a priority is recorded for a device only when the parser
+# accounted for every line on it that could set one. An MST instance priority
+# and a `spanning-tree vlan 10 root primary` macro both set a priority this
+# tool cannot turn into a number, and a bridge carrying one of them is left out
+# of `bridge_priorities` entirely — because the alternative, treating a bridge
+# whose line went unread as a bridge sitting at the default, is what would make
+# every rule below report the opposite of the truth on exactly the networks
+# that configured spanning tree most carefully.
+#
+# The second is that every rule here requires the whole segment: a segment
+# whose members are not all in `bridge_priorities` is one where a bridge that
+# was not read could be lower than any of the ones that were, and the election
+# is then not this tool's to call. That leaves the case a directory can never
+# rule out — a bridge on the wire whose config nobody collected — and the
+# rules answer it the way the rest of this module does, by naming the bridges
+# they compared so a reader can see the collection the claim rests on.
+# --------------------------------------------------------------------------
+
+
+def _bridges(segment: L2Segment) -> list[str]:
+    """The devices bridging one segment, once each, in a stable order."""
+    return sorted({ref.device for ref in segment.members})
+
+
+def _svis_in(pack: StaticFactPack, vlan_id: VlanId) -> dict[str, str]:
+    """Every device with a live, addressed SVI for one VLAN, and its name.
+
+    Addressed, because an SVI with no address terminates nothing and is not a
+    gateway for anybody; live, because a shut one is not on the network at all.
+    """
+    found: dict[str, str] = {}
+    for device in pack.devices:
+        for interface in device.interfaces:
+            if (
+                _svi_vlan(interface) == vlan_id
+                and interface.admin_enabled
+                and interface.addresses
+            ):
+                found[device.id] = interface.name
+    return found
+
+
+def _modes_in_the_inventory(pack: StaticFactPack) -> dict[str, StpMode]:
+    """The spanning-tree mode each device states, as far as the pack carries it.
+
+    A mode reaches the Fact Pack on a `StpTimers` record and nowhere else, so
+    this sees a bridge only if that bridge also retimed its spanning tree.
+    `L2Segment.stp_mode` is derived from what *every* device stated, which is
+    the wider set — deliberately, because a fact about a broadcast domain
+    should not depend on which of its members happened to change a timer — and
+    the gap between the two is why the rule below can be silent about a
+    disagreement the segment already knows is there. It reports what it can
+    attribute to a device; the segment records what is true.
+
+    `StpMode.NONE` is left out. It is what an unwritten mode line and an
+    explicit `spanning-tree mode none` both arrive as, and naming a bridge as
+    running neither protocol on the strength of a line nobody wrote is the one
+    thing this section will not do.
+    """
+    seen: dict[str, set[StpMode]] = {}
+    for timers in pack.timers.stp:
+        if timers.mode is not StpMode.NONE:
+            seen.setdefault(timers.scope.device, set()).add(timers.mode)
+    return {device: modes.pop() for device, modes in seen.items() if len(modes) == 1}
+
+
+def _election(segment: L2Segment) -> dict[str, int] | None:
+    """The whole root election for one segment, or None if it is not settled.
+
+    None whenever a bridge in the segment has no priority in
+    `bridge_priorities`, which is the single guard every rule in this section
+    depends on: a partial election is not a weaker answer, it is a different
+    one, because the bridge that was left out is exactly the bridge that could
+    have won.
+    """
+    bridges = _bridges(segment)
+    priorities = dict(segment.bridge_priorities)
+    if not bridges or set(priorities) != set(bridges):
+        return None
+    return priorities
+
+
+@rule
+def stp_root_election_is_a_tie(pack: StaticFactPack) -> Iterator[Finding]:
+    """Two bridges configured to the same lowest priority, so neither is root.
+
+    A priority below the default is the operator writing down which bridge
+    should be the root of this VLAN's tree, and here it has been written down
+    twice. IEEE 802.1D then settles it on the bridge MAC address, so the root
+    is whichever of the two was manufactured first — a fact about a purchase
+    order rather than about the network — and every port that blocks in this
+    broadcast domain blocks because of it.
+
+    MEDIUM, on the same argument `fhrp-priority-tie` makes about an FHRP
+    master. Nothing is down while the tie stands: the tree converges, traffic
+    flows, and the topology is merely not the one that was drawn. What earns
+    the finding is that it moves with no configuration change behind it —
+    replace either bridge and the new chassis brings a new MAC address into the
+    comparison — and the VLAN's forwarding path, its blocked ports and the
+    timers that govern its reconvergence all move at once, on a day whose
+    change record says "swapped a switch". Not HIGH, because the tie itself
+    loses no traffic; not LOW, because it defeats a placement somebody chose
+    and wrote down.
+
+    Silent unless every bridge in the segment has a priority this tool read.
+    A bridge whose priority was set by an MST instance or by a `root primary`
+    macro is one the parser declines to guess at, and a bridge that might be
+    lower than both of these is a bridge that makes the finding wrong.
+
+    Silent when the shared lowest priority is the default one. Every bridge in
+    a segment sitting on 32768 is a root nobody chose, which is real and is a
+    different claim: it rests on reading an absence as a decision, one
+    uncollected bridge with a priority makes it false, and whether an arbitrary
+    root costs anything at all depends on there being a second path between
+    the bridges — which needs the layer-1 data this tool refuses to invent.
+
+    Silent, of course, when one bridge is strictly lowest, which is an election
+    with a winner and the subject of `stp-root-is-not-the-gateway` instead.
+    """
+    for segment in pack.l2_segments:
+        election = _election(segment)
+        if segment.vlan_id is None or election is None or len(election) < 2:
+            continue
+        lowest = min(election.values())
+        if lowest >= DEFAULT_BRIDGE_PRIORITY:
+            continue
+        tied = sorted(device for device, value in election.items() if value == lowest)
+        if len(tied) < 2:
+            continue
+        yield Finding(
+            rule="stp-root-tie",
+            tier=Tier.FACTS,
+            severity=Severity.MEDIUM,
+            device=tied[0],
+            title=f"VLAN {segment.vlan_id} has no chosen root bridge: "
+            + " and ".join(tied)
+            + f" both hold priority {lowest}",
+            detail=f"{len(tied)} bridges in VLAN {segment.vlan_id} share the "
+            f"lowest bridge priority {lowest}, so the root is decided by "
+            f"whichever of them has the lower MAC address — which is not a "
+            f"thing anyone configured and not a thing this file records. The "
+            f"tree, the ports it blocks and the timers that govern its "
+            f"reconvergence all belong to whichever bridge wins, and they move "
+            f"to the other one the day either device is replaced",
+            evidence=tuple(
+                f"{device} VLAN {segment.vlan_id} bridge priority {value}"
+                for device, value in sorted(election.items())
+            ),
+            # The command, but only where there is a step left below the tie.
+            # Two bridges already sharing priority 0 have nowhere lower to go,
+            # and a suggestion to set the value they are both on would be
+            # worse than the sentence that replaces it.
+            remedy=(
+                f"lower the priority of the bridge that should be the root — "
+                f"`spanning-tree vlan {segment.vlan_id} priority {lowest - 4096}` — "
+                f"so the election states the placement instead of inheriting it"
+                if lowest >= 4096
+                else "raise the priority of every bridge that should not be the "
+                "root, so the election states the placement instead of "
+                "inheriting it"
+            ),
+        )
+
+
+@rule
+def stp_root_holds_no_gateway(pack: StaticFactPack) -> Iterator[Finding]:
+    """The bridge that wins this VLAN's root election holds no address in it.
+
+    Somebody configured priorities here — an election with a single winner is
+    one where at least one bridge was moved off the default — and the winner is
+    a bridge with no SVI in the VLAN while another member of the segment has
+    one. The tree for this VLAN is therefore built around a device that carries
+    none of its routed traffic: every port that blocks does so to make the
+    paths to *that* device loop-free, and the gateway's own links are as
+    eligible to be blocked as anything else in the domain.
+
+    LOW, and the boundary is worth stating precisely. Nothing is unreachable
+    and nothing flaps: spanning tree converges, hosts resolve their gateway and
+    reach it, and the cost is a path that is longer and less symmetric than the
+    addressing implies, plus a reconvergence on every topology change computed
+    around a device with no stake in the VLAN. How much longer that path is
+    depends on the cabling, and `L1Link` is empty on purpose, so this does not
+    say — reporting a hop count derived from an invented cable would be worth
+    less than reporting nothing. What it does say is that the root and the
+    gateway are different devices, which is the part somebody has to confirm
+    was meant.
+
+    Silent unless the election is settled: every bridge in the segment needs a
+    priority this tool read, and one of them has to be strictly lowest. Two
+    bridges tied at the lowest priority have no root to be in the wrong place,
+    and that is `stp-root-tie`.
+
+    Silent when the root bridge holds an SVI in the VLAN, which is the
+    arrangement this rule exists to ask for, and silent when no member of the
+    segment holds one — a VLAN with no gateway in the collection is either a
+    pure layer-2 domain or one whose gateway was not collected, and neither is
+    a root in the wrong place.
+    """
+    for segment in pack.l2_segments:
+        root = segment.root_bridge
+        if segment.vlan_id is None or root is None or _election(segment) is None:
+            continue
+        gateways = _svis_in(pack, segment.vlan_id)
+        if not gateways or root in gateways:
+            continue
+        held = sorted(gateways)
+        yield Finding(
+            rule="stp-root-is-not-the-gateway",
+            tier=Tier.FACTS,
+            severity=Severity.LOW,
+            device=root,
+            title=f"the root bridge for VLAN {segment.vlan_id} is {root}, which "
+            f"has no address in it",
+            detail=f"{root} wins the root election for VLAN {segment.vlan_id} on "
+            f"bridge priority, and terminates none of the VLAN's traffic; "
+            + ", ".join(f"{device}:{gateways[device]}" for device in held)
+            + f" {'does' if len(held) == 1 else 'do'}. The tree for this VLAN is "
+            f"built around {root}, so the ports that block are the ones that "
+            f"would have made a path to {root} a loop — the gateway's links "
+            f"among them — and every topology change in the VLAN reconverges "
+            f"around a device with no stake in it",
+            evidence=(
+                *(
+                    f"{device} VLAN {segment.vlan_id} bridge priority {value}"
+                    for device, value in sorted(segment.bridge_priorities)
+                ),
+                *(
+                    f"{device}:{gateways[device]} terminates VLAN {segment.vlan_id}"
+                    for device in held
+                ),
+            ),
+            remedy=f"give the gateway for VLAN {segment.vlan_id} the lowest bridge "
+            f"priority in the segment, or confirm that the root belongs on "
+            f"{root} and that the gateway's uplinks are the ones meant to forward",
+        )
+
+
+@rule
+def stp_modes_disagree(pack: StaticFactPack) -> Iterator[Finding]:
+    """One broadcast domain bridged by two different spanning-tree protocols.
+
+    Two members of a segment state different modes — rapid-PVST on one and MST
+    on the other is the pairing that happens, usually because a switch was
+    added from a template written for a different part of the estate. The two
+    do not exchange comparable BPDUs: an MST bridge advertises one tree for its
+    whole region and a per-VLAN bridge advertises one per VLAN, so each
+    computes a topology the other neither contributes to nor honours, and a
+    port one of them decides to block is a port the other has already decided
+    to forward.
+
+    MEDIUM, and the reason it is not HIGH is the reason it survives review for
+    years: with one path between the bridges nothing whatever happens. Both
+    forward, there is no loop to break, and every counter is clean. It becomes
+    a broadcast storm on the day a second path appears — a link added for
+    redundancy, a patch lead put back in the wrong port, a bundle member that
+    comes up alone — because the two bridges cannot agree which of the two
+    paths to block. That is a loop on a broadcast domain, which takes a site
+    down rather than a link, and whether this segment has that second path is
+    exactly what needs `L1Link` and is therefore not something this tool knows.
+    So it is reported as the latent condition it is, with the trigger stated.
+
+    Silent about a device that states a mode and no spanning-tree timer. A mode
+    reaches the Fact Pack attached to a timer record and nowhere else, so a
+    bridge configured with `spanning-tree mode mst` and no timing of its own is
+    one this rule can see the effect of — `L2Segment.stp_mode` falls back to
+    "no one mode here" — and cannot name. Naming is the whole finding, so it
+    stays quiet rather than reporting a disagreement between two devices it
+    would have to leave unidentified.
+
+    Silent about a bridge whose mode is `none`. A configuration that says
+    `spanning-tree mode none` and one that says nothing about the mode at all
+    reach the pack as the same value, and reporting a bridge as having spanning
+    tree switched off on the strength of a line nobody wrote would be the guess
+    this whole section is built to avoid. Two bridges in one segment where one
+    is protecting a VLAN the other is not is a real defect and it is not
+    decidable here.
+    """
+    stated = _modes_in_the_inventory(pack)
+    for segment in pack.l2_segments:
+        if segment.vlan_id is None or segment.stp_mode is not StpMode.NONE:
+            continue
+        running = {
+            device: stated[device] for device in _bridges(segment) if device in stated
+        }
+        if len(set(running.values())) < 2:
+            continue
+        named = sorted(running.items())
+        yield Finding(
+            rule="stp-mode-disagreement",
+            tier=Tier.FACTS,
+            severity=Severity.MEDIUM,
+            device=named[0][0],
+            title=f"VLAN {segment.vlan_id} is bridged by "
+            + " and ".join(sorted({mode.value for mode in running.values()}))
+            + " at once",
+            detail=", ".join(f"{device} runs {mode.value}" for device, mode in named)
+            + f", and every one of them bridges VLAN {segment.vlan_id}. The two "
+            f"protocols do not compare the same BPDUs, so each bridge computes "
+            f"a tree the other does not honour, and neither can be relied on to "
+            f"block the port the other is forwarding on",
+            trigger=f"a second path between these bridges in VLAN "
+            f"{segment.vlan_id} — a link added for redundancy, or a patch lead "
+            f"put back in the wrong port",
+            evidence=tuple(
+                f"{device} spanning-tree mode {mode.value}" for device, mode in named
+            ),
+            remedy="put every bridge in the broadcast domain in one mode before "
+            "a second path between them exists",
         )

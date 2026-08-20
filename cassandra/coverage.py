@@ -1124,6 +1124,38 @@ class UnreadFact:
         return f"{self.label} — stated by {self.records} record{many}, read by no rule"
 
 
+def _states_something(field: dataclasses.Field[object], value: object) -> bool:
+    """Did this record actually say anything at this field?
+
+    The first version asked only whether the value was `None`, `""` or `False`,
+    which let three shapes of nothing through and put them on a report whose
+    whole subject is what the configs contain.
+
+    An empty tuple is the commonest: `Device.vrfs` is `()` on every device in
+    every shipped corpus, and it was reported as "stated by 6 records". A
+    sentinel enum is the subtler one — `StpMode.NONE` and `DeviceRole.UNKNOWN`
+    both mean "not determined", and both are truthy strings. Neither is
+    distinguishable from a real value by looking at it, so the field's own
+    declared default is what decides: a value equal to the default is the
+    absence of a statement, and one that differs is a statement.
+
+    A stated zero survives, because `0` is a real answer to how many of
+    something there are and `int` fields here default to `None` rather than to
+    it.
+    """
+    if value is None or value is False:
+        return False
+    if isinstance(value, str | tuple | list | frozenset | set | dict) and not value:
+        return False
+    default = field.default
+    if default is not dataclasses.MISSING and value == default:
+        # A field left at what the schema declares is a field nobody set. The
+        # sentinel enums are the reason this exists and the reason it cannot be
+        # a truthiness test: `StpMode.NONE` is the string "none".
+        return False
+    return True
+
+
 def _populated(pack: StaticFactPack) -> dict[str, int]:
     """Every path the pack actually states something at, and how often.
 
@@ -1132,7 +1164,8 @@ def _populated(pack: StaticFactPack) -> dict[str, int]:
     every field in the pack as unread. Absence is not counted — a field that is
     None on every record it could sit on is not a fact this collection contains,
     and reporting it would bury the ones that are in a list of the ones that
-    are not.
+    are not. `_states_something` decides what counts, and there are more shapes
+    of nothing than there look to be.
     """
     found: dict[str, int] = {}
 
@@ -1142,7 +1175,7 @@ def _populated(pack: StaticFactPack) -> dict[str, int]:
             full = f"{path}.{field.name}" if path else field.name
             kind = _kind(type(record), field.name, value)
             if kind is _VALUE:
-                if value is not None and value != "" and value is not False:
+                if _states_something(field, value):
                     found[full] = found.get(full, 0) + 1
                 continue
             if kind is _RECORD:

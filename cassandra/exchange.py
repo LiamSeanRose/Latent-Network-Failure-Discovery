@@ -87,7 +87,10 @@ _LEVEL: Final[dict[Severity, str]] = {
 # Versioned because the identity it hashes is a heuristic that may be improved.
 # A reader that starts seeing a different key knows the fingerprints under the
 # old one are not comparable, instead of silently comparing two schemes.
-_FINGERPRINT_KEY: Final = "cassandraFindingIdentity/v1"
+# v2 separates an address family from the group number it qualifies: `VRRP 14`
+# and `VRRP 14 IPv6` hashed the same under v1, so a run carrying both offered
+# two results under one fingerprint. Only findings naming a family move.
+_FINGERPRINT_KEY: Final = "cassandraFindingIdentity/v2"
 _FINGERPRINT_BITS: Final = 16
 
 # Written rather than left to ElementTree, which emits no declaration at all

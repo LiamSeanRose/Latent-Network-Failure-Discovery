@@ -543,6 +543,19 @@ class ParsedDevice:
     unparsed_lines: tuple[str, ...]
     vlans: tuple[Vlan, ...] = ()
     fhrp_records: tuple[FhrpRecord, ...] = ()
+    # Which bridge this configuration asks to be the spanning-tree root, per
+    # VLAN, and whether an unstated VLAN may be read as running the standard
+    # default. Both default to "nothing is known", so a dialect that does not
+    # read spanning tree — IOS-XR has none to read — contributes no priority
+    # rather than an implied one.
+    stp_priorities: tuple[tuple[VlanId, int], ...] = ()
+    stp_priorities_complete: bool = False
+    # The spanning-tree protocol this config says it runs. It reaches the timer
+    # inventory too, attached to every `StpTimers` record — but only a device
+    # that states a timer has one of those, and which protocol a bridge is
+    # running is a fact about the broadcast domain it is in whether or not it
+    # also retimed it.
+    stp_mode: StpMode = StpMode.NONE
 
 
 type _GroupKey = tuple[FhrpProtocol, int, AddressFamily, str]
@@ -1091,10 +1104,23 @@ class StpSettings:
     written on three separate lines that mean one set of values, and because a
     per-VLAN line overrides only the timer it names — the rest of that VLAN's
     timing is whatever the device-wide lines said.
+
+    `priorities` and `priority_unreadable` accumulate the other half of the
+    domain: which bridge this configuration asks to be the spanning-tree root.
+    They are kept apart from `values` because they are not timers and never
+    reach the timer inventory — they reach the broadcast domain, where the
+    election they decide actually happens.
     """
 
     mode: StpMode = StpMode.NONE
     values: dict[StpKey, dict[str, Milliseconds]] = field(default_factory=dict)
+    priorities: dict[VlanId, int] = field(default_factory=dict)
+    # True once a line has stated a bridge priority this parser could not turn
+    # into a number for a named VLAN. It is deliberately device-wide and
+    # deliberately sticky: after it is set, nothing about this device's
+    # priorities may be inferred from the absence of a line, because a line was
+    # there and was not read.
+    priority_unreadable: bool = False
 
     def set(self, key: StpKey, field_name: str, value: Milliseconds) -> None:
         self.values.setdefault(key, {})[field_name] = value
@@ -1151,6 +1177,77 @@ def states_stp_timer(line: str) -> bool:
     someone will see it.
     """
     return any(f" {name} " in f"{line} " for name in _STP_FIELDS)
+
+
+# `spanning-tree vlan 10-20 priority 8192` on IOS and NX-OS; EOS spells the
+# scope `vlan-id`, exactly as it does for the timers. Both spellings are
+# accepted everywhere for the same reason they are there: reading one extra
+# spelling costs nothing, and mis-scoping a priority would state a fact about
+# VLANs the operator never named.
+_STP_VLAN_PRIORITY: Final = re.compile(
+    r"spanning-tree vlan(?:-id)? (\S+) priority (\d+)"
+)
+
+# What the priority field can hold: IEEE 802.1D-1998 clause 8.5.5.1 gives the
+# bridge priority the top 16 bits of the bridge identifier. Anything larger is
+# a line no device accepted, so it is read as a priority this parser could not
+# make sense of rather than clamped into range.
+MAX_BRIDGE_PRIORITY: Final = 65535
+
+
+def read_stp_priority(settings: StpSettings, line: str) -> None:
+    """Fold one top-level `spanning-tree` line's bridge priority in.
+
+    Kept apart from `read_stp_line` because the two ask different questions of
+    the same line and answer to different consumers: a timer is inventoried per
+    device, a priority is only meaningful against the other bridges in a
+    broadcast domain. Returns nothing, because there is no third answer to give
+    — a priority-bearing line this cannot read is recorded on `settings` as the
+    absence of knowledge it is, and a line that is not about priority at all is
+    somebody else's to report.
+    """
+    if match := _STP_VLAN_PRIORITY.fullmatch(line):
+        vlans = vlan_list(match.group(1))
+        value = int(match.group(2))
+        if not vlans or value > MAX_BRIDGE_PRIORITY:
+            settings.priority_unreadable = True
+            return
+        for vlan_id in vlans:
+            settings.priorities[vlan_id] = value
+        return
+    if states_bridge_priority(line):
+        settings.priority_unreadable = True
+
+
+def states_bridge_priority(line: str) -> bool:
+    """True for a top-level `spanning-tree` line that decides a bridge priority.
+
+    This is the separator between "this bridge is at the default because nobody
+    changed it" and "this bridge's priority is unknown", and everything read off
+    a root election rests on telling those two apart. A configuration is the
+    whole of what a device was told, so a device with no priority line really is
+    at the standard default — but only if every line that could have set one was
+    seen and understood, which is what this decides.
+
+    Two forms are deliberately caught here and not read:
+
+    * `spanning-tree mst 0 priority 4096` sets the priority of an MST instance,
+      and which VLANs that instance carries is in the `spanning-tree mst
+      configuration` block, which nothing parses. The number is legible and the
+      set of VLANs it governs is not, so the device's priorities become unknown
+      rather than half-known.
+    * `spanning-tree vlan 10 root primary` sets a priority whose value depends
+      on what the current root was advertising when the command was typed. That
+      is not in the file, and the one thing that can be said for certain is that
+      this bridge is *not* at the default — which is precisely the inference
+      that has to be withdrawn.
+
+    Matched on whole words so a line is judged by what it configures rather than
+    by a substring: `spanning-tree portfast bpduguard default` states no
+    priority and neither does `spanning-tree pathcost method long`.
+    """
+    words = line.split()
+    return "priority" in words or "root" in words
 
 
 def _stp_ms(name: str, value: str) -> Milliseconds | None:

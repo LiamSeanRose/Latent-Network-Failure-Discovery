@@ -11,7 +11,7 @@ No lab, no containers, no account, no network access.
 ## What it looks for
 
 Most config checkers answer questions about the steady state: is this address duplicated, is
-this VLAN declared, do these two ends agree. Those checks are here — forty-six of them — and
+this VLAN declared, do these two ends agree. Those checks are here — forty-nine of them — and
 they are worth having.
 
 The interesting findings are the other kind: failures that no steady state contains, because
@@ -134,18 +134,18 @@ to someone works on a laptop with no network, and anyone can read its source.
 
 ### What a clean run does not mean
 
-`--coverage` answers the question a clean run raises. Forty-eight checks, and on a corpus with no
-BFD, no IGP timers and no BGP or spanning-tree timing, seventeen of them never had anything to
+`--coverage` answers the question a clean run raises. Fifty-one checks, and on a corpus with no
+BFD, no IGP timers and no BGP or spanning-tree timing, nineteen of them never had anything to
 examine — a rule that ran and found nothing and a rule that could not run at all look identical
 otherwise, and the second is the more common case on a real directory.
 
 ```
 $ cassandra check examples/two-site --coverage
-coverage: 31 of 48 checks had something to look at. 17 were inert:
+coverage: 32 of 51 checks had something to look at. 19 were inert:
   bfd-multiplier-of-one (no BFD timers in these configs)
   dampening-exceeds-sla (no dampening profile in these configs)
   fhrp-hold-under-peer-hello (no FHRP timers in these configs sets hold time)
-  and 14 more — `--coverage full` lists every check and what it was missing
+  and 16 more — `--coverage full` lists every check and what it was missing
 ```
 
 The verdict is measured, not declared: the fact pack is wrapped in a recorder, the rules are run
@@ -166,7 +166,7 @@ than from a line number, so editing something further up the file does not re-re
 `--format junit` writes a test report of the rule set rather than of the findings: a rule that
 fired is a failure carrying its evidence, a rule that ran and found nothing is a pass, and a
 rule that never had a fact to reason over is a skip with the reason it was inert. That last one
-is the point — it stops a green build with seventeen of forty-eight checks starved of input from
+is the point — it stops a green build with nineteen of fifty-one checks starved of input from
 looking like a clean one.
 
 Neither offers an autofix. A suggested change is lines you type on a device, and sometimes not

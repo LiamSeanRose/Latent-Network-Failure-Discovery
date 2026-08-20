@@ -13,7 +13,13 @@ Derived here:
   *could* be an IGP, BGP, BFD or FHRP peer of whom.
 * `L2Segment` — one broadcast domain per VLAN id, listing every interface that
   carries it: an access port in that VLAN, a trunk permitting it, or an SVI
-  named for it.
+  named for it. Also where the spanning-tree root election that governs that
+  domain is written down: the bridge priorities the configurations state, the
+  mode they say they are running, and the root itself where those settle it.
+  A priority is only ever recorded for a device whose configuration accounts
+  for every line that could set one — see `BridgePriorities` — because the
+  whole value of the field is that a device missing from it is a device whose
+  priority is unknown, rather than one assumed to be at the default.
 * `L2Adjacency` — trunks on different devices that permit the same VLAN id.
   Read the relation precisely: it says both ends can carry that VLAN tagged, not
   that a cable joins them. Without layer-1 data it cannot distinguish two
@@ -52,6 +58,11 @@ topology. Two consequences worth knowing:
   rules already read that field.
 * An administratively shut interface is in the configuration and not on the
   network, so it joins no segment and no adjacency.
+* A root bridge is named only where every member device's priority is known and
+  one of them is strictly lowest. Two bridges sharing the lowest priority are
+  separated by their MAC addresses, which a configuration does not contain, so
+  the segment carries no root rather than the first of the two — and a rule
+  reporting that tie is reading exactly the ambiguity this leaves behind.
 """
 
 from __future__ import annotations
@@ -59,12 +70,14 @@ from __future__ import annotations
 import ipaddress
 import itertools
 import re
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Final, TypedDict
 
 from cassandra.factpack.schema import (
     AddressFamily,
     Device,
+    DeviceId,
     Interface,
     InterfaceKind,
     InterfaceRef,
@@ -72,6 +85,7 @@ from cassandra.factpack.schema import (
     L2Segment,
     L3Adjacency,
     SegmentId,
+    StpMode,
     SwitchportMode,
     Vlan,
     VlanId,
@@ -84,6 +98,44 @@ type SubnetKey = tuple[VrfName | None, Network]
 # `Vlan99`, and not `Vlan99.4` or `Vlan` — an SVI names exactly one broadcast
 # domain or it is not an SVI this module can place.
 _SVI_NAME: Final = re.compile(r"[Vv]lan(\d+)")
+
+# What a bridge runs when nobody has said otherwise: IEEE 802.1D-1998 table 8-4.
+# Every dialect this tool parses ships it, and every dialect adds the VLAN id to
+# it for the extended system identifier — so the number on the wire for VLAN 10
+# is 32778, not 32768. That is left out on purpose. It is added identically by
+# every bridge in the same VLAN, so it cancels out of the only comparison
+# anything here makes, and carrying it would put a number in a finding that
+# matches no line in any configuration.
+DEFAULT_BRIDGE_PRIORITY: Final = 32768
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BridgePriorities:
+    """One device's bridge priorities, as far as its configuration settles them.
+
+    `stated` holds the VLANs a priority was actually read for. `complete` is the
+    load-bearing half: it says the parser accounted for every line on this
+    device that could set a priority, and therefore that a VLAN missing from
+    `stated` really is running the default rather than a value nobody read.
+
+    The two are separate because the distinction they draw is the one a root
+    election turns on. "This bridge is at 32768 because that is what it ships
+    with" and "this bridge's priority is unknown" lead to opposite answers about
+    who wins, and only the parser that saw the lines can tell them apart — a
+    device whose dialect has no spanning tree to read, or one whose priority was
+    set by an MST instance or a `root primary` macro, is the second and must not
+    be counted as the first.
+    """
+
+    stated: tuple[tuple[VlanId, int], ...] = ()
+    complete: bool = False
+
+    def of(self, vlan_id: VlanId) -> int | None:
+        """This device's bridge priority in one VLAN, or None if unknown."""
+        for stated_vlan, priority in self.stated:
+            if stated_vlan == vlan_id:
+                return priority
+        return DEFAULT_BRIDGE_PRIORITY if self.complete else None
 
 
 class Topology(TypedDict):
@@ -99,14 +151,27 @@ class Topology(TypedDict):
     l3_adjacencies: tuple[L3Adjacency, ...]
 
 
-def derive(devices: Sequence[Device], vlans: Sequence[Vlan]) -> Topology:
+def derive(
+    devices: Sequence[Device],
+    vlans: Sequence[Vlan],
+    *,
+    stp_modes: Mapping[DeviceId, StpMode] | None = None,
+    bridge_priorities: Mapping[DeviceId, BridgePriorities] | None = None,
+) -> Topology:
     """Everything the configuration determines about how the devices connect.
+
+    `stp_modes` and `bridge_priorities` are what the parsers read of the
+    spanning-tree domain, per device, and both are optional: a caller that has
+    neither gets segments with no election in them rather than an election over
+    invented numbers.
 
     Output ordering is total and stable: two runs over one directory produce
     identical topology, which is what lets a fact pack be diffed and digested.
     """
     return Topology(
-        l2_segments=_l2_segments(devices, vlans),
+        l2_segments=_l2_segments(
+            devices, vlans, stp_modes or {}, bridge_priorities or {}
+        ),
         l2_adjacencies=_l2_adjacencies(devices),
         l3_adjacencies=_l3_adjacencies(devices),
     )
@@ -128,7 +193,10 @@ def segment_id(vlan_id: VlanId) -> SegmentId:
 
 
 def _l2_segments(
-    devices: Sequence[Device], vlans: Sequence[Vlan]
+    devices: Sequence[Device],
+    vlans: Sequence[Vlan],
+    modes: Mapping[DeviceId, StpMode],
+    priorities: Mapping[DeviceId, BridgePriorities],
 ) -> tuple[L2Segment, ...]:
     """One segment per VLAN id that something actually carries.
 
@@ -137,15 +205,99 @@ def _l2_segments(
     trunk permitting a VLAN nothing terminates is already a FACTS finding.
     """
     instances = _stp_instances(vlans)
-    return tuple(
-        L2Segment(
-            id=segment_id(vlan_id),
-            vlan_id=vlan_id,
-            members=tuple(members),
-            stp_instance=instances.get(vlan_id),
+    segments: list[L2Segment] = []
+    for vlan_id, members in sorted(_members_by_vlan(devices).items()):
+        bridges = _member_devices(members)
+        stated = _bridge_priorities(bridges, vlan_id, priorities)
+        segments.append(
+            L2Segment(
+                id=segment_id(vlan_id),
+                vlan_id=vlan_id,
+                members=tuple(members),
+                stp_mode=_segment_mode(bridges, modes),
+                stp_instance=instances.get(vlan_id),
+                root_bridge=_root_bridge(bridges, stated),
+                bridge_priorities=stated,
+            )
         )
-        for vlan_id, members in sorted(_members_by_vlan(devices).items())
+    return tuple(segments)
+
+
+def _member_devices(members: Sequence[InterfaceRef]) -> list[DeviceId]:
+    """The devices bridging one segment, once each, in the members' own order."""
+    seen: list[DeviceId] = []
+    for ref in members:
+        if ref.device not in seen:
+            seen.append(ref.device)
+    return seen
+
+
+def _segment_mode(
+    bridges: Sequence[DeviceId], modes: Mapping[DeviceId, StpMode]
+) -> StpMode:
+    """The one mode every member that states one agrees on, or `NONE`.
+
+    Only a mode a device positively stated counts. `StpMode.NONE` is what both
+    `spanning-tree mode none` and an unwritten mode line arrive as, and the two
+    mean opposite things — a bridge not running spanning tree at all, and a
+    bridge running whatever it ships with — so a member carrying it is passed
+    over rather than recorded as either.
+
+    `NONE` on the way out therefore carries three cases at once: nobody said,
+    the members disagree, and a member really has it switched off. That is the
+    field's shape rather than this function's choice — `StpMode` has one value
+    for "no mode here" and none for "two" — and the consequence belongs in the
+    open: a rule wanting to tell a disagreement from a silence cannot get it
+    from here, and has to compare the devices itself.
+    """
+    stated = {modes[device] for device in bridges if device in modes}
+    stated.discard(StpMode.NONE)
+    return stated.pop() if len(stated) == 1 else StpMode.NONE
+
+
+def _bridge_priorities(
+    bridges: Sequence[DeviceId],
+    vlan_id: VlanId,
+    priorities: Mapping[DeviceId, BridgePriorities],
+) -> tuple[tuple[DeviceId, int], ...]:
+    """Every member bridge whose priority in this VLAN the configs settle.
+
+    A device that is absent from the result is a device whose priority is
+    unknown, and that is the entire contract: nothing downstream may read the
+    result as the whole election unless it holds every member of the segment.
+    """
+    return tuple(
+        sorted(
+            (device, priority)
+            for device in set(bridges)
+            if (priority := priorities.get(device, BridgePriorities()).of(vlan_id))
+            is not None
+        )
     )
+
+
+def _root_bridge(
+    bridges: Sequence[DeviceId], stated: Sequence[tuple[DeviceId, int]]
+) -> DeviceId | None:
+    """The bridge that wins this segment's root election, where one does.
+
+    Three things have to hold, and the missing one is the usual reason this is
+    None. Every member's priority has to be known, or a bridge nobody read could
+    be lower than all of them. The lowest has to be unique, because the tie
+    below it is broken by MAC address and a configuration does not contain one.
+    And there has to be a member at all.
+
+    Still only a claim about the devices in the directory. A broadcast domain
+    reaches as far as the cabling does, and a bridge whose config was not
+    collected is not in `bridges` — which is the same exposure every rule over a
+    partial capture carries, and is why the finding that reads this says which
+    bridges it compared.
+    """
+    if not bridges or len(stated) != len(set(bridges)):
+        return None
+    lowest = min(priority for _device, priority in stated)
+    winners = [device for device, priority in stated if priority == lowest]
+    return winners[0] if len(winners) == 1 else None
 
 
 def _members_by_vlan(devices: Sequence[Device]) -> dict[VlanId, list[InterfaceRef]]:

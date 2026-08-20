@@ -587,45 +587,48 @@ them. It changes nothing about the findings and appends a summary underneath the
 ```
 $ uv run cassandra check /tmp/tutorial --coverage
 ...
-coverage: 31 of 48 checks had something to look at. 17 were inert:
+coverage: 32 of 51 checks had something to look at. 19 were inert:
   bfd-multiplier-of-one (no BFD timers in these configs)
   dampening-exceeds-sla (no dampening profile in these configs)
   fhrp-hold-under-peer-hello (no FHRP timers in these configs sets hold time)
-  and 14 more — `--coverage full` lists every check and what it was missing
+  and 16 more — `--coverage full` lists every check and what it was missing
 ```
 
 The findings above the summary are the ones section 2 already printed; they are trimmed here.
 
-Seventeen of forty-eight checks never ran on this corpus, and none of them ran because a *fact*
+Nineteen of fifty-one checks never ran on this corpus, and none of them ran because a *fact*
 was absent, not because a device was clean. Nothing in these configs sets a BFD timer, an OSPF
-hello, a BGP or spanning-tree timer, an MTU, a native VLAN or a dampening profile, so every check
+hello, a BGP or spanning-tree timer, a bridge priority, an MTU, a native VLAN or a dampening
+profile, so every check
 that reads one of those had nothing to decide. `--coverage full` names each one and what it was
 missing:
 
 ```
 $ uv run cassandra check /tmp/tutorial --coverage full
 ...
-INERT  bfd-detection-below-floor          no BFD timers in these configs
-INERT  bfd-multiplier-of-one              no BFD timers in these configs
-INERT  bfd-no-clients                     no BFD timers in these configs
-INERT  bfd-no-faster-than-igp             no IGP hello timers in these configs
-                                          no BFD timers in these configs
-INERT  bgp-hold-under-three-keepalives    no BGP timers in these configs
-INERT  bgp-stalepath-under-restart-time   no BGP timers in these configs
-INERT  bgp-timers-disagree                no BGP timers in these configs
-INERT  dampening-exceeds-sla              no dampening profile in these configs
-INERT  dampening-never-suppresses         no dampening profile in these configs
-INERT  fhrp-hold-under-peer-hello         no FHRP timers in these configs sets hold time
-INERT  fhrp-hold-under-three-hellos       no FHRP timers in these configs sets hold time
-INERT  igp-dead-not-a-multiple-of-hello   no IGP hello timers in these configs
-INERT  igp-dead-under-three-hellos        no IGP hello timers in these configs
-INERT  mtu-mismatch                       no interface in these configs sets MTU bytes
-INERT  ospf-timers-disagree               no IGP hello timers in these configs
-INERT  stp-timers-outside-the-standard    no STP timers in these configs
-INERT  trunk-native-vlan-not-allowed      no interface in these configs sets native VLAN
+INERT  bfd-detection-below-floor           no BFD timers in these configs
+INERT  bfd-multiplier-of-one               no BFD timers in these configs
+INERT  bfd-no-clients                      no BFD timers in these configs
+INERT  bfd-no-faster-than-igp              no IGP hello timers in these configs
+                                           no BFD timers in these configs
+INERT  bgp-hold-under-three-keepalives     no BGP timers in these configs
+INERT  bgp-stalepath-under-restart-time    no BGP timers in these configs
+INERT  bgp-timers-disagree                 no BGP timers in these configs
+INERT  dampening-exceeds-sla               no dampening profile in these configs
+INERT  dampening-never-suppresses          no dampening profile in these configs
+INERT  fhrp-hold-under-peer-hello          no FHRP timers in these configs sets hold time
+INERT  fhrp-hold-under-three-hellos        no FHRP timers in these configs sets hold time
+INERT  igp-dead-not-a-multiple-of-hello    no IGP hello timers in these configs
+INERT  igp-dead-under-three-hellos         no IGP hello timers in these configs
+INERT  mtu-mismatch                        no interface in these configs sets MTU bytes
+INERT  ospf-timers-disagree                no IGP hello timers in these configs
+INERT  stp-mode-disagreement               no STP timers in these configs
+INERT  stp-root-is-not-the-gateway         no L2 segment in these configs sets root bridge
+INERT  stp-timers-outside-the-standard     no STP timers in these configs
+INERT  trunk-native-vlan-not-allowed       no interface in these configs sets native VLAN
 ```
 
-Trimmed: the thirty-one `ran` lines above these, and the summary repeated below them, are
+Trimmed: the thirty-two `ran` lines above these, and the summary repeated below them, are
 omitted. A `ran` line says either how many findings the check produced or `nothing to report`,
 which is the useful half — those are the checks that looked at your configs and were satisfied.
 

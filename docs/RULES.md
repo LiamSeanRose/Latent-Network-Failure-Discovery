@@ -50,12 +50,15 @@ breaks the build.
 | [`fhrp-priority-tie`](#fhrp-priority-tie) | facts | medium | Members sharing the top priority, so nothing decides the master. |
 | [`fhrp-track-ineffective`](#fhrp-track-ineffective) | facts | medium | A decrement too small to lose the election is tracking that does nothing. |
 | [`igp-dead-under-three-hellos`](#igp-dead-under-three-hellos) | facts | medium | A dead interval worth fewer than three hellos drops healthy adjacencies. |
+| [`stp-mode-disagreement`](#stp-mode-disagreement) | facts | medium | One broadcast domain bridged by two different spanning-tree protocols. |
+| [`stp-root-tie`](#stp-root-tie) | facts | medium | Two bridges configured to the same lowest priority, so neither is root. |
 | [`stp-timers-outside-the-standard`](#stp-timers-outside-the-standard) | facts | medium | Spanning-tree timers that the standard's own inequalities reject. |
 | [`svi-vlan-not-trunked`](#svi-vlan-not-trunked) | facts | medium | An addressed SVI for a VLAN no trunk on the device carries. |
 | [`trunk-native-vlan-not-allowed`](#trunk-native-vlan-not-allowed) | facts | medium | A trunk whose native VLAN is missing from its own allowed list. |
 | [`bgp-timers-disagree`](#bgp-timers-disagree) | facts | low | Two ends of a peering that asked for different session timing. |
 | [`fhrp-no-preempt-on-preferred`](#fhrp-no-preempt-on-preferred) | facts | low | The highest-priority member has preempt off, so it never takes back. |
 | [`igp-dead-not-a-multiple-of-hello`](#igp-dead-not-a-multiple-of-hello) | facts | low | A dead interval that is not a whole number of hellos wastes its remainder. |
+| [`stp-root-is-not-the-gateway`](#stp-root-is-not-the-gateway) | facts | low | The bridge that wins this VLAN's root election holds no address in it. |
 | [`trunk-vlan-dead`](#trunk-vlan-dead) | facts | low | A VLAN permitted on a trunk that no device in the topology terminates. |
 | [`l3-interface-isolated`](#l3-interface-isolated) | facts | info | An addressed interface on a subnet no other device shares. |
 | [`fhrp-divergence`](#fhrp-divergence) | timing | high | Two FHRP groups on the same device pair that stop agreeing who is master. |
@@ -1007,6 +1010,68 @@ Silent when only one of the two numbers is configured, because the ratio cannot 
 - The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
   `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
 
+### `stp-mode-disagreement`
+
+**medium** · `cassandra.facts.rules.stp_modes_disagree`
+
+One broadcast domain bridged by two different spanning-tree protocols.
+
+Two members of a segment state different modes — rapid-PVST on one and MST on the other is the pairing that happens, usually because a switch was added from a template written for a different part of the estate. The two do not exchange comparable BPDUs: an MST bridge advertises one tree for its whole region and a per-VLAN bridge advertises one per VLAN, so each computes a topology the other neither contributes to nor honours, and a port one of them decides to block is a port the other has already decided to forward.
+
+MEDIUM, and the reason it is not HIGH is the reason it survives review for years: with one path between the bridges nothing whatever happens. Both forward, there is no loop to break, and every counter is clean. It becomes a broadcast storm on the day a second path appears — a link added for redundancy, a patch lead put back in the wrong port, a bundle member that comes up alone — because the two bridges cannot agree which of the two paths to block. That is a loop on a broadcast domain, which takes a site down rather than a link, and whether this segment has that second path is exactly what needs `L1Link` and is therefore not something this tool knows. So it is reported as the latent condition it is, with the trigger stated.
+
+Silent about a device that states a mode and no spanning-tree timer. A mode reaches the Fact Pack attached to a timer record and nowhere else, so a bridge configured with `spanning-tree mode mst` and no timing of its own is one this rule can see the effect of — `L2Segment.stp_mode` falls back to "no one mode here" — and cannot name. Naming is the whole finding, so it stays quiet rather than reporting a disagreement between two devices it would have to leave unidentified.
+
+Silent about a bridge whose mode is `none`. A configuration that says `spanning-tree mode none` and one that says nothing about the mode at all reach the pack as the same value, and reporting a bridge as having spanning tree switched off on the strength of a line nobody wrote would be the guess this whole section is built to avoid. Two bridges in one segment where one is protecting a VLAN the other is not is a real defect and it is not decidable here.
+
+**Reports:** VLAN {…} is bridged by {…} at once
+
+**Detail:** {…}, and every one of them bridges VLAN {…}. The two protocols do not compare the same BPDUs, so each bridge computes a tree the other does not honour, and neither can be relied on to block the port the other is forwarding on
+
+**Remedy:** put every bridge in the broadcast domain in one mode before a second path between them exists
+
+**Stays silent when:**
+
+- The ordinary configuration, and the one the segment records as its own: `stp_mode` is the mode every member that states one agrees on.  
+  `test_facts_rules.py::test_one_mode_across_the_whole_segment_is_silent`
+- A mode reaches the Fact Pack attached to a timer record and nowhere else. The segment can see that its members do not agree — `stp_mode` falls back to NONE — and the rule cannot say which bridge runs which, so it says nothing rather than reporting a disagreement between two unidentified devices.  
+  `test_facts_rules.py::test_a_bridge_that_states_a_mode_and_no_timer_cannot_be_named`
+- `spanning-tree mode none` and an unwritten mode line arrive as one value, so a bridge that simply never said reads exactly like one with spanning tree switched off. Reporting either as the other is the guess this refuses.  
+  `test_facts_rules.py::test_a_bridge_with_no_mode_line_is_not_running_none`
+
+### `stp-root-tie`
+
+**medium** · `cassandra.facts.rules.stp_root_election_is_a_tie`
+
+Two bridges configured to the same lowest priority, so neither is root.
+
+A priority below the default is the operator writing down which bridge should be the root of this VLAN's tree, and here it has been written down twice. IEEE 802.1D then settles it on the bridge MAC address, so the root is whichever of the two was manufactured first — a fact about a purchase order rather than about the network — and every port that blocks in this broadcast domain blocks because of it.
+
+MEDIUM, on the same argument `fhrp-priority-tie` makes about an FHRP master. Nothing is down while the tie stands: the tree converges, traffic flows, and the topology is merely not the one that was drawn. What earns the finding is that it moves with no configuration change behind it — replace either bridge and the new chassis brings a new MAC address into the comparison — and the VLAN's forwarding path, its blocked ports and the timers that govern its reconvergence all move at once, on a day whose change record says "swapped a switch". Not HIGH, because the tie itself loses no traffic; not LOW, because it defeats a placement somebody chose and wrote down.
+
+Silent unless every bridge in the segment has a priority this tool read. A bridge whose priority was set by an MST instance or by a `root primary` macro is one the parser declines to guess at, and a bridge that might be lower than both of these is a bridge that makes the finding wrong.
+
+Silent when the shared lowest priority is the default one. Every bridge in a segment sitting on 32768 is a root nobody chose, which is real and is a different claim: it rests on reading an absence as a decision, one uncollected bridge with a priority makes it false, and whether an arbitrary root costs anything at all depends on there being a second path between the bridges — which needs the layer-1 data this tool refuses to invent.
+
+Silent, of course, when one bridge is strictly lowest, which is an election with a winner and the subject of `stp-root-is-not-the-gateway` instead.
+
+**Reports:** VLAN {…} has no chosen root bridge: {…} both hold priority {…}
+
+**Detail:** {…} bridges in VLAN {…} share the lowest bridge priority {…}, so the root is decided by whichever of them has the lower MAC address — which is not a thing anyone configured and not a thing this file records. The tree, the ports it blocks and the timers that govern its reconvergence all belong to whichever bridge wins, and they move to the other one the day either device is replaced
+
+**Remedy:** {…}
+
+**Stays silent when:**
+
+- The failure mode that would make this rule useless. `spanning-tree mst 0 priority 4096` sets a priority whose VLANs are in a block nothing parses, so acc1 might be lower than either of the two that are tied — and a bridge whose line went unread must not be counted as one sitting at the default.  
+  `test_facts_rules.py::test_a_priority_this_tool_did_not_read_leaves_the_election_open`
+- The other form of the same withdrawal. `root primary` lands on a value that depends on what the current root was advertising when it was typed, so the one thing that can be said is that this bridge is not at the default — which is exactly the inference the rest of the segment would have needed.  
+  `test_facts_rules.py::test_a_root_primary_macro_is_a_priority_and_not_a_number`
+- Every bridge on 32768 is a root nobody chose, which is real and is a different claim: it rests on reading an absence as a decision, and one uncollected bridge with a priority on it makes it false.  
+  `test_facts_rules.py::test_a_segment_where_nobody_chose_a_root_is_not_a_tie`
+- One bridge strictly lowest is a root that was chosen, which is the whole point of writing a priority down.  
+  `test_facts_rules.py::test_an_election_with_one_winner_is_not_a_tie`
+
 ### `stp-timers-outside-the-standard`
 
 **medium** · `cassandra.timing.timer_rules.stp_timers_break_the_standard_relationship`
@@ -1174,6 +1239,35 @@ Silent below three hellos, where the ratio itself is the defect and `igp-dead-un
   `test_timer_rules.py::test_an_aggressive_ratio_is_left_to_the_rule_about_ratios`
 - The site-14 configs are a working network apart from one preempt delay: the VRRP groups advertise every second and agree with each other, no interface carries BFD or per-interface OSPF timers, and no BGP process dampens anything. Every rule here is measuring something that corpus does correctly, so a finding on it would be a false positive rather than a discovery.  
   `test_timer_rules.py::test_the_shipped_corpus_trips_none_of_these_rules`
+
+### `stp-root-is-not-the-gateway`
+
+**low** · `cassandra.facts.rules.stp_root_holds_no_gateway`
+
+The bridge that wins this VLAN's root election holds no address in it.
+
+Somebody configured priorities here — an election with a single winner is one where at least one bridge was moved off the default — and the winner is a bridge with no SVI in the VLAN while another member of the segment has one. The tree for this VLAN is therefore built around a device that carries none of its routed traffic: every port that blocks does so to make the paths to *that* device loop-free, and the gateway's own links are as eligible to be blocked as anything else in the domain.
+
+LOW, and the boundary is worth stating precisely. Nothing is unreachable and nothing flaps: spanning tree converges, hosts resolve their gateway and reach it, and the cost is a path that is longer and less symmetric than the addressing implies, plus a reconvergence on every topology change computed around a device with no stake in the VLAN. How much longer that path is depends on the cabling, and `L1Link` is empty on purpose, so this does not say — reporting a hop count derived from an invented cable would be worth less than reporting nothing. What it does say is that the root and the gateway are different devices, which is the part somebody has to confirm was meant.
+
+Silent unless the election is settled: every bridge in the segment needs a priority this tool read, and one of them has to be strictly lowest. Two bridges tied at the lowest priority have no root to be in the wrong place, and that is `stp-root-tie`.
+
+Silent when the root bridge holds an SVI in the VLAN, which is the arrangement this rule exists to ask for, and silent when no member of the segment holds one — a VLAN with no gateway in the collection is either a pure layer-2 domain or one whose gateway was not collected, and neither is a root in the wrong place.
+
+**Reports:** the root bridge for VLAN {…} is {…}, which has no address in it
+
+**Detail:** {…} wins the root election for VLAN {…} on bridge priority, and terminates none of the VLAN's traffic; {…} {…}. The tree for this VLAN is built around {…}, so the ports that block are the ones that would have made a path to {…} a loop — the gateway's links among them — and every topology change in the VLAN reconverges around a device with no stake in it
+
+**Remedy:** give the gateway for VLAN {…} the lowest bridge priority in the segment, or confirm that the root belongs on {…} and that the gateway's uplinks are the ones meant to forward
+
+**Stays silent when:**
+
+- The rule exists to ask for this, so finding it is silence by definition.  
+  `test_facts_rules.py::test_a_root_that_holds_the_gateway_is_the_arrangement_asked_for`
+- A pure layer-2 domain, or one whose gateway was not collected. Neither is a root in the wrong place, and the second is the shape a partial directory takes — the missing device must not make the switches look misconfigured.  
+  `test_facts_rules.py::test_a_vlan_with_no_gateway_has_no_misplaced_root`
+- Two bridges on the lowest priority is `stp-root-tie`, and until the tie is broken there is no root whose placement could be reported.  
+  `test_facts_rules.py::test_a_tied_election_has_no_root_to_be_in_the_wrong_place`
 
 ### `trunk-vlan-dead`
 

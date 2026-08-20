@@ -179,6 +179,14 @@ _NUMBERED: Final = re.compile(
     r"(\d+(?:\s*(?:,|and|&|/)\s*\d+)*)",
     re.I,
 )
+# The address family a group runs, where a label carries one. `VRRP 14` and
+# `VRRP 14 IPv6` are two groups — `assemble_fhrp_groups` gives them separate ids
+# for that reason — and the number alone cannot tell them apart, so a run with
+# both produced two findings with one identity. A consumer keyed on it, which is
+# how code scanning establishes alert identity, saw one alert where the tool
+# found two; a baseline comparing them survived only by counting duplicates, and
+# would have named the wrong one fixed.
+_FAMILY: Final = re.compile(r"\b(?:vrrp|hsrp|glbp)\s+(\d+)\s+(ipv6|ipv4)\b", re.I)
 _QUOTED: Final = re.compile(r"'([\w.\-/]{1,64})'")
 _INTEGER: Final = re.compile(r"\d+")
 _TRAILING: Final = ".,;:/-"
@@ -195,6 +203,10 @@ def references(text: str) -> set[str]:
         f"#{number}"
         for match in _NUMBERED.finditer(text)
         for number in _INTEGER.findall(match.group(1))
+    }
+    found |= {
+        f"#{match.group(1)}-{match.group(2).casefold()}"
+        for match in _FAMILY.finditer(text)
     }
     found |= {match.group(1).casefold() for match in _QUOTED.finditer(text)}
     return {ref for ref in found if ref}

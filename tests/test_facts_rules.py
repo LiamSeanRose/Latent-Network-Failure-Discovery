@@ -15,7 +15,7 @@ from typing import Final
 import pytest
 
 from cassandra.factpack.builders import build_fact_pack
-from cassandra.factpack.schema import StaticFactPack
+from cassandra.factpack.schema import StaticFactPack, StpMode
 from cassandra.facts.rules import evaluate
 from cassandra.findings import Finding, Severity, Tier, locate
 from cassandra.timing.model import Event, EventKind, simulate
@@ -1843,5 +1843,313 @@ def test_the_shipped_corpora_hold_no_broadcast_domain_defects(corpus: Path) -> N
         "vlan-segment-split",
         "fhrp-members-in-different-segments",
         "subnet-spans-two-vlans",
+    ):
+        assert rule_id not in fired
+
+
+# --------------------------------------------------------------------------
+# Spanning tree
+#
+# The election these read is a comparison between bridges, so every fixture is
+# a whole segment rather than one config: what a bridge is running only means
+# something next to what the other bridges in its broadcast domain are.
+# --------------------------------------------------------------------------
+
+STP_BRIDGE: Final = """hostname {name}
+{stp}vlan 10
+interface Ethernet1
+   switchport mode trunk
+   switchport trunk allowed vlan 10
+interface Ethernet2
+   switchport mode trunk
+   switchport trunk allowed vlan 10
+{svi}"""
+
+STP_SVI: Final = """interface Vlan10
+   ip address 192.0.2.{host}/24
+"""
+
+# Enough spanning-tree timing to make a device state one, and correct by
+# 802.1D so `stp-timers-outside-the-standard` has nothing to say about a
+# fixture written for a different rule. The mode rule needs these: a mode
+# reaches the pack attached to a timer record and nowhere else.
+RAPID_PVST: Final = """spanning-tree mode rapid-pvst
+spanning-tree vlan 10 hello-time 2
+spanning-tree vlan 10 forward-time 15
+spanning-tree vlan 10 max-age 20
+"""
+
+MST: Final = """spanning-tree mode mst
+spanning-tree mst hello-time 2
+spanning-tree mst forward-time 15
+spanning-tree mst max-age 20
+"""
+
+
+def bridge(name: str, *, stp: str = "", host: int | None = None) -> str:
+    """One switch in VLAN 10's broadcast domain, with or without a gateway."""
+    return STP_BRIDGE.format(
+        name=name, stp=stp, svi="" if host is None else STP_SVI.format(host=host)
+    )
+
+
+def segment(tmp_path: Path, **bridges: str) -> StaticFactPack:
+    return pack_from(tmp_path, **bridges)
+
+
+def test_two_bridges_configured_to_the_same_lowest_priority(tmp_path: Path) -> None:
+    pack = segment(
+        tmp_path,
+        **{
+            "acc1": bridge("acc1"),
+            "agg-a": bridge("agg-a", stp="spanning-tree vlan 10 priority 8192\n"),
+            "agg-b": bridge("agg-b", stp="spanning-tree vlan 10 priority 8192\n"),
+        },
+    )
+    finding = _found(pack, "stp-root-tie")
+    assert finding.severity is Severity.MEDIUM
+    assert finding.device == "agg-a"
+    assert "agg-a and agg-b" in finding.title
+    assert "VLAN 10" in finding.title
+    assert "8192" in finding.title
+    # The whole election, not only the tied half: a reader has to be able to
+    # see that the bridge left at the default was compared and lost.
+    assert finding.evidence == (
+        "acc1 VLAN 10 bridge priority 32768",
+        "agg-a VLAN 10 bridge priority 8192",
+        "agg-b VLAN 10 bridge priority 8192",
+    )
+
+
+def test_a_tied_root_election_is_cited_at_the_vlan_it_is_about(
+    tmp_path: Path,
+) -> None:
+    """A finding has to send a reader to a line (PROJECT.md §5.4). The VLAN
+    declaration is the one stanza on the device that this finding is about —
+    the priority itself is a top-level line no `config_line` records."""
+    pack = segment(
+        tmp_path,
+        **{
+            "agg-a": bridge("agg-a", stp="spanning-tree vlan 10 priority 8192\n"),
+            "agg-b": bridge("agg-b", stp="spanning-tree vlan 10 priority 8192\n"),
+        },
+    )
+    finding = next(f for f in locate(evaluate(pack), pack) if f.rule == "stp-root-tie")
+    assert finding.source is not None
+    assert finding.source.file == "agg-a.cfg"
+    assert finding.source.line is not None
+
+
+def test_a_priority_this_tool_did_not_read_leaves_the_election_open(
+    tmp_path: Path,
+) -> None:
+    """The failure mode that would make this rule useless. `spanning-tree mst 0
+    priority 4096` sets a priority whose VLANs are in a block nothing parses, so
+    acc1 might be lower than either of the two that are tied — and a bridge
+    whose line went unread must not be counted as one sitting at the default."""
+    pack = segment(
+        tmp_path,
+        **{
+            "acc1": bridge("acc1", stp="spanning-tree mst 0 priority 4096\n"),
+            "agg-a": bridge("agg-a", stp="spanning-tree vlan 10 priority 8192\n"),
+            "agg-b": bridge("agg-b", stp="spanning-tree vlan 10 priority 8192\n"),
+        },
+    )
+    assert dict(pack.l2_segments[0].bridge_priorities) == {"agg-a": 8192, "agg-b": 8192}
+    assert "stp-root-tie" not in rules_fired(pack)
+
+
+def test_a_root_primary_macro_is_a_priority_and_not_a_number(tmp_path: Path) -> None:
+    """The other form of the same withdrawal. `root primary` lands on a value
+    that depends on what the current root was advertising when it was typed, so
+    the one thing that can be said is that this bridge is not at the default —
+    which is exactly the inference the rest of the segment would have needed."""
+    pack = segment(
+        tmp_path,
+        **{
+            "acc1": bridge("acc1", stp="spanning-tree vlan 10 root primary\n"),
+            "agg-a": bridge("agg-a", stp="spanning-tree vlan 10 priority 8192\n"),
+            "agg-b": bridge("agg-b", stp="spanning-tree vlan 10 priority 8192\n"),
+        },
+    )
+    assert "acc1" not in dict(pack.l2_segments[0].bridge_priorities)
+    assert "stp-root-tie" not in rules_fired(pack)
+
+
+def test_a_segment_where_nobody_chose_a_root_is_not_a_tie(tmp_path: Path) -> None:
+    """Every bridge on 32768 is a root nobody chose, which is real and is a
+    different claim: it rests on reading an absence as a decision, and one
+    uncollected bridge with a priority on it makes it false."""
+    pack = segment(
+        tmp_path, **{"acc1": bridge("acc1"), "agg-a": bridge("agg-a", host=2)}
+    )
+    assert dict(pack.l2_segments[0].bridge_priorities) == {
+        "acc1": 32768,
+        "agg-a": 32768,
+    }
+    assert "stp-root-tie" not in rules_fired(pack)
+
+
+def test_an_election_with_one_winner_is_not_a_tie(tmp_path: Path) -> None:
+    """One bridge strictly lowest is a root that was chosen, which is the whole
+    point of writing a priority down."""
+    pack = segment(
+        tmp_path,
+        **{
+            "agg-a": bridge(
+                "agg-a", stp="spanning-tree vlan 10 priority 4096\n", host=2
+            ),
+            "agg-b": bridge(
+                "agg-b", stp="spanning-tree vlan 10 priority 8192\n", host=3
+            ),
+        },
+    )
+    assert pack.l2_segments[0].root_bridge == "agg-a"
+    assert "stp-root-tie" not in rules_fired(pack)
+
+
+def test_the_root_bridge_holds_no_address_in_the_vlan(tmp_path: Path) -> None:
+    pack = segment(
+        tmp_path,
+        **{
+            "acc1": bridge("acc1", stp="spanning-tree vlan 10 priority 4096\n"),
+            "agg-a": bridge("agg-a", host=2),
+            "agg-b": bridge("agg-b", host=3),
+        },
+    )
+    finding = _found(pack, "stp-root-is-not-the-gateway")
+    assert finding.severity is Severity.LOW
+    assert finding.device == "acc1"
+    assert "VLAN 10" in finding.title
+    assert "acc1" in finding.title
+    assert "agg-a:Vlan10" in finding.detail
+    assert "acc1 VLAN 10 bridge priority 4096" in finding.evidence
+
+
+def test_a_root_that_holds_the_gateway_is_the_arrangement_asked_for(
+    tmp_path: Path,
+) -> None:
+    """The rule exists to ask for this, so finding it is silence by definition."""
+    pack = segment(
+        tmp_path,
+        **{
+            "acc1": bridge("acc1"),
+            "agg-a": bridge(
+                "agg-a", stp="spanning-tree vlan 10 priority 4096\n", host=2
+            ),
+        },
+    )
+    assert pack.l2_segments[0].root_bridge == "agg-a"
+    assert "stp-root-is-not-the-gateway" not in rules_fired(pack)
+
+
+def test_a_vlan_with_no_gateway_has_no_misplaced_root(tmp_path: Path) -> None:
+    """A pure layer-2 domain, or one whose gateway was not collected. Neither is
+    a root in the wrong place, and the second is the shape a partial directory
+    takes — the missing device must not make the switches look misconfigured."""
+    pack = segment(
+        tmp_path,
+        **{
+            "acc1": bridge("acc1", stp="spanning-tree vlan 10 priority 4096\n"),
+            "acc2": bridge("acc2"),
+        },
+    )
+    assert pack.l2_segments[0].root_bridge == "acc1"
+    assert "stp-root-is-not-the-gateway" not in rules_fired(pack)
+
+
+def test_a_tied_election_has_no_root_to_be_in_the_wrong_place(
+    tmp_path: Path,
+) -> None:
+    """Two bridges on the lowest priority is `stp-root-tie`, and until the tie
+    is broken there is no root whose placement could be reported."""
+    pack = segment(
+        tmp_path,
+        **{
+            "acc1": bridge("acc1", stp="spanning-tree vlan 10 priority 4096\n"),
+            "acc2": bridge("acc2", stp="spanning-tree vlan 10 priority 4096\n"),
+            "agg-a": bridge("agg-a", host=2),
+        },
+    )
+    assert pack.l2_segments[0].root_bridge is None
+    assert "stp-root-is-not-the-gateway" not in rules_fired(pack)
+
+
+def test_two_spanning_tree_modes_in_one_broadcast_domain(tmp_path: Path) -> None:
+    pack = segment(
+        tmp_path,
+        **{"agg-a": bridge("agg-a", stp=MST), "agg-b": bridge("agg-b", stp=RAPID_PVST)},
+    )
+    finding = _found(pack, "stp-mode-disagreement")
+    assert finding.severity is Severity.MEDIUM
+    assert "VLAN 10" in finding.title
+    assert "mst" in finding.title and "rapid-pvst" in finding.title
+    assert finding.trigger is not None
+    assert finding.evidence == (
+        "agg-a spanning-tree mode mst",
+        "agg-b spanning-tree mode rapid-pvst",
+    )
+
+
+def test_one_mode_across_the_whole_segment_is_silent(tmp_path: Path) -> None:
+    """The ordinary configuration, and the one the segment records as its own:
+    `stp_mode` is the mode every member that states one agrees on."""
+    pack = segment(
+        tmp_path,
+        **{
+            "agg-a": bridge("agg-a", stp=RAPID_PVST),
+            "agg-b": bridge("agg-b", stp=RAPID_PVST),
+        },
+    )
+    assert pack.l2_segments[0].stp_mode is StpMode.RAPID_PVST
+    assert "stp-mode-disagreement" not in rules_fired(pack)
+
+
+def test_a_bridge_that_states_a_mode_and_no_timer_cannot_be_named(
+    tmp_path: Path,
+) -> None:
+    """A mode reaches the Fact Pack attached to a timer record and nowhere else.
+    The segment can see that its members do not agree — `stp_mode` falls back to
+    NONE — and the rule cannot say which bridge runs which, so it says nothing
+    rather than reporting a disagreement between two unidentified devices."""
+    pack = segment(
+        tmp_path,
+        **{
+            "agg-a": bridge("agg-a", stp="spanning-tree mode mst\n"),
+            "agg-b": bridge("agg-b", stp=RAPID_PVST),
+        },
+    )
+    assert pack.l2_segments[0].stp_mode is StpMode.NONE
+    assert "stp-mode-disagreement" not in rules_fired(pack)
+
+
+def test_a_bridge_with_no_mode_line_is_not_running_none(tmp_path: Path) -> None:
+    """`spanning-tree mode none` and an unwritten mode line arrive as one value,
+    so a bridge that simply never said reads exactly like one with spanning tree
+    switched off. Reporting either as the other is the guess this refuses."""
+    quiet = """spanning-tree hello-time 2
+spanning-tree forward-time 15
+spanning-tree max-age 20
+"""
+    pack = segment(
+        tmp_path,
+        **{"agg-a": bridge("agg-a", stp=quiet), "agg-b": bridge("agg-b", stp=MST)},
+    )
+    assert pack.l2_segments[0].stp_mode is StpMode.MST
+    assert "stp-mode-disagreement" not in rules_fired(pack)
+
+
+@pytest.mark.parametrize("corpus", SHIPPED, ids=lambda path: path.parent.name)
+def test_the_shipped_corpora_hold_no_root_election_defects(corpus: Path) -> None:
+    """Not one configuration in this repository states a bridge priority or a
+    spanning-tree mode, so every bridge in every segment sits at the default,
+    no election has a winner and none of these rules has anything to report.
+    A finding here would mean one of them had inferred a decision from silence."""
+    pack, _ = build_fact_pack(corpus)
+    fired = rules_fired(pack)
+    for rule_id in (
+        "stp-root-tie",
+        "stp-root-is-not-the-gateway",
+        "stp-mode-disagreement",
     ):
         assert rule_id not in fired

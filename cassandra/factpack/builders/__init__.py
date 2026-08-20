@@ -42,6 +42,7 @@ from cassandra.factpack.schema import (
     IgpHelloTimers,
     Interface,
     StaticFactPack,
+    StpMode,
     StpTimers,
     TimerInventory,
     Vlan,
@@ -199,6 +200,11 @@ def build_fact_pack(
     dampening: list[DampeningProfile] = []
     bgp_timers: list[BgpTimers] = []
     stp_timers: list[StpTimers] = []
+    # Bridge priorities are not timers and never enter the timer inventory:
+    # they are only meaningful against the other bridges in a broadcast domain,
+    # so they go to `topology` and reach the pack on the segment they decide.
+    bridge_priorities: dict[str, topology.BridgePriorities] = {}
+    stp_modes: dict[str, StpMode] = {}
     vlans: list[Vlan] = []
     bgp: list[BgpProcess] = []
     unparsed: dict[str, tuple[str, ...]] = {}
@@ -235,6 +241,10 @@ def build_fact_pack(
         dampening.extend(getattr(parsed, "dampening", ()))
         bgp_timers.extend(getattr(parsed, "bgp_timers", ()))
         stp_timers.extend(getattr(parsed, "stp", ()))
+        bridge_priorities[parsed.device.id] = topology.BridgePriorities(
+            stated=parsed.stp_priorities, complete=parsed.stp_priorities_complete
+        )
+        stp_modes[parsed.device.id] = parsed.stp_mode
         vlans.extend(parsed.vlans)
         bgp.extend(getattr(parsed, "bgp", ()))
         unparsed[parsed.device.id] = parsed.unparsed_lines
@@ -253,7 +263,12 @@ def build_fact_pack(
         ),
         devices=tuple(devices),
         vlans=tuple(vlans),
-        **topology.derive(devices, vlans),
+        **topology.derive(
+            devices,
+            vlans,
+            stp_modes=stp_modes,
+            bridge_priorities=bridge_priorities,
+        ),
         bgp=tuple(bgp),
         # Assembly lives with the parsers because it is a parsing concern: a
         # group's identity includes its address family, and only the record the

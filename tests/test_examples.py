@@ -275,12 +275,12 @@ def test_the_two_oscillations_differ_in_trigger_and_in_remedy() -> None:
     assert a.remedy != b.remedy
 
 
-def test_seventeen_of_forty_eight_checks_are_inert_on_this_corpus() -> None:
+def test_nineteen_of_fifty_one_checks_are_inert_on_this_corpus() -> None:
     """Section 8 quotes both numbers and names what the inert ones wanted."""
     pack, _ = build_fact_pack(CORPUS)
     assessed = coverage.assess(pack)
-    assert len(assessed) == 48
-    assert len(coverage.inert(assessed)) == 17
+    assert len(assessed) == 51
+    assert len(coverage.inert(assessed)) == 19
     # Nothing here configures BFD, so every check that reads a BFD timer is
     # inert for that reason and not because a device happened to be clean.
     inert = {c.rule: c.reason for c in coverage.inert(assessed)}

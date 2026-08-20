@@ -692,7 +692,7 @@ def _report_coverage(
     """Say which checks had something to look at, after saying what they found.
 
     After, because the findings are what the user came for. The coverage line is
-    the caveat on them — thirty of forty-eight checks inert is a different result
+    the caveat on them — thirty of fifty-one checks inert is a different result
     from a clean run, and it is not visible in a report that says nothing.
 
     Goes to stderr alongside the JSON, so a pipeline parsing the findings is not

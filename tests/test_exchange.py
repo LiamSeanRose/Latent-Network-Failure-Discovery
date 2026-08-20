@@ -29,7 +29,10 @@ from cassandra.findings import Finding, Severity, SourceRef, Tier, locate, rank
 from cassandra.timing import sequences, timer_rules
 
 CORPUS: Final = Path(__file__).resolve().parents[1] / "examples" / "two-site"
-FINGERPRINT: Final = "cassandraFindingIdentity/v1"
+# Read from the module rather than written out. The key is versioned precisely
+# so it can move when the identity improves, and a test that pins the literal
+# turns every such improvement into a test edit that says nothing.
+FINGERPRINT: Final = exchange._FINGERPRINT_KEY
 
 
 @pytest.fixture(scope="module")
@@ -435,3 +438,57 @@ def test_sarif_carries_the_rule_set_beside_the_configs(
     properties = document["runs"][0]["properties"]
     assert properties["rulesDigest"] == baseline.rules_digest()
     assert properties["configDigest"] == "d" * 64
+
+
+def test_a_dual_stack_group_does_not_share_one_fingerprint() -> None:
+    """`VRRP 14` and `VRRP 14 IPv6` are two groups, and the identity said one.
+
+    `assemble_fhrp_groups` gives them separate ids precisely because they are
+    separate elections, and the number alone cannot tell them apart. A consumer
+    keyed on (ruleId, fingerprint) — which is how code scanning establishes
+    alert identity — saw one alert where the tool found two.
+
+    On `examples/xr-metro` rather than the corpus the rest of this file uses:
+    two-site has no dual-stack group, so the existing uniqueness assertion
+    passed on a fixture that could not contain the case.
+    """
+    dual_stack = Path(__file__).resolve().parents[1] / "examples" / "xr-metro"
+    pack, _ = build_fact_pack(dual_stack)
+    found = locate(
+        rules.evaluate(pack) + timer_rules.analyse(pack) + sequences.analyse(pack),
+        pack,
+    )
+    labels = {group.label for group in pack.fhrp_groups}
+    assert {"VRRP 14", "VRRP 14 IPv6"} <= labels, "the fixture lost the case"
+
+    document = json.loads(
+        exchange.sarif(found, base=str(dual_stack), pack_id="fp", digest="d" * 64)
+    )
+    keyed = [
+        (result["ruleId"], *result["partialFingerprints"].values())
+        for result in document["runs"][0]["results"]
+    ]
+    assert len(set(keyed)) == len(keyed), "two results would arrive as one alert"
+
+
+def test_the_family_qualifier_reaches_the_identity() -> None:
+    """Asserted on `identity` itself, not only through SARIF: the collision was
+    in the identity, and `check --since` reads the same function."""
+    from cassandra.baseline import identity
+
+    def sample(title: str) -> Finding:
+        return Finding(
+            rule="fhrp-oscillation",
+            tier=Tier.TIMING,
+            severity=Severity.MEDIUM,
+            device="metro-a",
+            title=title,
+            detail="",
+        )
+
+    v4 = identity(sample("VRRP 14 changes master 5 times"))
+    v6 = identity(sample("VRRP 14 IPv6 changes master 5 times"))
+    assert v4 != v6
+    # The IPv4 side keeps the references it had, so its fingerprint is stable
+    # across this change and only the qualified ones move.
+    assert set(v4[2]) <= set(v6[2])

@@ -37,6 +37,7 @@ from cassandra.factpack.builders.common import (
     is_out_of_scope,
     preempt_state,
     read_stp_line,
+    read_stp_priority,
     seconds_to_ms,
     stanzas,
     states_stp_timer,
@@ -174,11 +175,13 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
             hostname = m.group(1)
             continue
 
-        # Spanning tree is otherwise out of scope, and the timer lines are the
-        # only part of it any tier reads. The rest of the domain — port types,
-        # priorities, the MST region block and its body — is absorbed here rather
-        # than reported, exactly as it was when the whole domain was filtered.
+        # Spanning tree is otherwise out of scope, and the timers and the
+        # bridge priorities are the only parts of it any tier reads. The rest
+        # of the domain — port types, the MST region block and its body — is
+        # absorbed here rather than reported, exactly as it was when the whole
+        # domain was filtered.
         if header.startswith("spanning-tree "):
+            read_stp_priority(stp, header)
             if not read_stp_line(stp, header) and states_stp_timer(header):
                 # A line naming a timer this could not read is a timer the fact
                 # pack has lost, not one it chose not to keep.
@@ -293,6 +296,9 @@ def parse_device(text: str, *, device_id: str | None = None) -> EosDevice:
         bgp=tuple(bgp_processes),
         bgp_timers=tuple(bgp_timers),
         stp=stp_timer_records(hostname, stp),
+        stp_priorities=tuple(sorted(stp.priorities.items())),
+        stp_priorities_complete=not stp.priority_unreadable,
+        stp_mode=stp.mode,
         bfd=tuple(bfd),
         igp_hello=tuple(igp_hello),
         dampening=tuple(dampening),

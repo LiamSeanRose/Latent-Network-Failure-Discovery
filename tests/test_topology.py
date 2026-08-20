@@ -26,10 +26,17 @@ from cassandra.factpack.schema import (
     L2Segment,
     L3Adjacency,
     StaticFactPack,
+    StpMode,
     SwitchportMode,
     Vlan,
 )
-from cassandra.factpack.topology import Topology, derive, segment_id
+from cassandra.factpack.topology import (
+    DEFAULT_BRIDGE_PRIORITY,
+    BridgePriorities,
+    Topology,
+    derive,
+    segment_id,
+)
 
 CORPUS: Final = (
     Path(__file__).resolve().parents[1]
@@ -555,3 +562,163 @@ def test_a_segment_can_hold_members_no_adjacency_reaches() -> None:
     # And the addressing still says the two SVIs share a subnet, which is the
     # disagreement `vlan-segment-split` reports.
     assert l3_edges(topology) == {"192.0.2.0/24": ["a:Vlan14", "b:Vlan14"]}
+
+
+# --------------------------------------------------------------------------
+# The spanning-tree election
+#
+# The half of a segment that is a comparison rather than a list. Every test
+# here is really about one distinction: what a configuration states, and what
+# may be inferred from its silence.
+# --------------------------------------------------------------------------
+
+
+def switch(name: str) -> Device:
+    """A bridge with one trunk in VLAN 10 and no address anywhere."""
+    return box(name, port(name, "Ethernet1", mode=SwitchportMode.TRUNK, allowed=(10,)))
+
+
+def elect(
+    *,
+    priorities: dict[str, BridgePriorities] | None = None,
+    modes: dict[str, StpMode] | None = None,
+    names: tuple[str, ...] = ("acc1", "agg-a", "agg-b"),
+) -> L2Segment:
+    """VLAN 10's segment, derived over the spanning-tree facts given."""
+    topology = derive(
+        [switch(name) for name in names],
+        [Vlan(device=names[0], vlan_id=10)],
+        stp_modes=modes,
+        bridge_priorities=priorities,
+    )
+    (segment,) = topology["l2_segments"]
+    return segment
+
+
+def priced(**priorities: int) -> dict[str, BridgePriorities]:
+    """Bridges that each state a priority for VLAN 10, and nothing else."""
+    return {
+        device: BridgePriorities(stated=((10, priority),), complete=True)
+        for device, priority in priorities.items()
+    }
+
+
+def test_a_caller_with_no_spanning_tree_facts_gets_no_election() -> None:
+    """The derivation is optional in both arguments, and the alternative to an
+    election over invented numbers is no election at all."""
+    segment = elect()
+    assert segment.bridge_priorities == ()
+    assert segment.root_bridge is None
+    assert segment.stp_mode is StpMode.NONE
+
+
+def test_a_bridge_that_states_no_priority_runs_the_default() -> None:
+    """`complete` is the parser saying it accounted for every line on the device
+    that could set a priority, which is what makes the absence of one a fact
+    rather than a gap. 32768 is IEEE 802.1D-1998 table 8-4."""
+    segment = elect(
+        priorities={
+            "acc1": BridgePriorities(complete=True),
+            "agg-a": BridgePriorities(stated=((10, 4096),), complete=True),
+            "agg-b": BridgePriorities(complete=True),
+        }
+    )
+    assert dict(segment.bridge_priorities) == {
+        "acc1": DEFAULT_BRIDGE_PRIORITY,
+        "agg-a": 4096,
+        "agg-b": DEFAULT_BRIDGE_PRIORITY,
+    }
+    assert segment.root_bridge == "agg-a"
+
+
+def test_a_bridge_whose_priority_lines_were_not_all_read_states_nothing() -> None:
+    """The distinction the whole field exists for. A device the parser could not
+    account for is left out entirely rather than recorded at the default, which
+    is the difference between "nobody changed this" and "nobody read this"."""
+    segment = elect(
+        priorities={
+            "acc1": BridgePriorities(complete=False),
+            "agg-a": BridgePriorities(stated=((10, 4096),), complete=True),
+            "agg-b": BridgePriorities(complete=True),
+        }
+    )
+    assert "acc1" not in dict(segment.bridge_priorities)
+    # And with a member unaccounted for, the election is not this tool's to
+    # call: the bridge left out is exactly the one that could have won it.
+    assert segment.root_bridge is None
+
+
+def test_a_priority_stated_for_another_vlan_does_not_reach_this_one() -> None:
+    """A per-VLAN line is per VLAN. VLAN 20's priority says nothing about VLAN
+    10 beyond what the device-wide default already said."""
+    segment = elect(
+        priorities={
+            name: BridgePriorities(stated=((20, 4096),), complete=True)
+            for name in ("acc1", "agg-a", "agg-b")
+        }
+    )
+    assert set(dict(segment.bridge_priorities).values()) == {DEFAULT_BRIDGE_PRIORITY}
+
+
+def test_the_lowest_priority_wins_and_a_tie_names_nobody() -> None:
+    """The tie is broken on the bridge MAC address, which a configuration does
+    not contain — so the segment carries no root rather than the first of two."""
+    won = elect(
+        priorities=priced(acc1=32768, **{"agg-a": 8192}), names=("acc1", "agg-a")
+    )
+    assert won.root_bridge == "agg-a"
+    tied = elect(priorities=priced(acc1=32768, **{"agg-a": 8192, "agg-b": 8192}))
+    assert tied.root_bridge is None
+    assert dict(tied.bridge_priorities)["agg-b"] == 8192
+
+
+def test_the_mode_is_the_one_every_member_that_states_one_agrees_on() -> None:
+    segment = elect(
+        modes={"acc1": StpMode.RAPID_PVST, "agg-a": StpMode.RAPID_PVST},
+        names=("acc1", "agg-a"),
+    )
+    assert segment.stp_mode is StpMode.RAPID_PVST
+
+
+def test_members_that_disagree_about_the_mode_leave_the_segment_with_none() -> None:
+    """`StpMode` has one value for "no mode here" and none for "two", so a
+    disagreement and a silence arrive as the same value. That is the field's
+    shape, and a rule that needs to tell them apart has to compare the devices
+    itself."""
+    segment = elect(
+        modes={"acc1": StpMode.MST, "agg-a": StpMode.RAPID_PVST},
+        names=("acc1", "agg-a"),
+    )
+    assert segment.stp_mode is StpMode.NONE
+
+
+def test_a_member_stating_no_mode_does_not_contradict_one_that_does() -> None:
+    """A device with no `spanning-tree mode` line is running whatever it ships
+    with, and reads out of the parser as `NONE` — the same value as one with
+    spanning tree switched off. Neither reading may be treated as a mode, so
+    the member is passed over rather than counted as a second opinion."""
+    segment = elect(
+        modes={"acc1": StpMode.NONE, "agg-a": StpMode.MST}, names=("acc1", "agg-a")
+    )
+    assert segment.stp_mode is StpMode.MST
+
+
+def test_a_bridge_outside_the_segment_is_not_in_its_election() -> None:
+    """A priority is only ever compared against the bridges in the same
+    broadcast domain: VLAN 10's election does not include a switch that has no
+    interface in VLAN 10, whatever it states."""
+    devices = [
+        switch("agg-a"),
+        box(
+            "agg-b",
+            port("agg-b", "Ethernet1", mode=SwitchportMode.TRUNK, allowed=(20,)),
+        ),
+    ]
+    topology = derive(
+        devices,
+        [Vlan(device="agg-a", vlan_id=10), Vlan(device="agg-b", vlan_id=20)],
+        bridge_priorities=priced(**{"agg-a": 32768, "agg-b": 4096}),
+    )
+    vlan10 = next(s for s in topology["l2_segments"] if s.vlan_id == 10)
+    assert dict(vlan10.bridge_priorities) == {"agg-a": DEFAULT_BRIDGE_PRIORITY}
+    assert vlan10.root_bridge == "agg-a"

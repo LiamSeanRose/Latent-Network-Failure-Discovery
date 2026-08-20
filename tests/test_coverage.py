@@ -8,6 +8,7 @@ input must say so, rather than passing quietly and being counted as reassurance.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from pathlib import Path
 from typing import Final
@@ -19,6 +20,8 @@ from cassandra.catalogue import catalogue
 from cassandra.cli import main
 from cassandra.factpack.builders import build_fact_pack
 from cassandra.factpack.schema import (
+    Device,
+    DeviceRole,
     FhrpGroup,
     FhrpProtocol,
     Interface,
@@ -749,3 +752,43 @@ def test_every_unread_fact_reads_as_a_sentence(
         assert "  " not in fact.label
         assert not fact.label.startswith("on ")
         assert " a L" not in fact.label, f"{fact.label}: an initialism took 'a'"
+
+
+def test_nothing_is_reported_as_stated_that_no_config_states(
+    corpus: StaticFactPack, whole_corpus: coverage.Assessment
+) -> None:
+    """There are more shapes of nothing than there look to be.
+
+    The first version of this asked only whether a value was `None`, `""` or
+    `False`. An empty tuple passed — `Device.vrfs` is `()` on every device in
+    every shipped corpus and was reported as "stated by 6 records" — and so did
+    a sentinel enum, because `StpMode.NONE` and `DeviceRole.UNKNOWN` are truthy
+    strings meaning "not determined". A report whose whole subject is what the
+    configs contain was naming four things they do not.
+    """
+    unread = {fact.path for fact in whole_corpus.unread}
+    assert not any(device.vrfs for device in corpus.devices)
+    assert "devices[].vrfs" not in unread
+    assert "devices[].role" not in unread, "a sentinel enum is not a statement"
+
+
+def test_a_field_left_at_its_declared_default_is_not_a_statement() -> None:
+    """Decided by the field's own default rather than by truthiness, because a
+    sentinel is indistinguishable from a real value by looking at it."""
+    field = next(f for f in dataclasses.fields(Device) if f.name == "role")
+    stated = next(role for role in DeviceRole if role is not field.default)
+    assert coverage._states_something(field, stated)
+    assert not coverage._states_something(field, field.default)
+
+    vrfs = next(f for f in dataclasses.fields(Device) if f.name == "vrfs")
+    assert not coverage._states_something(vrfs, ())
+    assert coverage._states_something(vrfs, ("mgmt",))
+
+
+def test_a_stated_zero_is_still_a_statement() -> None:
+    """`0` is a real answer to how many of something there are, and the integer
+    fields here default to `None` rather than to it — so the guard has to reject
+    empty containers without rejecting a falsy number."""
+    field = next(f for f in dataclasses.fields(Interface) if f.name == "mtu_bytes")
+    assert coverage._states_something(field, 0)
+    assert not coverage._states_something(field, None)
