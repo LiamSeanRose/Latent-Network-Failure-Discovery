@@ -382,28 +382,41 @@ def svi_vlan_missing_from_every_trunk(pack: StaticFactPack) -> Iterator[Finding]
     Only checked on devices that have at least one trunk. A device with none is
     not carrying VLANs anywhere, which is a different thing entirely.
 
-    Silent where an access port on the device sits in the VLAN. Whatever is
-    plugged into it is in that broadcast domain, so "the VLAN reaches no
-    neighbour" is not something this can say — the far end may be a host, and it
-    may be the other gateway on a cable somebody ran between two access ports.
-    That case was reported for a while, in a sentence asserting isolation that
-    the configuration contradicted.
+    Silent where an access port on the device sits in the VLAN, and where a
+    subinterface tags it. Whatever is plugged into an access port is in that
+    broadcast domain, so "the VLAN reaches no neighbour" is not something this
+    can say — the far end may be a host, and it may be the other gateway on a
+    cable somebody ran between two access ports. A subinterface puts the VLAN on
+    the wire with no switchport involved at all. Both cases were reported for a
+    while, in a sentence asserting isolation the configuration contradicted.
 
     It says nothing about whether the neighbour behind the trunk carries the
     VLAN either: one trunk on this device permitting it is enough to silence
     the rule, because pruning at the far end is a different defect.
     """
     for device in pack.devices:
-        trunks = [i for i in device.interfaces if i.allowed_vlans]
+        # A trunk that states `allowed vlan none` is a trunk, and one carrying
+        # nothing on purpose is exactly the shape this rule is about — it was
+        # excluded for having an empty list, which made writing `none` turn the
+        # check off.
+        trunks = [
+            i for i in device.interfaces if i.allowed_vlans or i.trunk_allowed_stated
+        ]
         if not trunks:
             continue
         carried = {vlan for trunk in trunks for vlan in trunk.allowed_vlans}
+        # Every other way this device puts the VLAN on a wire. An access port
+        # reaches whatever is plugged into it; a subinterface tags the VLAN off
+        # the box with no switchport involved, so a trunk list says nothing
+        # about it. Either makes "the VLAN reaches no neighbour" untrue.
         reaching = {
             i.access_vlan
             for i in device.interfaces
             if i.admin_enabled
             and i.access_vlan
             and i.switchport_mode is not SwitchportMode.TRUNK
+        } | {
+            i.dot1q_vlan for i in device.interfaces if i.admin_enabled and i.dot1q_vlan
         }
         for interface in device.interfaces:
             if not interface.name.startswith("Vlan"):
@@ -1373,7 +1386,13 @@ def access_vlan_leaves_on_no_trunk(pack: StaticFactPack) -> Iterator[Finding]:
                 terminated.setdefault(interface.access_vlan, set()).add(device.id)
 
     for device in pack.devices:
-        trunks = [i for i in device.interfaces if i.allowed_vlans]
+        # A trunk that states `allowed vlan none` is a trunk, and one carrying
+        # nothing on purpose is exactly the shape this rule is about — it was
+        # excluded for having an empty list, which made writing `none` turn the
+        # check off.
+        trunks = [
+            i for i in device.interfaces if i.allowed_vlans or i.trunk_allowed_stated
+        ]
         if not trunks:
             continue
         carried = {vlan for trunk in trunks for vlan in trunk.allowed_vlans}
@@ -1724,6 +1743,10 @@ def _vlan_cannot_leave(device: Device, vlan_id: VlanId) -> bool:
       such a trunk, and an empty `allowed_vlans` in the fact pack is equally
       consistent with a construct no parser read;
       `trunk-native-vlan-not-allowed` declines to read it for the same reason.
+      `switchport trunk allowed vlan none` is *not* that case and must not be
+      confused with it: it permits nothing on purpose, `trunk_allowed_stated`
+      is what tells the two apart, and reading the deliberate one as unknown
+      made the strictly worse configuration produce strictly fewer findings.
     * A subinterface tags the VLAN off the box. `dot1q_vlan` puts a VLAN on the
       wire with no switchport involved, so a trunk list says nothing about it.
     * An access port sits in the VLAN. Whatever is plugged into it is in that
@@ -1752,7 +1775,11 @@ def _vlan_cannot_leave(device: Device, vlan_id: VlanId) -> bool:
         for interface in live
         if interface.switchport_mode is SwitchportMode.TRUNK or interface.allowed_vlans
     ]
-    if not trunks or any(not trunk.allowed_vlans for trunk in trunks):
+    if not trunks:
+        return False
+    if any(
+        not trunk.allowed_vlans and not trunk.trunk_allowed_stated for trunk in trunks
+    ):
         return False
     if any(vlan_id in trunk.allowed_vlans for trunk in trunks):
         return False

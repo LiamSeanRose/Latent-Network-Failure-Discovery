@@ -239,6 +239,27 @@ class TrunkAllowed:
     unreadable: tuple[str, ...] = ()
 
 
+# `encapsulation dot1q 20`, and the Cisco spelling with the keyword repeated.
+# A subinterface tagging a VLAN puts it on the wire with no switchport involved,
+# so a trunk's allowed list says nothing about it — which is why the rules that
+# ask "can this VLAN leave the device" have to see it.
+_DOT1Q: Final = re.compile(r"encapsulation dot1[qQ](?: vlan)? (\d+)(?: native)?")
+
+
+def dot1q_vlan(line: str) -> VlanId | None:
+    """The VLAN one `encapsulation dot1q` line tags, or None if it is not one.
+
+    `second-dot1q` is deliberately unread: a Q-in-Q subinterface belongs to two
+    VLANs and this field holds one, so recording only the outer tag would state
+    something narrower than the truth on a stanza whose whole point is that
+    there are two.
+    """
+    if "second-dot1q" in line:
+        return None
+    match = _DOT1Q.fullmatch(line)
+    return int(match.group(1)) if match else None
+
+
 def trunk_allowed_vlans(
     current: tuple[VlanId, ...], argument: str
 ) -> TrunkAllowed | None:

@@ -8,7 +8,6 @@ that never fires and a rule set that always fires are equally useless.
 from __future__ import annotations
 
 import re
-from dataclasses import replace
 from pathlib import Path
 from typing import Final
 
@@ -1663,31 +1662,28 @@ def test_a_subinterface_tagging_the_vlan_off_the_box_is_not_a_split(
     tmp_path: Path,
 ) -> None:
     """A dot1q subinterface puts a VLAN on the wire with no switchport involved,
-    so the trunk lists do not describe every way the VLAN can leave. Written by
-    editing the fact pack because the dialect that populates `dot1q_vlan` names
-    its SVIs `BVI<n>`, which is placed in no segment — the guard is nonetheless
-    the one thing standing between this rule and a false positive on any parser
-    that learns subinterfaces."""
-    pack = broadcast_pair(tmp_path, b_allowed="10")
-    assert "vlan-segment-split" in rules_fired(pack)
-    tagged = replace(
-        pack,
-        devices=tuple(
-            device
-            if device.id != "agg-b"
-            else replace(
-                device,
-                interfaces=tuple(
-                    interface
-                    if interface.name != "Ethernet1"
-                    else replace(interface, dot1q_vlan=20)
-                    for interface in device.interfaces
-                ),
-            )
-            for device in pack.devices
-        ),
-    )
-    assert "vlan-segment-split" not in rules_fired(tagged)
+    so the trunk lists do not describe every way the VLAN can leave.
+
+    Built from configuration text rather than by editing the fact pack. It used
+    to do the latter, because the only dialect populating `dot1q_vlan` was
+    IOS-XR, whose SVIs are named `BVI<n>` and are placed in no segment — so the
+    guard could not be reached from any config this tool could read, and the
+    test asserting it supplied its own precondition. Both halves are fixed: the
+    three switching dialects read `encapsulation dot1q`, and this drives the
+    rule the way a user would.
+    """
+    split = broadcast_pair(tmp_path, b_allowed="10")
+    assert "vlan-segment-split" in rules_fired(split)
+
+    tagged = tmp_path / "tagged"
+    tagged.mkdir()
+    for device in ("agg-a", "agg-b"):
+        text = (tmp_path / f"{device}.cfg").read_text()
+        if device == "agg-b":
+            text += "interface Ethernet9\n   no switchport\n"
+            text += "interface Ethernet9.20\n   encapsulation dot1q 20\n"
+        (tagged / f"{device}.cfg").write_text(text)
+    assert "vlan-segment-split" not in rules_fired(build_fact_pack(tagged)[0])
 
 
 def test_a_group_whose_members_cannot_hear_each_other(tmp_path: Path) -> None:
@@ -2231,3 +2227,134 @@ def test_a_split_with_no_access_port_in_the_vlan_is_still_reported(
     pack, _ = build_fact_pack(tmp_path)
     fired = {finding.rule for finding in evaluate(pack)}
     assert "vlan-segment-split" in fired
+
+
+def test_a_trunk_permitting_nothing_on_purpose_is_not_a_trunk_nobody_read(
+    tmp_path: Path,
+) -> None:
+    """`switchport trunk allowed vlan none` is a decision. An absent line is not.
+
+    Both reached the pack as an empty `allowed_vlans`, and every consumer reads
+    an empty list as "this tool did not read the allowed list" — correctly, for
+    the absent case, because real hardware permits everything there. So writing
+    `none`, which is the strictly worse configuration, produced strictly fewer
+    findings: a device whose only uplink permits nothing turned two rules off.
+    """
+    pair = (
+        "hostname {name}\n"
+        "vlan 10,20\n"
+        "interface Ethernet1\n"
+        "   description uplink\n"
+        "   switchport mode trunk\n"
+        "   switchport trunk allowed vlan {allowed}\n"
+        "interface Vlan20\n"
+        "   ip address 192.0.2.{host}/24\n"
+    )
+    (tmp_path / "agg-a.cfg").write_text(pair.format(name="agg-a", allowed="10", host=2))
+    (tmp_path / "agg-b.cfg").write_text(
+        pair.format(name="agg-b", allowed="none", host=3)
+    )
+    pack, _ = build_fact_pack(tmp_path)
+
+    stated = {
+        interface.name: interface.trunk_allowed_stated
+        for device in pack.devices
+        if device.id == "agg-b"
+        for interface in device.interfaces
+    }
+    assert stated["Ethernet1"], "the parser lost the difference"
+
+    fired = {finding.rule for finding in evaluate(pack)}
+    assert "vlan-segment-split" in fired
+    assert "svi-vlan-not-trunked" in fired
+
+
+def test_a_trunk_with_no_allowed_line_is_still_unknown(tmp_path: Path) -> None:
+    """The other half, and the reason the flag exists rather than a truthiness
+    test: real hardware permits every VLAN on a trunk that states no list, so
+    an absent line has to keep meaning unknown."""
+    pair = (
+        "hostname {name}\n"
+        "vlan 10,20\n"
+        "interface Ethernet1\n"
+        "   description uplink\n"
+        "   switchport mode trunk\n"
+        "interface Vlan20\n"
+        "   ip address 192.0.2.{host}/24\n"
+    )
+    (tmp_path / "agg-a.cfg").write_text(pair.format(name="agg-a", host=2))
+    (tmp_path / "agg-b.cfg").write_text(pair.format(name="agg-b", host=3))
+    pack, _ = build_fact_pack(tmp_path)
+
+    assert not any(
+        interface.trunk_allowed_stated
+        for device in pack.devices
+        for interface in device.interfaces
+    )
+    fired = {finding.rule for finding in evaluate(pack)}
+    assert "vlan-segment-split" not in fired
+    assert "svi-vlan-not-trunked" not in fired
+
+
+def test_a_subinterface_tagging_the_vlan_is_read_from_config_text(
+    tmp_path: Path,
+) -> None:
+    """The escape hatch existed and no configuration could reach it.
+
+    `dot1q_vlan` was populated by one dialect, IOS-XR, which names its SVIs
+    `BVI<n>` — and the topology cannot place those as VLAN interfaces, so the
+    guard could never fire on a real pack. The only test asserting it supplied
+    its own precondition with `dataclasses.replace`, which is a test that cannot
+    fail. All three switching dialects read `encapsulation dot1q` now.
+    """
+    (tmp_path / "agg-a.cfg").write_text(
+        "hostname agg-a\nvlan 20\n"
+        "interface Ethernet1\n"
+        "   switchport mode trunk\n"
+        "   switchport trunk allowed vlan 20\n"
+        "interface Vlan20\n   ip address 192.0.2.2/24\n"
+    )
+    (tmp_path / "agg-b.cfg").write_text(
+        "hostname agg-b\nvlan 20\n"
+        "interface Ethernet1\n"
+        "   switchport mode trunk\n"
+        "   switchport trunk allowed vlan 10\n"
+        "interface Ethernet2\n   no switchport\n"
+        "interface Ethernet2.20\n"
+        "   encapsulation dot1q 20\n"
+        "interface Vlan20\n   ip address 192.0.2.3/24\n"
+    )
+    pack, unparsed = build_fact_pack(tmp_path)
+    tagged = {
+        interface.name: interface.dot1q_vlan
+        for device in pack.devices
+        for interface in device.interfaces
+    }
+    assert tagged["Ethernet2.20"] == 20
+    assert not any(unparsed.values()), "the encapsulation line must not go unread"
+
+    fired = {finding.rule for finding in evaluate(pack)}
+    assert "vlan-segment-split" not in fired
+    assert "svi-vlan-not-trunked" not in fired
+
+
+def test_a_stacked_vlan_subinterface_is_not_read_as_one_vlan(tmp_path: Path) -> None:
+    """A Q-in-Q subinterface belongs to two VLANs and the field holds one.
+
+    Recording only the outer tag would state something narrower than the truth
+    on the one stanza whose whole point is that there are two, so it is left
+    unread — and being unread, it is reported.
+    """
+    (tmp_path / "agg.cfg").write_text(
+        "hostname agg\nvlan 10,20\n"
+        "interface Ethernet2\n   no switchport\n"
+        "interface Ethernet2.10\n"
+        "   encapsulation dot1q 10 second-dot1q 20\n"
+    )
+    pack, unparsed = build_fact_pack(tmp_path)
+    assert all(
+        interface.dot1q_vlan is None
+        for device in pack.devices
+        for interface in device.interfaces
+    )
+    assert any("second-dot1q" in line for lines in unparsed.values() for line in lines)

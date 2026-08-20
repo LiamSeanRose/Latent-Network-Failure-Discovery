@@ -48,6 +48,7 @@ from cassandra.factpack.builders.common import (
     bgp_neighbors_from,
     bgp_timer_records,
     declared_vlans_from,
+    dot1q_vlan,
     fhrp_instance,
     interface_kind,
     ipv6_assignment,
@@ -485,6 +486,8 @@ def _parse_interface(
     access_vlan: int | None = None
     native_vlan: int | None = None
     allowed: tuple[int, ...] = ()
+    allowed_stated = False
+    tagged: int | None = None
     vrf: str | None = None
     lag_member_of: str | None = None
     version: int | None = None
@@ -544,6 +547,8 @@ def _parse_interface(
             mode = SwitchportMode.ACCESS
         elif line == "switchport mode trunk":
             mode = SwitchportMode.TRUNK
+        elif (vlan := dot1q_vlan(line)) is not None:
+            tagged = vlan
         elif line == "switchport mode access":
             mode = SwitchportMode.ACCESS
         elif m := re.fullmatch(r"switchport access vlan (\d+)", line):
@@ -559,6 +564,9 @@ def _parse_interface(
                 unparsed.append(line)
             else:
                 allowed = update.vlans
+                # Stated, even when it states nothing: `allowed vlan none` is a
+                # decision and an unread line is not.
+                allowed_stated = True
                 if update.unreadable:
                     # The line is reported rather than silently reduced: a trunk
                     # missing a VLAN this could not read looks exactly like a
@@ -599,6 +607,8 @@ def _parse_interface(
         switchport_mode=mode,
         access_vlan=access_vlan,
         allowed_vlans=allowed,
+        trunk_allowed_stated=allowed_stated,
+        dot1q_vlan=tagged,
         native_vlan=native_vlan,
         vrf=vrf,
         addresses=tuple(addresses),

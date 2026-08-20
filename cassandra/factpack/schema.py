@@ -224,6 +224,14 @@ class Interface:
     switchport_mode: SwitchportMode = SwitchportMode.NONE
     access_vlan: VlanId | None = None
     allowed_vlans: tuple[VlanId, ...] = ()
+    # Did a line on this interface state the allowed list at all? An empty
+    # `allowed_vlans` is otherwise two very different facts wearing one shape:
+    # `switchport trunk allowed vlan none`, which permits nothing on purpose,
+    # and no allowed line at all, where real hardware permits everything and
+    # this tool has read nothing. Every consumer treats the second as unknown,
+    # so without this flag the strictly worse configuration produced strictly
+    # fewer findings.
+    trunk_allowed_stated: bool = False
     native_vlan: VlanId | None = None
     vrf: VrfName | None = None
     addresses: tuple[IpAssignment, ...] = ()

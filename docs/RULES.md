@@ -721,10 +721,14 @@ Silent when only one device is addressed in the subnet, which is `l3-interface-i
   `test_facts_rules.py::test_a_shut_svi_is_not_a_stranded_half`
 - The finding is about a subnet with gateways on both sides of a divide. An SVI with no address is on neither side of anything.  
   `test_facts_rules.py::test_an_unaddressed_svi_is_not_a_stranded_half`
-- A dot1q subinterface puts a VLAN on the wire with no switchport involved, so the trunk lists do not describe every way the VLAN can leave. Written by editing the fact pack because the dialect that populates `dot1q_vlan` names its SVIs `BVI<n>`, which is placed in no segment — the guard is nonetheless the one thing standing between this rule and a false positive on any parser that learns subinterfaces.  
+- A dot1q subinterface puts a VLAN on the wire with no switchport involved, so the trunk lists do not describe every way the VLAN can leave. Built from configuration text rather than by editing the fact pack. It used to do the latter, because the only dialect populating `dot1q_vlan` was IOS-XR, whose SVIs are named `BVI<n>` and are placed in no segment — so the guard could not be reached from any config this tool could read, and the test asserting it supplied its own precondition. Both halves are fixed: the three switching dialects read `encapsulation dot1q`, and this drives the rule the way a user would.  
   `test_facts_rules.py::test_a_subinterface_tagging_the_vlan_off_the_box_is_not_a_split`
 - Two gateways joined by a cable between two access ports are one domain. The split rules counted only trunks and dot1q subinterfaces as ways a VLAN leaves a device, so this pair was reported HIGH as a subnet in two broadcast domains — in a sentence asserting a partition the configuration contradicts. `svi-vlan-not-trunked` said the same thing per device, in a sentence asserting isolation. A configuration does not say what is plugged into an access port. That is exactly why it has to make the answer unknown: it may be a host, and it may be the other gateway.  
   `test_facts_rules.py::test_an_access_port_in_the_vlan_is_a_way_out_of_the_device`
+- The other half, and the reason the flag exists rather than a truthiness test: real hardware permits every VLAN on a trunk that states no list, so an absent line has to keep meaning unknown.  
+  `test_facts_rules.py::test_a_trunk_with_no_allowed_line_is_still_unknown`
+- The escape hatch existed and no configuration could reach it. `dot1q_vlan` was populated by one dialect, IOS-XR, which names its SVIs `BVI<n>` — and the topology cannot place those as VLAN interfaces, so the guard could never fire on a real pack. The only test asserting it supplied its own precondition with `dataclasses.replace`, which is a test that cannot fail. All three switching dialects read `encapsulation dot1q` now.  
+  `test_facts_rules.py::test_a_subinterface_tagging_the_vlan_is_read_from_config_text`
 
 ### `bfd-detection-below-floor`
 
@@ -1117,7 +1121,7 @@ Both halves of that sentence are checked, not assumed. An SVI with no address ro
 
 Only checked on devices that have at least one trunk. A device with none is not carrying VLANs anywhere, which is a different thing entirely.
 
-Silent where an access port on the device sits in the VLAN. Whatever is plugged into it is in that broadcast domain, so "the VLAN reaches no neighbour" is not something this can say — the far end may be a host, and it may be the other gateway on a cable somebody ran between two access ports. That case was reported for a while, in a sentence asserting isolation that the configuration contradicted.
+Silent where an access port on the device sits in the VLAN, and where a subinterface tags it. Whatever is plugged into an access port is in that broadcast domain, so "the VLAN reaches no neighbour" is not something this can say — the far end may be a host, and it may be the other gateway on a cable somebody ran between two access ports. A subinterface puts the VLAN on the wire with no switchport involved at all. Both cases were reported for a while, in a sentence asserting isolation the configuration contradicted.
 
 It says nothing about whether the neighbour behind the trunk carries the VLAN either: one trunk on this device permitting it is enough to silence the rule, because pruning at the far end is a different defect.
 
@@ -1141,6 +1145,10 @@ It says nothing about whether the neighbour behind the trunk carries the VLAN ei
   `test_facts_rules.py::test_a_decommissioned_svi_left_shut_and_unaddressed`
 - Two gateways joined by a cable between two access ports are one domain. The split rules counted only trunks and dot1q subinterfaces as ways a VLAN leaves a device, so this pair was reported HIGH as a subnet in two broadcast domains — in a sentence asserting a partition the configuration contradicts. `svi-vlan-not-trunked` said the same thing per device, in a sentence asserting isolation. A configuration does not say what is plugged into an access port. That is exactly why it has to make the answer unknown: it may be a host, and it may be the other gateway.  
   `test_facts_rules.py::test_an_access_port_in_the_vlan_is_a_way_out_of_the_device`
+- The other half, and the reason the flag exists rather than a truthiness test: real hardware permits every VLAN on a trunk that states no list, so an absent line has to keep meaning unknown.  
+  `test_facts_rules.py::test_a_trunk_with_no_allowed_line_is_still_unknown`
+- The escape hatch existed and no configuration could reach it. `dot1q_vlan` was populated by one dialect, IOS-XR, which names its SVIs `BVI<n>` — and the topology cannot place those as VLAN interfaces, so the guard could never fire on a real pack. The only test asserting it supplied its own precondition with `dataclasses.replace`, which is a test that cannot fail. All three switching dialects read `encapsulation dot1q` now.  
+  `test_facts_rules.py::test_a_subinterface_tagging_the_vlan_is_read_from_config_text`
 
 ### `trunk-native-vlan-not-allowed`
 
