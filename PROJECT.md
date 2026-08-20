@@ -258,15 +258,31 @@ validation demonstrates the model already agrees with reality.
 
 ### 5.2 Config dialects
 
-Arista EOS and Cisco IOS are both supported, chosen automatically — by marker where one is
-decisive, otherwise by whichever parser accounts for more of the file. That second dialect
-confirmed the intended shape: the parser is the only dialect-aware component, and the FACTS and
-TIMING tiers needed no changes to work on HSRP.
+Arista EOS, Cisco IOS, Cisco NX-OS and Cisco IOS-XR are supported, chosen automatically — by
+marker where one is decisive, otherwise by which parser accounts for more of the file: fewest
+lines left unexplained first, then most facts actually read, because two parsers can both
+explain a file completely while only one of them took anything out of it.
 
-NX-OS and IOS-XR are the obvious next ones and are less similar. The open question is no longer
-whether to generalise but where the shared machinery stops paying: `common.py` currently holds
-stanza parsing, VLAN ranges and netmask conversion, and a third dialect is the test of whether
-that is the right seam.
+**The open question this section asked has been answered.** It asked where the shared machinery
+stops paying, and named a third dialect as the test. Four exist now and the answer held: the
+parser is the only dialect-aware component. Neither the FACTS tier nor the TIMING tier changed
+for HSRP, for NX-OS, or for IOS-XR — no rule, no timer record, no view.
+
+IOS-XR was the real test rather than the third one. It puts a first-hop redundancy group in a
+top-level `router vrrp` block that nests the interface under itself, four levels down and often
+a hundred lines from the interface stanza — where the other three write the group inside the
+interface that runs it. The Fact Pack absorbed that without knowing it had been built for it: a
+membership names its interface by name, and the subnet, the timer scope and the citation are all
+resolved from that name afterwards, so a group written at the far end of a file joins the same
+record as one written inside the interface.
+
+What it cost was one thing, and it is the honest answer to "where does the shared machinery stop
+paying": `stanzas` cuts a file once at column zero and strips what it finds, which cannot
+represent four levels of nesting, so `blocks` cuts at the shallowest indentation and hands the
+bodies back still indented, ready to be cut again. Everything else in `common.py` — VLAN ranges,
+netmask conversion, IPv6 addressing, the BGP peer vocabulary, group assembly — carried over
+unchanged. A fifth dialect is no longer a question about the seam; it is a question about
+whether anyone needs it.
 
 ### 5.3 Slice fidelity
 

@@ -38,6 +38,12 @@ Per `PROJECT.md` §4.2. The loop updates this every iteration.
 
 - [x] **Cisco NX-OS dialect.** Done 2026-08-18. Third dialect; same result.
 
+- [x] **PROJECT.md §5.2 amended.** Done 2026-08-20. The section asked where the shared parser
+      machinery stops paying and named a third dialect as the test. Four exist, the answer held —
+      the parser is the only dialect-aware component, and neither tier changed for any of them —
+      so the section records the answer rather than still asking. `docs/CONVENTIONS.md` §6 says
+      the spec is amendable by the work that shows it is out of date; this is that.
+
 - [x] **Cisco IOS-XR dialect.** Done 2026-08-19. Fourth, and the first genuinely different
       one: PROJECT.md §5.2 named it as the harder of the two obvious next ones, and it is the
       real test of the claim above. IOS-XR puts a first-hop redundancy group in a top-level
