@@ -94,7 +94,16 @@ def _candidate_intervals(pack: StaticFactPack) -> list[int]:
     for delay in delays:
         intervals.add(max(DEFAULT_ADVERT_MS, delay // 3))
         intervals.add(delay + SETTLE_MS)
-    return sorted(intervals)
+    # Intervals whose perturbation control has two sides come first. At the
+    # model's own sampling interval, twenty percent below it clamps back onto
+    # the nominal run and is dropped, so the control there is one-sided — and
+    # the enumeration stops at the first interval that produces an observation.
+    # Ordering by interval alone therefore reported the weakest available
+    # control for a defect that held at every interval tried, which is a true
+    # finding carrying worse evidence than it was entitled to.
+    # `_intervals_around` returns the nominal run first, so a one-sided control
+    # is a tuple of two, not of one.
+    return sorted(intervals, key=lambda ms: (len(_intervals_around(ms)) < 3, ms))
 
 
 def _flap_sequence(
@@ -320,16 +329,23 @@ def _divergence(
     Reported only past MIN_DIVERGENCE_MS. A brief divergence *during* an event is
     expected behaviour; one that persists long after recovery is the defect.
 
-    Reported only for two groups whose members sit on the same set of devices,
-    because that is the only shape the sentence below describes: sharing one
-    device is enough for one event to move both groups and not enough for them
-    to share a pair. `_divergence_pairs` argues the case.
+    Reported only for two groups with at least two devices in common, because
+    the sentence below names a device *pair*: sharing one device is enough for
+    one event to move both groups and not enough for them to share a pair. And
+    reported only where the split the timeline actually shows falls on the
+    devices they share — a group landing on a device the other has no member on
+    is a real divergence and not a disagreement between the two configurations,
+    so no consistency between their timers would prevent it.
+    `_divergence_pairs` and `_split_within` argue both halves.
 
     Silent unless the split survives the flap interval being twenty percent
     either side of the one that produced it — *both* sides, not one of them and
     the unperturbed run agreeing with itself — and silent if the same split is
     there with no events at all. Those two controls are what separate a property
-    of the configuration from an artifact of the model's sampling grid.
+    of the configuration from an artifact of the model's sampling grid. At the
+    model's own sampling interval only the upper perturbation is representable,
+    and the evidence line says so rather than counting a clamped copy of the
+    unperturbed run; the enumeration prefers an interval where both sides run.
 
     Two event classes reach this: a link flapping, and a device reloading. The
     reload is enumerated last and reports only pairs a flap cannot reach — a

@@ -365,6 +365,8 @@ Silent when the members are on SVIs for different VLAN ids, which is `subnet-spa
   `test_facts_rules.py::test_a_group_split_across_two_vlan_ids_is_the_other_rule`
 - A group with one member has nothing to be separated from, and `fhrp-no-redundancy` is what reports it.  
   `test_facts_rules.py::test_a_one_member_group_is_not_a_split_one`
+- Two gateways joined by a cable between two access ports are one domain. The split rules counted only trunks and dot1q subinterfaces as ways a VLAN leaves a device, so this pair was reported HIGH as a subnet in two broadcast domains — in a sentence asserting a partition the configuration contradicts. `svi-vlan-not-trunked` said the same thing per device, in a sentence asserting isolation. A configuration does not say what is plugged into an access port. That is exactly why it has to make the answer unknown: it may be a host, and it may be the other gateway.  
+  `test_facts_rules.py::test_an_access_port_in_the_vlan_is_a_way_out_of_the_device`
 
 ### `fhrp-members-on-different-subnets`
 
@@ -721,6 +723,8 @@ Silent when only one device is addressed in the subnet, which is `l3-interface-i
   `test_facts_rules.py::test_an_unaddressed_svi_is_not_a_stranded_half`
 - A dot1q subinterface puts a VLAN on the wire with no switchport involved, so the trunk lists do not describe every way the VLAN can leave. Written by editing the fact pack because the dialect that populates `dot1q_vlan` names its SVIs `BVI<n>`, which is placed in no segment — the guard is nonetheless the one thing standing between this rule and a false positive on any parser that learns subinterfaces.  
   `test_facts_rules.py::test_a_subinterface_tagging_the_vlan_off_the_box_is_not_a_split`
+- Two gateways joined by a cable between two access ports are one domain. The split rules counted only trunks and dot1q subinterfaces as ways a VLAN leaves a device, so this pair was reported HIGH as a subnet in two broadcast domains — in a sentence asserting a partition the configuration contradicts. `svi-vlan-not-trunked` said the same thing per device, in a sentence asserting isolation. A configuration does not say what is plugged into an access port. That is exactly why it has to make the answer unknown: it may be a host, and it may be the other gateway.  
+  `test_facts_rules.py::test_an_access_port_in_the_vlan_is_a_way_out_of_the_device`
 
 ### `bfd-detection-below-floor`
 
@@ -1113,6 +1117,8 @@ Both halves of that sentence are checked, not assumed. An SVI with no address ro
 
 Only checked on devices that have at least one trunk. A device with none is not carrying VLANs anywhere, which is a different thing entirely.
 
+Silent where an access port on the device sits in the VLAN. Whatever is plugged into it is in that broadcast domain, so "the VLAN reaches no neighbour" is not something this can say — the far end may be a host, and it may be the other gateway on a cable somebody ran between two access ports. That case was reported for a while, in a sentence asserting isolation that the configuration contradicted.
+
 It says nothing about whether the neighbour behind the trunk carries the VLAN either: one trunk on this device permitting it is enough to silence the rule, because pruning at the far end is a different defect.
 
 **Reports:** {…} has no trunk carrying VLAN {…}
@@ -1133,6 +1139,8 @@ It says nothing about whether the neighbour behind the trunk carries the VLAN ei
   `test_facts_rules.py::test_an_svi_left_shut`
 - Both preconditions absent at once, which is what decommissioning a VLAN halfway actually leaves behind: the SVI shut and stripped, the VLAN pulled from the trunk, and nothing wrong. It is the commonest shape in a real config that this rule must not fire on.  
   `test_facts_rules.py::test_a_decommissioned_svi_left_shut_and_unaddressed`
+- Two gateways joined by a cable between two access ports are one domain. The split rules counted only trunks and dot1q subinterfaces as ways a VLAN leaves a device, so this pair was reported HIGH as a subnet in two broadcast domains — in a sentence asserting a partition the configuration contradicts. `svi-vlan-not-trunked` said the same thing per device, in a sentence asserting isolation. A configuration does not say what is plugged into an access port. That is exactly why it has to make the answer unknown: it may be a host, and it may be the other gateway.  
+  `test_facts_rules.py::test_an_access_port_in_the_vlan_is_a_way_out_of_the_device`
 
 ### `trunk-native-vlan-not-allowed`
 
@@ -1331,9 +1339,9 @@ Both groups see one event. They answer it at different speeds — a different tr
 
 Reported only past MIN_DIVERGENCE_MS. A brief divergence *during* an event is expected behaviour; one that persists long after recovery is the defect.
 
-Reported only for two groups whose members sit on the same set of devices, because that is the only shape the sentence below describes: sharing one device is enough for one event to move both groups and not enough for them to share a pair. `_divergence_pairs` argues the case.
+Reported only for two groups with at least two devices in common, because the sentence below names a device *pair*: sharing one device is enough for one event to move both groups and not enough for them to share a pair. And reported only where the split the timeline actually shows falls on the devices they share — a group landing on a device the other has no member on is a real divergence and not a disagreement between the two configurations, so no consistency between their timers would prevent it. `_divergence_pairs` and `_split_within` argue both halves.
 
-Silent unless the split survives the flap interval being twenty percent either side of the one that produced it — *both* sides, not one of them and the unperturbed run agreeing with itself — and silent if the same split is there with no events at all. Those two controls are what separate a property of the configuration from an artifact of the model's sampling grid.
+Silent unless the split survives the flap interval being twenty percent either side of the one that produced it — *both* sides, not one of them and the unperturbed run agreeing with itself — and silent if the same split is there with no events at all. Those two controls are what separate a property of the configuration from an artifact of the model's sampling grid. At the model's own sampling interval only the upper perturbation is representable, and the evidence line says so rather than counting a clamped copy of the unperturbed run; the enumeration prefers an interval where both sides run.
 
 Two event classes reach this: a link flapping, and a device reloading. The reload is enumerated last and reports only pairs a flap cannot reach — a group that tracks nothing is untouched by a flap and moved by a reload, and only then does a difference in preempt delay between it and its neighbour show. A reload carries no interval, so the perturbation control does not apply to one and its evidence says so.
 

@@ -746,3 +746,57 @@ def test_the_evidence_does_not_call_the_unperturbed_run_a_perturbation() -> None
     for note in notes:
         assert f"of {sequences.PERTURBED_RUNS} runs" in note
         assert "not counting the unperturbed one" in note
+
+
+def test_an_interval_with_a_one_sided_control_is_tried_last() -> None:
+    """The enumeration stops at the first interval that shows the observable,
+    so the order decides which control the finding gets to carry.
+
+    Twenty percent below the model's own sampling interval clamps back onto the
+    nominal run, so that run is dropped and the control at one second has one
+    side. Sorting by interval alone put that one first — and a defect that held
+    at every interval tried was reported with the weakest evidence available,
+    which is a true finding carrying worse evidence than it was entitled to.
+    """
+    from datetime import UTC, datetime
+
+    from cassandra.factpack.schema import (
+        FactPackMeta,
+        FhrpProtocol,
+        FhrpTimers,
+        StaticFactPack,
+        TimerInventory,
+        TimerScope,
+    )
+    from cassandra.timing.sequences import _candidate_intervals, _intervals_around
+
+    def timer(delay_ms: int) -> FhrpTimers:
+        return FhrpTimers(
+            protocol=FhrpProtocol.VRRP,
+            scope=TimerScope(device="agg-a", interface="Vlan14", instance="14"),
+            preempt_delay_ms=delay_ms,
+        )
+
+    # A three-second preempt delay puts 1000ms into the candidate list, which is
+    # exactly the interval whose lower perturbation is unrepresentable.
+    pack = StaticFactPack(
+        meta=FactPackMeta(
+            fact_pack_id="fp",
+            schema_version=1,
+            config_digest="d",
+            source_snapshot="test",
+            generated_at=datetime(2026, 8, 20, tzinfo=UTC),
+            device_count=0,
+        ),
+        timers=TimerInventory(fhrp=(timer(3000), timer(60_000))),
+    )
+    order = _candidate_intervals(pack)
+    assert 1000 in order, "the fixture no longer exercises the case"
+
+    sides = [len(_intervals_around(ms)) - 1 for ms in order]
+    assert sides[-1] == 1, "the one-sided interval is not last"
+    assert all(count == 2 for count in sides[:-1])
+    # And within each group the order is still ascending, so the shortest
+    # interval that can carry a two-sided control is still preferred.
+    two_sided = [ms for ms in order if len(_intervals_around(ms)) > 2]
+    assert two_sided == sorted(two_sided)

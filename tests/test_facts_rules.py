@@ -2153,3 +2153,81 @@ def test_the_shipped_corpora_hold_no_root_election_defects(corpus: Path) -> None
         "stp-mode-disagreement",
     ):
         assert rule_id not in fired
+
+
+ACCESS_LINK_A: Final = """hostname agg-a
+vlan 10,20
+interface Ethernet1
+   switchport mode trunk
+   switchport trunk allowed vlan 10,20
+interface Ethernet3
+   description peer link to agg-b
+   switchport access vlan 20
+interface Vlan20
+   ip address 192.0.2.2/24
+"""
+
+ACCESS_LINK_B: Final = """hostname agg-b
+vlan 10,20
+interface Ethernet1
+   switchport mode trunk
+   switchport trunk allowed vlan 10
+interface Ethernet3
+   description peer link to agg-a
+   switchport access vlan 20
+interface Vlan20
+   ip address 192.0.2.3/24
+"""
+
+
+def test_an_access_port_in_the_vlan_is_a_way_out_of_the_device(
+    tmp_path: Path,
+) -> None:
+    """Two gateways joined by a cable between two access ports are one domain.
+
+    The split rules counted only trunks and dot1q subinterfaces as ways a VLAN
+    leaves a device, so this pair was reported HIGH as a subnet in two
+    broadcast domains — in a sentence asserting a partition the configuration
+    contradicts. `svi-vlan-not-trunked` said the same thing per device, in a
+    sentence asserting isolation.
+
+    A configuration does not say what is plugged into an access port. That is
+    exactly why it has to make the answer unknown: it may be a host, and it may
+    be the other gateway.
+    """
+    (tmp_path / "agg-a.cfg").write_text(ACCESS_LINK_A)
+    (tmp_path / "agg-b.cfg").write_text(ACCESS_LINK_B)
+    pack, _ = build_fact_pack(tmp_path)
+    fired = {finding.rule for finding in evaluate(pack)}
+
+    assert "vlan-segment-split" not in fired
+    assert "fhrp-members-in-different-segments" not in fired
+    assert "svi-vlan-not-trunked" not in fired
+    # Still says the true thing about the fixture: nothing terminates VLAN 10.
+    assert "trunk-vlan-dead" in fired
+
+
+def test_a_split_with_no_access_port_in_the_vlan_is_still_reported(
+    tmp_path: Path,
+) -> None:
+    """The guard is an unknown, not an off switch.
+
+    Remove the access ports and the same pair is a genuine partition again —
+    otherwise the fix above would have traded a false positive for a rule that
+    never fires.
+    """
+    without = ACCESS_LINK_A.replace(
+        "interface Ethernet3\n   description peer link to agg-b\n"
+        "   switchport access vlan 20\n",
+        "",
+    )
+    other = ACCESS_LINK_B.replace(
+        "interface Ethernet3\n   description peer link to agg-a\n"
+        "   switchport access vlan 20\n",
+        "",
+    )
+    (tmp_path / "agg-a.cfg").write_text(without)
+    (tmp_path / "agg-b.cfg").write_text(other)
+    pack, _ = build_fact_pack(tmp_path)
+    fired = {finding.rule for finding in evaluate(pack)}
+    assert "vlan-segment-split" in fired

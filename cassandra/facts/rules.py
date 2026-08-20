@@ -382,6 +382,13 @@ def svi_vlan_missing_from_every_trunk(pack: StaticFactPack) -> Iterator[Finding]
     Only checked on devices that have at least one trunk. A device with none is
     not carrying VLANs anywhere, which is a different thing entirely.
 
+    Silent where an access port on the device sits in the VLAN. Whatever is
+    plugged into it is in that broadcast domain, so "the VLAN reaches no
+    neighbour" is not something this can say — the far end may be a host, and it
+    may be the other gateway on a cable somebody ran between two access ports.
+    That case was reported for a while, in a sentence asserting isolation that
+    the configuration contradicted.
+
     It says nothing about whether the neighbour behind the trunk carries the
     VLAN either: one trunk on this device permitting it is enough to silence
     the rule, because pruning at the far end is a different defect.
@@ -391,6 +398,13 @@ def svi_vlan_missing_from_every_trunk(pack: StaticFactPack) -> Iterator[Finding]
         if not trunks:
             continue
         carried = {vlan for trunk in trunks for vlan in trunk.allowed_vlans}
+        reaching = {
+            i.access_vlan
+            for i in device.interfaces
+            if i.admin_enabled
+            and i.access_vlan
+            and i.switchport_mode is not SwitchportMode.TRUNK
+        }
         for interface in device.interfaces:
             if not interface.name.startswith("Vlan"):
                 continue
@@ -404,6 +418,8 @@ def svi_vlan_missing_from_every_trunk(pack: StaticFactPack) -> Iterator[Finding]
             if not interface.admin_enabled:
                 continue
             if int(vlan_id) in carried:
+                continue
+            if int(vlan_id) in reaching:
                 continue
             yield Finding(
                 rule="svi-vlan-not-trunked",
@@ -1699,7 +1715,7 @@ def _vlan_cannot_leave(device: Device, vlan_id: VlanId) -> bool:
     is almost never the whole network, and a rule that reads absence of evidence
     as evidence of absence reports every partial collection as a broken one.
 
-    Three things make the answer unknown rather than no:
+    Four things make the answer unknown rather than no:
 
     * The device has no trunk at all. It is then a router terminating a VLAN it
       does not bridge — the reading `svi-vlan-not-trunked` already gives that
@@ -1710,6 +1726,20 @@ def _vlan_cannot_leave(device: Device, vlan_id: VlanId) -> bool:
       `trunk-native-vlan-not-allowed` declines to read it for the same reason.
     * A subinterface tags the VLAN off the box. `dot1q_vlan` puts a VLAN on the
       wire with no switchport involved, so a trunk list says nothing about it.
+    * An access port sits in the VLAN. Whatever is plugged into it is in that
+      broadcast domain, and a configuration does not say what — a host, or the
+      other gateway on the far end of a cable somebody ran between two access
+      ports. This one was found by an adversarial read after the rule shipped:
+      two gateways joined by exactly that link were reported as a split subnet,
+      in a HIGH finding whose text asserted two broadcast domains where there
+      was one.
+
+      The cost of it is stated rather than hidden: a gateway with ordinary host
+      access ports in the VLAN now silences the rule, and that is the shape a
+      real split often has. It is the right trade because the alternative is a
+      finding that claims proof it does not have. `access-vlan-not-trunked`
+      still reports the per-port half of the same cut, which is decidable
+      without knowing what is on the other end of the cable.
 
     Counted over live interfaces only. A device whose every trunk is shut really
     cannot carry the VLAN, and this still declines to say so: everything about
@@ -1725,6 +1755,12 @@ def _vlan_cannot_leave(device: Device, vlan_id: VlanId) -> bool:
     if not trunks or any(not trunk.allowed_vlans for trunk in trunks):
         return False
     if any(vlan_id in trunk.allowed_vlans for trunk in trunks):
+        return False
+    if any(
+        interface.access_vlan == vlan_id
+        for interface in live
+        if interface.switchport_mode is not SwitchportMode.TRUNK
+    ):
         return False
     return not any(interface.dot1q_vlan == vlan_id for interface in live)
 
