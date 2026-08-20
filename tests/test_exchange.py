@@ -416,3 +416,22 @@ def test_junit_declares_an_encoding_that_covers_the_prose(
     document = exchange.junit(findings, assessed)
     assert document.startswith('<?xml version="1.0" encoding="UTF-8"?>\n')
     assert ET.fromstring(document.encode()).tag == "testsuites"
+
+
+def test_sarif_carries_the_rule_set_beside_the_configs(
+    findings: list[Finding],
+) -> None:
+    """Two uploads that differ mean nothing until a reader knows which moved.
+
+    The config digest answers half of it. Without the rule set, an upload made
+    after a check was added looks exactly like one made after the network
+    changed, and code scanning will show the new annotation either way.
+    """
+    from cassandra import baseline
+
+    document = json.loads(
+        exchange.sarif(findings, base=str(CORPUS), pack_id="fp_x", digest="d" * 64)
+    )
+    properties = document["runs"][0]["properties"]
+    assert properties["rulesDigest"] == baseline.rules_digest()
+    assert properties["configDigest"] == "d" * 64

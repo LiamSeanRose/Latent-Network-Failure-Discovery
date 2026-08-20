@@ -141,8 +141,14 @@ def sarif(
         ],
         # The identity of the configs these results describe, carried for the
         # same reason `report.as_json` carries it: a result that cannot be tied
-        # back to a revision is not evidence about anything.
-        "properties": {"factPackId": pack_id, "configDigest": digest},
+        # back to a revision is not evidence about anything. The rule set is
+        # here for the other half: two uploads that differ mean nothing until a
+        # reader knows whether the configs moved, the checks moved, or both.
+        "properties": {
+            "factPackId": pack_id,
+            "configDigest": digest,
+            "rulesDigest": baseline.rules_digest(),
+        },
     }
     return json.dumps(
         {"$schema": SARIF_SCHEMA, "version": SARIF_VERSION, "runs": [run]}, indent=2
