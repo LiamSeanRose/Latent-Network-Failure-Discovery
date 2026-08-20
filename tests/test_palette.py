@@ -88,17 +88,57 @@ def test_body_text_is_readable_on_every_surface(
 
 
 @pytest.mark.parametrize(("theme", "palette"), _themes())
-def test_the_quietest_ink_still_clears_the_large_text_bar(
+def test_the_quietest_ink_is_still_body_text(
     theme: str, palette: dict[str, str]
 ) -> None:
-    """--ink-3 is for captions, tick labels and hints.
+    """--ink-3 is for captions, tick labels, table headers and hints.
 
-    It is allowed to be quiet. It is not allowed to be unreadable, and the
-    figures use it at 10 and 11 pixels, which is not large text — so this is the
-    floor below which those labels would have to be recoloured, not the target.
+    It is allowed to be quiet. It is not allowed to be unreadable, and it is
+    held to the body bar rather than the large-text one because nothing wearing
+    it is large: section headings at 13px, filter labels at 12.5px, `.src` at
+    12.5px, figure ticks at 10px.
+
+    This test used to assert the large-text floor of 3.0, with a docstring
+    saying that was a floor and not a target. It was 3.2:1 against the darkest
+    surface, and a browser measuring every rendered text node found four hundred
+    and thirty elements below the body bar across four pages — nearly all of
+    them this one colour. A test that names the wrong bar passes while the thing
+    it guards is broken, which is worse than not having it.
     """
-    ratio = contrast(palette["--ink-3"], palette["--surface-1"])
-    assert ratio >= LARGE_MIN, f"{theme}: --ink-3 is {ratio:.2f}:1"
+    for surface in ("--surface-0", "--surface-1", "--surface-2"):
+        ratio = contrast(palette["--ink-3"], palette[surface])
+        assert ratio >= BODY_MIN, (
+            f"{theme}: --ink-3 on {surface} is {ratio:.2f}:1, below {BODY_MIN}"
+        )
+
+
+@pytest.mark.parametrize(("theme", "palette"), _themes())
+def test_text_on_a_filled_accent_is_readable(
+    theme: str, palette: dict[str, str]
+) -> None:
+    """The Analyse button and a chip that is on are text on the accent colour.
+
+    Both wore a hardcoded white. The light theme's accent is dark enough to
+    carry it at 5.4:1; the dark theme's is a light blue, where white is 2.5:1
+    and near-black is 7.9:1. One colour cannot serve both, which is why there is
+    a token for it — and why nothing here may go back to naming a literal.
+    """
+    ratio = contrast(palette["--on-accent"], palette["--accent"])
+    assert ratio >= BODY_MIN, (
+        f"{theme}: --on-accent on --accent is {ratio:.2f}:1, below {BODY_MIN}"
+    )
+
+
+def test_nothing_paints_text_on_the_accent_with_a_literal() -> None:
+    """The regression this pair replaced: a white that was right in one theme."""
+    from cassandra.style import STYLE
+
+    for rule in re.findall(r"[^{}]*\{[^{}]*\}", STYLE):
+        if "var(--accent)" not in rule or "background" not in rule:
+            continue
+        assert "color: #" not in rule and "color: white" not in rule, (
+            f"a literal text colour on an accent fill: {rule.strip()[:80]}"
+        )
 
 
 @pytest.mark.parametrize(("theme", "palette"), _themes())

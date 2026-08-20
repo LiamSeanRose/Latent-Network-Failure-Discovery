@@ -17,8 +17,13 @@ from typing import Final
 # selectors is a palette that drifts in three of them.
 LIGHT: Final = """
   --surface-0: #f6f6f4; --surface-1: #fcfcfb; --surface-2: #eeeeea;
-  --ink-1: #0b0b0b; --ink-2: #52514e; --ink-3: #85847e;
-  --line: #e0e0da; --accent: #256abf;
+  --ink-1: #0b0b0b; --ink-2: #52514e; --ink-3: #6b6a63;
+  --line: #e0e0da; --accent: #256abf; --on-accent: #ffffff;
+  /* --on-accent is the text on a filled accent — the Analyse button, a chip
+     that is on. It is per theme rather than one white, because the dark theme's
+     accent is a light blue and white on it is 2.5:1, which is not text. Near
+     black on the same fill is 7.9:1. The light theme's accent is dark enough to
+     carry white at 5.4:1, so that half is unchanged. */
   --s-critical: #d03b3b; --s-serious: #c84917; --s-warning: #9a6a03;
   --s-good: #0a860a;
   --series-1: #2873cf; --series-2: #c94714; --series-3: #14835c;
@@ -33,7 +38,7 @@ LIGHT: Final = """
 DARK: Final = """
   --surface-0: #131312; --surface-1: #1a1a19; --surface-2: #232320;
   --ink-1: #ffffff; --ink-2: #c3c2b7; --ink-3: #8e8d85;
-  --line: #2e2c28; --accent: #6da7ec;
+  --line: #2e2c28; --accent: #6da7ec; --on-accent: #0b0b0b;
   --s-critical: #d85b5b; --s-serious: #ec835a; --s-warning: #fab219;
   --s-good: #0ca30c;
   --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
@@ -351,7 +356,7 @@ input[type=text].since, input[type=text].query {
   flex: 0 1 11rem; font-size: .92rem; }
 button.go {
   padding: .62rem 1.15rem; border: 0; border-radius: 8px; background: var(--accent);
-  color: #fff; font: inherit; font-weight: 620; cursor: pointer;
+  color: var(--on-accent); font: inherit; font-weight: 620; cursor: pointer;
   transition: transform .12s ease, filter .18s;
 }
 button.go:hover { filter: brightness(1.08); transform: translateY(-1px); }
@@ -451,7 +456,8 @@ svg.topology .node { transform-box: fill-box; transform-origin: center; }
   transition: border-color .15s, color .15s, transform .12s; }
 .chip:hover { transform: translateY(-1px); color: var(--ink-1);
   border-color: var(--accent); }
-.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip.on { background: var(--accent); border-color: var(--accent);
+  color: var(--on-accent); }
 .chips .label { color: var(--ink-3); font-size: .78rem; text-transform: uppercase;
   letter-spacing: .05em; align-self: center; min-width: 4.2rem; }
 /* The node is the hit area, not just its label. */
