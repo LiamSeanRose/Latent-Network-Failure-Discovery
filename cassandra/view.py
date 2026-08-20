@@ -962,6 +962,10 @@ def page(
             '<p class="provenance">'
             f"fact pack <code>{html.escape(analysis.fact_pack_id)}</code> · "
             f"{devices} · digest <code>{html.escape(analysis.digest[:12])}</code> · "
+            # Which checks, beside which configs. A report that travels is read
+            # by somebody who has neither, and "these findings, from those
+            # configs" is half an answer without it.
+            f"checks <code>{html.escape(baseline.rules_digest())}</code> · "
             f'<a href="{href("/facts", config_dir, Filters())}">'
             "what was read</a> · "
             f'<a href="{href("/report.html", config_dir, filters)}">'

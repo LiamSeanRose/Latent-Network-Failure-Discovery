@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 
+from cassandra.baseline import rules_digest
 from cassandra.findings import Finding, Severity, Tier, rank
 
 _LABEL = {
@@ -75,11 +76,17 @@ def as_json(findings: list[Finding], *, pack_id: str = "", digest: str = "") -> 
     Carries the fact-pack identity alongside the findings, because a result
     without the digest of the configs that produced it cannot be tied back to a
     revision, which is what a pipeline needs it for.
+
+    And the rule set beside it, for the other half of the same question. Two
+    stored results that differ tell a reader nothing until they know whether the
+    configs moved, the checks moved, or both — and a document that records only
+    the first invites them to assume the network did it.
     """
     return json.dumps(
         {
             "fact_pack_id": pack_id,
             "config_digest": digest,
+            "rules_digest": rules_digest(),
             "counts": {
                 severity.value: sum(1 for f in findings if f.severity is severity)
                 for severity in Severity

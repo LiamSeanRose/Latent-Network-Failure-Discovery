@@ -650,7 +650,13 @@ def test_the_endpoint_and_the_command_line_answer_in_one_shape(
     consumer handles whichever it met first.
     """
     document = json.loads(view(base_url, mixed, path="/findings.json"))
-    assert sorted(document) == ["config_digest", "counts", "fact_pack_id", "findings"]
+    assert sorted(document) == [
+        "config_digest",
+        "counts",
+        "fact_pack_id",
+        "findings",
+        "rules_digest",
+    ]
     assert document["counts"]
 
     from cassandra.cli import main

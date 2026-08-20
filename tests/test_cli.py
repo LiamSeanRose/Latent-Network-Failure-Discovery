@@ -494,3 +494,23 @@ def test_check_defaults_to_the_directory_you_are_standing_in(
     monkeypatch.chdir(tmp_path / "configs")
     assert main(["check"]) == named
     assert capsys.readouterr().out == from_here
+
+
+def test_version_names_the_code_and_the_checks(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bug report needs both, and the second moves far more often.
+
+    This tool gained seven checks in a day while the package version stood
+    still, so "which version" is a question about the rule set at least as much
+    as about the code — and a report quoting only the package number would be
+    answering the less useful half.
+    """
+    from cassandra.baseline import rules_digest
+
+    with pytest.raises(SystemExit) as exited:
+        main(["--version"])
+    assert exited.value.code == 0
+    said = capsys.readouterr().out
+    assert said.startswith("cassandra ")
+    assert rules_digest() in said

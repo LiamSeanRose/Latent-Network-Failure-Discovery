@@ -12,11 +12,13 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import asdict
+from importlib import metadata
 from pathlib import Path
 from typing import Final
 
 from cassandra import baseline, coverage, exchange
 from cassandra.app import analyse, compare_with, serve
+from cassandra.baseline import rules_digest
 from cassandra.catalogue import catalogue, render_text
 from cassandra.factpack import discovery
 from cassandra.factpack.builders import build_fact_pack
@@ -331,6 +333,19 @@ def _orient(parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+def _installed_version() -> str:
+    """The distribution's version, or a marker that it is not installed.
+
+    Running from a clone with `python -m cassandra.cli` and no `uv sync` has no
+    metadata to read, and that is a real way people use this. Saying so is more
+    use in a bug report than a plausible number would be.
+    """
+    try:
+        return metadata.version("cassandra")
+    except metadata.PackageNotFoundError:  # pragma: no cover - needs no install
+        return "not installed (running from source)"
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Every command and flag, without running any of them.
 
@@ -342,6 +357,15 @@ def build_parser() -> argparse.ArgumentParser:
     commands names a directory that only exists on the reader's machine.
     """
     parser = argparse.ArgumentParser(prog="cassandra", description=__doc__)
+    # Both, because a bug report needs both. The rule set moves far more often
+    # than the package does — this tool gained seven checks in a day — and
+    # "which version" is a question about the checks at least as much as about
+    # the code.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"cassandra {_installed_version()} (checks {rules_digest()})",
+    )
     sub = parser.add_subparsers(dest="command")
     facts = sub.add_parser("facts", help="materialise a fact pack from configs")
     facts.add_argument(
