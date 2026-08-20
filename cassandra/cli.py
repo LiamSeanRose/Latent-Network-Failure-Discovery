@@ -331,7 +331,16 @@ def _orient(parser: argparse.ArgumentParser) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Every command and flag, without running any of them.
+
+    Split out of `main` so the argument surface can be inspected rather than
+    only exercised. `tests/test_spec_references.py` parses every command the
+    documentation tells a reader to type, which catches a renamed flag turning
+    three dozen quoted invocations into three dozen lies — the sort of drift
+    nothing else in the suite would notice, because almost every one of those
+    commands names a directory that only exists on the reader's machine.
+    """
     parser = argparse.ArgumentParser(prog="cassandra", description=__doc__)
     sub = parser.add_subparsers(dest="command")
     facts = sub.add_parser("facts", help="materialise a fact pack from configs")
@@ -460,6 +469,11 @@ def main(argv: list[str] | None = None) -> int:
     app.add_argument("--port", type=int, default=8765)
     app.add_argument("--host", default="127.0.0.1")
 
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
         return _orient(parser)
