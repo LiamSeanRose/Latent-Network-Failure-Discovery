@@ -12,6 +12,11 @@ uv sync
 uv run cassandra check examples/two-site
 ```
 
+Pointed at your own files, the shortest run is two words. `cassandra` on its own counts the
+configs in the directory you are standing in and prints the command; `cassandra check` with no
+directory checks that same directory. It never reads a directory you did not name — being run
+with no arguments is a question, and it answers it rather than guessing.
+
 If you would rather have `cassandra` on your PATH than type `uv run`:
 
 ```sh
@@ -72,9 +77,10 @@ stderr, so a piped run keeps it out of the findings.
 its path relative to the directory you pointed at, minus the config extension — `site-a/agg-a.cfg`
 becomes `site-a/agg-a`. Two files called `agg-a` under different site folders are two devices.
 
-**Dialects.** Arista EOS, Cisco IOS and NX-OS, chosen per file: by a decisive marker where there
-is one, otherwise by whichever parser leaves less of the file unexplained. You do not tell it
-which.
+**Dialects.** Arista EOS, Cisco IOS, NX-OS and IOS-XR, chosen per file and never by you: by a
+decisive marker where there is one, otherwise by which parser accounts for more of the file —
+fewest lines left unexplained first, and then most facts actually read, because two parsers can
+both explain a file completely while only one of them took anything out of it.
 
 So a working copy, a backup target or a directory of files pulled off devices with `scp` all work
 as they are. Nesting one directory per site or per role is fine and is the shape the walk was
@@ -134,6 +140,13 @@ so a run can tell you whether a difference came from the network or from the rul
 
 `--json` gives a pipeline the same findings with their rule ids, tiers, severities, devices,
 evidence and remedies, plus the fact pack id and config digest.
+
+`--format sarif` writes a SARIF 2.1.0 log for GitHub code scanning: upload it with
+`upload-sarif` and each finding becomes an annotation on the configuration line responsible for
+it. `--format junit` writes a test report of the rule set rather than of the findings — a rule
+that fired is a failure, one that ran and found nothing is a pass, and one that never had a fact
+to reason over is a skip carrying the reason. Both are byte-identical run to run, so the
+artifacts are worth diffing.
 
 ## One caveat worth reading once
 

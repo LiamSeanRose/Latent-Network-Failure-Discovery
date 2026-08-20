@@ -163,7 +163,7 @@ than from a line number, so editing something further up the file does not re-re
 `--format junit` writes a test report of the rule set rather than of the findings: a rule that
 fired is a failure carrying its evidence, a rule that ran and found nothing is a pass, and a
 rule that never had a fact to reason over is a skip with the reason it was inert. That last one
-is the point — it stops a green build with seventeen of forty-five checks starved of input from
+is the point — it stops a green build with seventeen of forty-eight checks starved of input from
 looking like a clean one.
 
 Neither offers an autofix. A suggested change is lines you type on a device, and sometimes not
