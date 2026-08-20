@@ -135,8 +135,11 @@ and blocks only on the severe ones. `--since baseline.json` prints only what is 
 recorded run and fails only on that, so an accepted backlog does not keep the build red — which
 is how a check gets switched off. Record the baseline with
 `cassandra check ./configs --save-baseline baseline.json` and commit it beside the configs;
-regenerate it deliberately when you accept a finding. The baseline stores a digest of the configs,
-so a run can tell you whether a difference came from the network or from the rules changing.
+regenerate it deliberately when you accept a finding. The baseline stores a digest of the configs
+*and* of the rule set that produced it, so a run can tell you which of the two moved: a new
+finding against byte-identical configs is a new check rather than a new defect, and one against a
+rule set that also changed may be either — and the footer says so instead of leaving you to
+assume the network did it.
 
 `--json` gives a pipeline the same findings with their rule ids, tiers, severities, devices,
 evidence and remedies, plus the fact pack id and config digest.

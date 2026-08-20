@@ -651,6 +651,23 @@ def _comparison_html(comparison: Comparison) -> str:
         )
     elif unchanged_configs:
         moved = "The configs are byte-identical to the baseline."
+    # The other half of it. "The configs changed" invites a reader to attribute
+    # every new finding to the network, which is wrong whenever the rule set
+    # moved underneath the baseline too — and it moves more often than anyone
+    # expects.
+    if diff.rules_changed:
+        moved += (
+            " <strong>The checks changed too</strong> "
+            f"({html.escape(diff.baseline_rules)} &rarr; "
+            f"{html.escape(diff.current_rules)}), so a finding below may be a "
+            "new check rather than a new defect."
+        )
+    elif not diff.rules_known:
+        moved += (
+            " This baseline predates the recording of which checks produced it, "
+            "so whether the rule set has moved is unknown."
+        )
+    moved = moved.strip()
     counts = (
         f'<span class="c new">{len(diff.new)} new</span>'
         f'<span class="c fixed">{len(diff.fixed)} fixed</span>'

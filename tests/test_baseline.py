@@ -19,9 +19,11 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
+from unittest import mock
 
 import pytest
 
+from cassandra import baseline
 from cassandra.baseline import (
     BaselineError,
     BaselineMismatch,
@@ -469,3 +471,90 @@ def test_a_diff_cites_the_same_source_a_check_does(tmp_path: Path) -> None:
     rendered = render_diff(diff, explain=True)
     assert f"source: {cited[0].source}" in rendered
     assert "source:" not in render_diff(diff), "not in the default view"
+
+
+# --------------------------------------------------------------------------
+# Which checks produced the baseline
+# --------------------------------------------------------------------------
+
+
+def test_a_baseline_records_the_rule_set_that_produced_it(tmp_path: Path) -> None:
+    """Without it the footer points the reader at exactly the wrong place.
+
+    A run against unchanged configs after the rule set has grown reports the new
+    findings as a regression, and says the configs did not change — so the
+    reader goes looking at a network that did nothing. This tool went from
+    forty-one checks to forty-eight in one day; anybody holding a morning
+    baseline would have spent the afternoon on it.
+    """
+    pack = pack_of("agg-a", "agg-b")
+    recorded = tmp_path / "base.json"
+    baseline.save([], pack, recorded)
+    document = json.loads(recorded.read_text())
+    assert document["rules_digest"] == baseline.rules_digest()
+    assert baseline.load(recorded).rules == baseline.rules_digest()
+
+
+def test_the_digest_moves_with_the_rule_set_and_not_with_its_prose() -> None:
+    """Built from each rule's id, tier and severity, and nothing else.
+
+    Those decide whether a finding appears and how it is ranked. Hashing the
+    source instead would move the digest on every reworded docstring, the
+    warning would fire on every commit, and a warning that always fires is one
+    nobody reads.
+    """
+    from cassandra import catalogue as catalogue_module
+
+    unchanged = baseline.rules_digest()
+    assert unchanged == baseline.rules_digest()
+    assert len(unchanged) == 12
+
+    real = catalogue_module.catalogue()
+    trimmed = real[:-1]
+    with mock.patch.object(catalogue_module, "catalogue", lambda: trimmed):
+        assert baseline.rules_digest() != unchanged
+
+    reworded = [replace(real[0], summary="something else entirely"), *real[1:]]
+    with mock.patch.object(catalogue_module, "catalogue", lambda: reworded):
+        assert baseline.rules_digest() == unchanged
+
+
+def test_a_diff_says_when_the_checks_moved(tmp_path: Path) -> None:
+    """ "The configs changed" invites a reader to blame the network for every new
+    finding, and that is wrong whenever the rule set moved underneath too."""
+    pack = pack_of("agg-a", "agg-b")
+    recorded = tmp_path / "base.json"
+    baseline.save([], pack, recorded)
+    before = baseline.load(recorded)
+
+    same = baseline.compare(before, baseline.snapshot([], pack))
+    assert same.rules_known
+    assert not same.rules_changed
+
+    moved = baseline.compare(
+        replace(before, rules="deadbeef1234"), baseline.snapshot([], pack)
+    )
+    assert moved.rules_changed
+    assert "checks also changed" in baseline.render_diff(moved, explain=False)
+
+
+def test_a_baseline_written_before_the_field_says_it_cannot_tell(
+    tmp_path: Path,
+) -> None:
+    """Absent is not "unchanged". A baseline written before this tool recorded
+    the rule set cannot testify about it, and claiming it did not move would be
+    inventing evidence — which is the failure this whole field exists to fix."""
+    pack = pack_of("agg-a", "agg-b")
+    recorded = tmp_path / "base.json"
+    baseline.save([], pack, recorded)
+    document = json.loads(recorded.read_text())
+    del document["rules_digest"]
+    document["version"] = 1
+    recorded.write_text(json.dumps(document))
+
+    old = baseline.load(recorded)
+    assert old.rules == ""
+    diff = baseline.compare(old, baseline.snapshot([], pack))
+    assert not diff.rules_known
+    assert not diff.rules_changed, "absent must not read as changed either"
+    assert "predates" in baseline.render_diff(diff, explain=False)

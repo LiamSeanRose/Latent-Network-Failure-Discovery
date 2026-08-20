@@ -69,6 +69,7 @@ is new.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -83,13 +84,42 @@ from cassandra.factpack.schema import StaticFactPack
 from cassandra.findings import Finding, Severity, Tier, rank
 
 FORMAT: Final = "cassandra-baseline"
-VERSION: Final = 1
+# 2 adds `rules_digest`. Reading a version-1 baseline still works and leaves the
+# digest empty, which the diff reports as "unknown" rather than as "unchanged" —
+# a baseline written before the field existed cannot testify about it.
+VERSION: Final = 2
 
 # Beside the configs it describes, not in the configs directory: a baseline is
 # about a network but it is not part of one.
 DEFAULT_PATH: Final = Path(".cassandra/baseline.json")
 
 type Identity = tuple[str, str, tuple[str, ...]]
+
+
+def rules_digest() -> str:
+    """A digest of the rule set, so a diff can tell the network from the tool.
+
+    A baseline records what the configs were. Without this it records nothing
+    about what was looking at them, so a run against unchanged configs after the
+    rule set has grown reports the new findings as a regression — with the
+    footer saying the configs did not change, which points the reader at exactly
+    the wrong place. This tool went from forty-one checks to forty-eight in one
+    day; anybody holding a baseline from the morning would have spent the
+    afternoon on their network.
+
+    Built from each rule's id, tier and severity, and nothing else. Those are
+    what decide whether a finding appears and how it is ranked. A reworded
+    docstring is not a different rule set, and hashing the source would say it
+    was — which would make the warning fire on every commit and therefore mean
+    nothing.
+    """
+    from cassandra.catalogue import catalogue
+
+    material = "\n".join(
+        f"{doc.id}\t{doc.tier.value}\t{doc.severity.value}"
+        for doc in sorted(catalogue(), key=lambda doc: doc.id)
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:12]
 
 
 class BaselineError(Exception):
@@ -202,6 +232,9 @@ class Snapshot:
     taken_at: datetime
     source: str
     findings: list[Finding]
+    # Empty for a baseline written before the field existed, which the diff
+    # reports as unknown rather than as unchanged.
+    rules: str = ""
 
 
 def snapshot(findings: list[Finding], pack: StaticFactPack) -> Snapshot:
@@ -211,6 +244,7 @@ def snapshot(findings: list[Finding], pack: StaticFactPack) -> Snapshot:
         taken_at=pack.meta.generated_at,
         source=pack.meta.source_snapshot,
         findings=rank(findings),
+        rules=rules_digest(),
     )
 
 
@@ -239,6 +273,7 @@ def save(findings: list[Finding], pack: StaticFactPack, path: Path) -> None:
         "format": FORMAT,
         "version": VERSION,
         "config_digest": taken.digest,
+        "rules_digest": taken.rules,
         "devices": list(taken.devices),
         "taken_at": taken.taken_at.isoformat(),
         "source": taken.source,
@@ -341,7 +376,11 @@ def load(path: Path) -> Snapshot:
             f"{path} is corrupt: 'taken_at' is not a timestamp"
         ) from None
 
+    recorded_rules = raw.get("rules_digest")
     return Snapshot(
+        # Absent on a version-1 baseline, and absent is the honest reading: it
+        # was written before this tool recorded what was doing the checking.
+        rules=recorded_rules if isinstance(recorded_rules, str) else "",
         digest=_string(raw, "config_digest", path),
         devices=tuple(devices),
         taken_at=taken_at,
@@ -372,6 +411,8 @@ class Diff:
     baseline_taken_at: datetime
     devices_added: tuple[str, ...] = ()
     devices_removed: tuple[str, ...] = ()
+    baseline_rules: str = ""
+    current_rules: str = ""
 
     @property
     def regressed(self) -> bool:
@@ -381,6 +422,20 @@ class Diff:
     @property
     def configs_changed(self) -> bool:
         return self.baseline_digest != self.current_digest
+
+    @property
+    def rules_changed(self) -> bool:
+        """Did the checks move between the two runs?
+
+        False when the baseline predates the field. That is not a claim that
+        they did not move — it is the absence of a claim, and `rules_known`
+        separates the two so nothing has to infer it from a blank string.
+        """
+        return bool(self.baseline_rules) and self.baseline_rules != self.current_rules
+
+    @property
+    def rules_known(self) -> bool:
+        return bool(self.baseline_rules)
 
 
 def _by_identity(findings: list[Finding]) -> dict[Identity, list[Finding]]:
@@ -428,6 +483,8 @@ def compare(baseline: Snapshot, current: Snapshot) -> Diff:
         baseline_taken_at=baseline.taken_at,
         devices_added=tuple(sorted(now_devices - before_devices)),
         devices_removed=tuple(sorted(before_devices - now_devices)),
+        baseline_rules=baseline.rules,
+        current_rules=current.rules,
     )
 
 
@@ -505,6 +562,21 @@ def render_diff(diff: Diff, *, explain: bool = False) -> str:
         # checks changing rather than from the network.
         lines.append("configs unchanged since baseline — any difference above is a")
         lines.append("change in the checks, not in the network")
+    # And the other half of that sentence. "Configs changed" invites the reader
+    # to attribute every new finding to the network, which is wrong whenever the
+    # rule set moved underneath the baseline as well — and the rule set moves
+    # far more often than anybody expects.
+    if diff.rules_changed:
+        lines.append(
+            f"the checks also changed since baseline "
+            f"({diff.baseline_rules} -> {diff.current_rules}); a finding here "
+            f"may be a new check rather than a new defect"
+        )
+    elif not diff.rules_known:
+        lines.append(
+            "this baseline predates the recording of which checks produced it, "
+            "so whether the rule set has moved is unknown"
+        )
     if diff.devices_added:
         lines.append("devices added: " + ", ".join(diff.devices_added))
     if diff.devices_removed:

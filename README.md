@@ -82,7 +82,10 @@ uv run cassandra report ./configs --since base.json -o out.html   # the same, sh
 ```
 
 `--since` answers the question a QA tool is actually for: *did I break something?* Only new
-findings fail it — the ones you already knew about were accepted when the baseline was taken.
+findings fail it — the ones you already knew about were accepted when the baseline was taken. A
+baseline records a digest of the configs *and* of the rule set that produced it, so a diff can
+say which of the two moved: a new finding against byte-identical configs is a new check, and one
+against a rule set that also grew may be either.
 The web view takes the same baseline: findings arrive tagged new or known, and the ones that
 stopped being reported get their own section, because a finding that disappeared may be a fix
 or may be a second defect masking the first.
