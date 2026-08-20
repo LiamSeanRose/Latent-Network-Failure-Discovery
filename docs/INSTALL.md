@@ -106,11 +106,24 @@ ordering claim in them.
 ## Check it works
 
 ```
+$ cassandra --version
+cassandra 0.1.0 (checks 6c86fda181aa)
+```
+
+Two numbers because both matter in a bug report, and the second moves far more often: it is a
+digest of the rule set, and it changes whenever a check is added, removed, or has its severity
+reconsidered.
+
+From a clone, there is a corpus to point it at:
+
+```
 $ uv run cassandra check examples/two-site
 ```
 
 The shipped example corpus has four deliberate defects; the run prints seven findings and exits
-1. [TUTORIAL.md](TUTORIAL.md) walks through what each of them means and how to fix it.
+1. [TUTORIAL.md](TUTORIAL.md) walks through what each of them means and how to fix it. Installed
+on your PATH without a clone there is no `examples/` on disk — point it at your own configs, or
+clone the repository beside them just for that directory.
 
 ## Running it in CI
 
