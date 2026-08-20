@@ -90,8 +90,12 @@ def _documented_commands() -> set[str]:
         for line in path.read_text().splitlines():
             # Only the lines that are commands. Prose says "cassandra facts"
             # mid-sentence, and a sentence is not an invocation.
-            stripped = line.strip()
-            if not stripped.startswith(("$ ", "uv run cassandra", "cassandra ")):
+            stripped = line.strip().removeprefix("- run: ")
+            # A shell prompt, or a runner. Not a bare `cassandra …`, because the
+            # output of `cassandra --version` starts with the word too and an
+            # extractor that cannot tell a command from its own output will
+            # cheerfully assert that the output parses.
+            if not stripped.startswith(("$ ", "uv run cassandra")):
                 continue
             match = _INVOCATION.search(stripped)
             if match and (invocation := match.group(1).strip().rstrip(".")):
@@ -134,10 +138,13 @@ def test_every_documented_command_still_parses(command: str) -> None:
     try:
         with contextlib.redirect_stderr(complaint):
             parser.parse_args(command.split())
-    except SystemExit:  # pragma: no cover - only on a real regression
-        pytest.fail(
-            f"the docs say `cassandra {command}` and the tool rejects it:\n"
-            f"{complaint.getvalue().strip()}"
-        )
+    except SystemExit as exited:
+        # `--version` and `-h` are actions that exit zero having done their job.
+        # Anything else is argparse refusing the command the docs printed.
+        if exited.code:  # pragma: no cover - only on a real regression
+            pytest.fail(
+                f"the docs say `cassandra {command}` and the tool rejects it:\n"
+                f"{complaint.getvalue().strip()}"
+            )
     except argparse.ArgumentError as exc:  # pragma: no cover
         pytest.fail(f"the docs say `cassandra {command}`: {exc}")
