@@ -8,6 +8,7 @@ against it; `report` writes the standalone HTML; `rules` prints the catalogue;
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import sys
 from collections.abc import Callable
@@ -613,10 +614,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if analysis.findings else 0
 
     if args.command == "rules":
-        if args.rule and args.rule not in {doc.id for doc in catalogue()}:
+        known = sorted(doc.id for doc in catalogue())
+        if args.rule and args.rule not in known:
             # A lookup that names no rule is the user mistyping, not a result.
+            # Answering a typo with the whole catalogue is technically complete
+            # and useless: nearly fifty entries, each several paragraphs, and
+            # the one they meant is a character away.
             print(f"no such rule: {args.rule}", file=sys.stderr)
-            print(render_text(), file=sys.stderr)
+            close = difflib.get_close_matches(args.rule, known, n=3, cutoff=0.6)
+            # A substring match catches what edit distance does not — somebody
+            # typing `bgp` or `preempt` is describing what they want rather than
+            # misspelling an id, and that is the commoner mistake.
+            partial = [name for name in known if args.rule.lower() in name]
+            suggestions = list(dict.fromkeys(close + partial))[:6]
+            if suggestions:
+                print("did you mean:", file=sys.stderr)
+                for name in suggestions:
+                    print(f"  {name}", file=sys.stderr)
+                print("`cassandra rules` lists every one.", file=sys.stderr)
+            else:
+                print(render_text(), file=sys.stderr)
             return 2
         print(render_text(args.rule))
         return 0

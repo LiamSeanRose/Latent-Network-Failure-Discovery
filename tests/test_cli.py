@@ -514,3 +514,37 @@ def test_version_names_the_code_and_the_checks(
     said = capsys.readouterr().out
     assert said.startswith("cassandra ")
     assert rules_digest() in said
+
+
+def test_a_mistyped_rule_id_gets_the_one_you_meant(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Answering a typo with the whole catalogue is complete and useless.
+
+    Nearly fifty entries, several paragraphs each, and the one they wanted is a
+    character away. Both kinds of near miss are covered: an edit-distance match
+    for a misspelling, and a substring match for somebody typing a topic rather
+    than an id — which is the commoner mistake.
+    """
+    assert main(["rules", "fhrp-divergance"]) == 2
+    misspelled = capsys.readouterr().err
+    assert "did you mean" in misspelled
+    assert "fhrp-divergence" in misspelled
+    # Not the whole catalogue: the point is that it stopped doing that.
+    assert "Stays silent when" not in misspelled
+
+    assert main(["rules", "bgp"]) == 2
+    topic = capsys.readouterr().err
+    assert "did you mean" in topic
+    assert topic.count("\n  bgp-") >= 2
+
+
+def test_a_rule_id_resembling_nothing_still_gets_the_catalogue(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Falling back matters: with no near match, the full list is the only
+    answer left, and printing nothing would be worse than printing too much."""
+    assert main(["rules", "zzzzzzzz"]) == 2
+    said = capsys.readouterr().err
+    assert "did you mean" not in said
+    assert "fhrp-divergence" in said
